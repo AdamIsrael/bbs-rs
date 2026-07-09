@@ -1,0 +1,9 @@
+/target
+
+# Runtime artifacts (generated on first run)
+/bbs.db
+/bbs.db-journal
+/bbs.db-wal
+/bbs.db-shm
+/host_key
+/host_key.pub

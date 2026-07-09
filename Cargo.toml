@@ -1,0 +1,19 @@
+[package]
+name = "sshtui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+argon2 = "0.5.3"
+clap = { version = "4.6.1", features = ["derive"] }
+crossterm = "0.29.0"
+getrandom = "0.4"
+ratatui = "0.30.2"
+russh = "0.62.2"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+thiserror = "2.0.18"
+time = "0.3.53"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

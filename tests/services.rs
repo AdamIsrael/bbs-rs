@@ -1,0 +1,136 @@
+//! Integration tests for the domain services against an in-memory SQLite DB.
+
+use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
+
+async fn setup() -> SqlitePool {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("run migrations");
+    sshtui::services::seed(&pool).await.expect("seed");
+    pool
+}
+
+#[tokio::test]
+async fn guest_seeded_and_login_works() {
+    let pool = setup().await;
+
+    let guest = sshtui::services::auth::verify_login(&pool, "guest", "guest")
+        .await
+        .unwrap();
+    assert!(guest.is_some(), "guest/guest should authenticate");
+    assert!(guest.unwrap().is_guest());
+
+    // Wrong password is rejected.
+    assert!(
+        sshtui::services::auth::verify_login(&pool, "guest", "nope")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn register_then_login() {
+    let pool = setup().await;
+
+    let user = sshtui::services::auth::register_user(&pool, "alice", "hunter2")
+        .await
+        .unwrap();
+    assert_eq!(user.role, "user");
+    assert!(!user.is_guest());
+
+    // Duplicate registration fails.
+    assert!(matches!(
+        sshtui::services::auth::register_user(&pool, "alice", "other").await,
+        Err(sshtui::error::AppError::UsernameTaken)
+    ));
+
+    // Registered user can log in.
+    assert!(
+        sshtui::services::auth::verify_login(&pool, "alice", "hunter2")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn guest_cannot_post_but_users_can() {
+    let pool = setup().await;
+    let boards = sshtui::services::boards::list_boards(&pool).await.unwrap();
+    assert!(!boards.is_empty(), "default boards should be seeded");
+    let board_id = boards[0].id;
+
+    let guest = sshtui::services::auth::find_user(&pool, "guest")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        sshtui::services::boards::post_message(&pool, board_id, &guest, "hi", "body").await,
+        Err(sshtui::error::AppError::GuestNotAllowed)
+    ));
+
+    let alice = sshtui::services::auth::register_user(&pool, "alice", "pw")
+        .await
+        .unwrap();
+    sshtui::services::boards::post_message(&pool, board_id, &alice, "Hello", "world")
+        .await
+        .unwrap();
+
+    let messages = sshtui::services::boards::list_messages(&pool, board_id)
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].subject, "Hello");
+    assert_eq!(messages[0].author_name, "alice");
+}
+
+#[tokio::test]
+async fn mail_send_read_and_guardrails() {
+    let pool = setup().await;
+    let alice = sshtui::services::auth::register_user(&pool, "alice", "pw")
+        .await
+        .unwrap();
+    let bob = sshtui::services::auth::register_user(&pool, "bob", "pw")
+        .await
+        .unwrap();
+
+    // Unknown recipient rejected.
+    assert!(matches!(
+        sshtui::services::mail::send_mail(&pool, &alice, "nobody", "s", "b").await,
+        Err(sshtui::error::AppError::RecipientNotFound)
+    ));
+
+    sshtui::services::mail::send_mail(&pool, &alice, "bob", "Hi Bob", "hello")
+        .await
+        .unwrap();
+
+    let inbox = sshtui::services::mail::inbox(&pool, bob.id).await.unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].from_name, "alice");
+    assert!(inbox[0].read_at.is_none(), "new mail is unread");
+
+    let read = sshtui::services::mail::read_mail(&pool, inbox[0].id, bob.id)
+        .await
+        .unwrap();
+    assert!(read.read_at.is_some(), "reading marks it read");
+}
+
+#[tokio::test]
+async fn presence_join_and_leave() {
+    let presence = sshtui::services::presence::Presence::new();
+    presence.join(1, "alice".into()).await;
+    presence.join(2, "bob".into()).await;
+    assert_eq!(presence.list().await.len(), 2);
+    presence.leave(1).await;
+    let online = presence.list().await;
+    assert_eq!(online.len(), 1);
+    assert_eq!(online[0].username, "bob");
+}
