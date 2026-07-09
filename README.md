@@ -68,3 +68,17 @@ implement the same contract and reuse the entire application unchanged.
 ```sh
 cargo test        # input-parser unit tests + service integration tests (in-memory SQLite)
 ```
+
+## Developer tasks
+
+Common tasks are wrapped in a [`justfile`](justfile) (run [`just`](https://github.com/casey/just)
+with no args to list them):
+
+```sh
+just run          # run the server
+just test         # run the test suite
+just lint         # clippy (warnings as errors) + rustfmt check
+just fmt          # format the source
+just reset-db     # delete bbs.db (recreated + seeded on next run)
+just ci           # fmt + lint + test
+```
