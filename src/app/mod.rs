@@ -59,14 +59,14 @@ pub struct App {
 
 impl App {
     pub fn new(pool: SqlitePool, presence: Presence, user: User, session_id: usize) -> Self {
-        let menu = vec![
-            MenuItem::Boards,
-            MenuItem::Mail,
-            MenuItem::Who,
-            MenuItem::Register,
-            MenuItem::Help,
-            MenuItem::Quit,
-        ];
+        // Registration is the newcomer bootstrap path — only the guest account,
+        // which is how newcomers get in, needs it. Registered users don't.
+        let mut menu = vec![MenuItem::Boards, MenuItem::Mail, MenuItem::Who];
+        if user.is_guest() {
+            menu.push(MenuItem::Register);
+        }
+        menu.push(MenuItem::Help);
+        menu.push(MenuItem::Quit);
         Self {
             pool,
             presence,
