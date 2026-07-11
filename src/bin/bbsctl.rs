@@ -1,4 +1,4 @@
-//! bbsctl — operator CLI for managing the sshtui BBS database.
+//! bbsctl — operator CLI for managing the bbs-rs database.
 //!
 //! Operates directly on the SQLite database (the same one the server uses), so
 //! it works even when the server is offline. Bans applied here reach live
@@ -8,15 +8,15 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use sshtui::config::Settings;
-use sshtui::db;
-use sshtui::services::admin;
-use sshtui::util::fmt_time;
+use bbs_rs::config::Settings;
+use bbs_rs::db;
+use bbs_rs::services::admin;
+use bbs_rs::util::fmt_time;
 
 #[derive(Parser)]
 #[command(
     name = "bbsctl",
-    about = "Manage the sshtui BBS: users, bans, and login history"
+    about = "Manage bbs-rs: users, bans, and login history"
 )]
 struct Cli {
     /// Config file to read the database URL from (must match the server's).

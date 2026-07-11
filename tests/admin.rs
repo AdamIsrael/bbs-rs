@@ -4,8 +4,8 @@
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
-use sshtui::error::AppError;
-use sshtui::services::{admin, auth, seed};
+use bbs_rs::error::AppError;
+use bbs_rs::services::{admin, auth, seed};
 
 async fn setup() -> SqlitePool {
     let pool = SqlitePoolOptions::new()

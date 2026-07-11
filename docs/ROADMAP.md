@@ -1,4 +1,4 @@
-# sshtui — feature roadmap
+# bbs-rs — feature roadmap
 
 A prioritized catalog of common BBS features to evaluate, design, and build. This is a **planning
 document**, not a commitment — it records what each feature is, its value, rough size, dependencies,

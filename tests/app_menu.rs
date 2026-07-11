@@ -6,10 +6,10 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
-use sshtui::app::App;
-use sshtui::app::state::MenuItem;
-use sshtui::config::Settings;
-use sshtui::services::{self, auth, presence::Presence};
+use bbs_rs::app::App;
+use bbs_rs::app::state::MenuItem;
+use bbs_rs::config::Settings;
+use bbs_rs::services::{self, auth, presence::Presence};
 
 fn config() -> Arc<Settings> {
     Arc::new(Settings::default())

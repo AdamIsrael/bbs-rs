@@ -13,7 +13,7 @@ async fn setup() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    sshtui::services::seed(&pool).await.expect("seed");
+    bbs_rs::services::seed(&pool).await.expect("seed");
     pool
 }
 
@@ -21,7 +21,7 @@ async fn setup() -> SqlitePool {
 async fn guest_seeded_and_login_works() {
     let pool = setup().await;
 
-    let guest = sshtui::services::auth::verify_login(&pool, "guest", "guest")
+    let guest = bbs_rs::services::auth::verify_login(&pool, "guest", "guest")
         .await
         .unwrap();
     assert!(guest.is_some(), "guest/guest should authenticate");
@@ -29,7 +29,7 @@ async fn guest_seeded_and_login_works() {
 
     // Wrong password is rejected.
     assert!(
-        sshtui::services::auth::verify_login(&pool, "guest", "nope")
+        bbs_rs::services::auth::verify_login(&pool, "guest", "nope")
             .await
             .unwrap()
             .is_none()
@@ -40,7 +40,7 @@ async fn guest_seeded_and_login_works() {
 async fn register_then_login() {
     let pool = setup().await;
 
-    let user = sshtui::services::auth::register_user(&pool, "alice", "hunter2")
+    let user = bbs_rs::services::auth::register_user(&pool, "alice", "hunter2")
         .await
         .unwrap();
     assert_eq!(user.role, "user");
@@ -48,13 +48,13 @@ async fn register_then_login() {
 
     // Duplicate registration fails.
     assert!(matches!(
-        sshtui::services::auth::register_user(&pool, "alice", "other").await,
-        Err(sshtui::error::AppError::UsernameTaken)
+        bbs_rs::services::auth::register_user(&pool, "alice", "other").await,
+        Err(bbs_rs::error::AppError::UsernameTaken)
     ));
 
     // Registered user can log in.
     assert!(
-        sshtui::services::auth::verify_login(&pool, "alice", "hunter2")
+        bbs_rs::services::auth::verify_login(&pool, "alice", "hunter2")
             .await
             .unwrap()
             .is_some()
@@ -64,27 +64,27 @@ async fn register_then_login() {
 #[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
-    let boards = sshtui::services::boards::list_boards(&pool).await.unwrap();
+    let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();
     assert!(!boards.is_empty(), "default boards should be seeded");
     let board_id = boards[0].id;
 
-    let guest = sshtui::services::auth::find_user(&pool, "guest")
+    let guest = bbs_rs::services::auth::find_user(&pool, "guest")
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(
-        sshtui::services::boards::post_message(&pool, board_id, &guest, "hi", "body").await,
-        Err(sshtui::error::AppError::GuestNotAllowed)
+        bbs_rs::services::boards::post_message(&pool, board_id, &guest, "hi", "body").await,
+        Err(bbs_rs::error::AppError::GuestNotAllowed)
     ));
 
-    let alice = sshtui::services::auth::register_user(&pool, "alice", "pw")
+    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw")
         .await
         .unwrap();
-    sshtui::services::boards::post_message(&pool, board_id, &alice, "Hello", "world")
+    bbs_rs::services::boards::post_message(&pool, board_id, &alice, "Hello", "world")
         .await
         .unwrap();
 
-    let messages = sshtui::services::boards::list_messages(&pool, board_id)
+    let messages = bbs_rs::services::boards::list_messages(&pool, board_id)
         .await
         .unwrap();
     assert_eq!(messages.len(), 1);
@@ -95,29 +95,29 @@ async fn guest_cannot_post_but_users_can() {
 #[tokio::test]
 async fn mail_send_read_and_guardrails() {
     let pool = setup().await;
-    let alice = sshtui::services::auth::register_user(&pool, "alice", "pw")
+    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw")
         .await
         .unwrap();
-    let bob = sshtui::services::auth::register_user(&pool, "bob", "pw")
+    let bob = bbs_rs::services::auth::register_user(&pool, "bob", "pw")
         .await
         .unwrap();
 
     // Unknown recipient rejected.
     assert!(matches!(
-        sshtui::services::mail::send_mail(&pool, &alice, "nobody", "s", "b").await,
-        Err(sshtui::error::AppError::RecipientNotFound)
+        bbs_rs::services::mail::send_mail(&pool, &alice, "nobody", "s", "b").await,
+        Err(bbs_rs::error::AppError::RecipientNotFound)
     ));
 
-    sshtui::services::mail::send_mail(&pool, &alice, "bob", "Hi Bob", "hello")
+    bbs_rs::services::mail::send_mail(&pool, &alice, "bob", "Hi Bob", "hello")
         .await
         .unwrap();
 
-    let inbox = sshtui::services::mail::inbox(&pool, bob.id).await.unwrap();
+    let inbox = bbs_rs::services::mail::inbox(&pool, bob.id).await.unwrap();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].from_name, "alice");
     assert!(inbox[0].read_at.is_none(), "new mail is unread");
 
-    let read = sshtui::services::mail::read_mail(&pool, inbox[0].id, bob.id)
+    let read = bbs_rs::services::mail::read_mail(&pool, inbox[0].id, bob.id)
         .await
         .unwrap();
     assert!(read.read_at.is_some(), "reading marks it read");
@@ -125,7 +125,7 @@ async fn mail_send_read_and_guardrails() {
 
 #[tokio::test]
 async fn presence_join_and_leave() {
-    let presence = sshtui::services::presence::Presence::new();
+    let presence = bbs_rs::services::presence::Presence::new();
     let (tx1, _rx1) = tokio::sync::mpsc::channel(1);
     let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
     presence.join(1, "alice".into(), None, tx1).await;
@@ -141,10 +141,10 @@ async fn presence_join_and_leave() {
 
 #[tokio::test]
 async fn presence_kick_signals_matching_sessions() {
-    use sshtui::transport::Event;
+    use bbs_rs::transport::Event;
     use std::collections::HashSet;
 
-    let presence = sshtui::services::presence::Presence::new();
+    let presence = bbs_rs::services::presence::Presence::new();
     let (tx_user, mut rx_user) = tokio::sync::mpsc::channel(1);
     let (tx_ip, mut rx_ip) = tokio::sync::mpsc::channel(1);
     let (tx_safe, mut rx_safe) = tokio::sync::mpsc::channel(1);

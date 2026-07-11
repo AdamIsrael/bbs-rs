@@ -1,4 +1,4 @@
-//! sshtui — a bare-bones bulletin board system served over SSH.
+//! bbs-rs — a bare-bones bulletin board system served over SSH.
 //!
 //! The crate is split so the TUI is transport-agnostic:
 //! - [`services`] + [`db`] hold all domain logic (no knowledge of SSH),

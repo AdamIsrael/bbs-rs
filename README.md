@@ -1,4 +1,4 @@
-# sshtui
+# bbs-rs
 
 A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust with
 [`russh`](https://crates.io/crates/russh) (SSH server), [`ratatui`](https://crates.io/crates/ratatui)
@@ -22,7 +22,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 ## Run it
 
 ```sh
-cargo run --bin sshtui        # or: just run   (the crate builds two binaries: sshtui + bbsctl)
+cargo run --bin bbs-rs        # or: just run   (the crate builds two binaries: bbs-rs + bbsctl)
 # then, from another terminal:
 ssh guest@localhost -p 2222   # password: guest
 ```
@@ -48,7 +48,7 @@ The file has three sections:
 
 ```toml
 [bbs]        # branding
-name = "sshtui BBS"
+name = "bbs-rs"
 tagline = "a tiny bulletin board over SSH"
 sysop = ""                       # shown in help footer (blank hides)
 welcome = "Welcome to the board."   # MOTD on the main menu (blank hides)

@@ -1,7 +1,7 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use sshtui::config::{Cli, Settings};
+use bbs_rs::config::{Cli, Settings};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,5 +17,5 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let settings = Settings::load(&cli)?;
-    sshtui::serve(settings).await
+    bbs_rs::serve(settings).await
 }

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Command-line arguments: the config path plus optional per-field overrides.
 /// Overrides are `Option` so an unset flag never clobbers the file value.
 #[derive(Parser, Debug, Clone)]
-#[command(name = "sshtui", about = "A bulletin board system served over SSH")]
+#[command(name = "bbs-rs", about = "A bulletin board system served over SSH")]
 pub struct Cli {
     /// Path to the TOML config file (created with defaults if missing).
     #[arg(long, default_value = "bbs.toml")]
@@ -91,7 +91,7 @@ pub struct Features {
 impl Default for Bbs {
     fn default() -> Self {
         Self {
-            name: "sshtui BBS".into(),
+            name: "bbs-rs".into(),
             tagline: "a tiny bulletin board over SSH".into(),
             sysop: String::new(),
             welcome: "Welcome to the board.".into(),
@@ -174,12 +174,12 @@ impl Settings {
 /// impls above; this commented form is preferred over serializing `Default`
 /// (which would drop the comments).
 pub const DEFAULT_CONFIG_TOML: &str = "\
-# sshtui BBS configuration.
+# bbs-rs configuration.
 # CLI flags (--host, --port, --database-url, --host-key) override these values.
 
 [bbs]
 # Board name — shown in the title bar, startup log, and help.
-name = \"sshtui BBS\"
+name = \"bbs-rs\"
 # Short subtitle shown on the main menu and help screen.
 tagline = \"a tiny bulletin board over SSH\"
 # Sysop name shown in the help footer (blank to hide).

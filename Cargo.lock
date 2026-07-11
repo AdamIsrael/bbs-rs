@@ -225,6 +225,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bbs-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2 0.5.3",
+ "clap",
+ "crossterm",
+ "getrandom 0.4.3",
+ "ratatui",
+ "russh",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bcrypt-pbkdf"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3189,27 +3210,6 @@ dependencies = [
  "ssh-cipher",
  "ssh-encoding",
  "zeroize",
-]
-
-[[package]]
-name = "sshtui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2 0.5.3",
- "clap",
- "crossterm",
- "getrandom 0.4.3",
- "ratatui",
- "russh",
- "serde",
- "sqlx",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
