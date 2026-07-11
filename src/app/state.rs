@@ -5,6 +5,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     MainMenu,
+    Bulletins,
+    ReadBulletin,
     BoardList,
     MessageList,
     ReadMessage,
@@ -22,6 +24,7 @@ pub enum Screen {
 /// Actions reachable from the main menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItem {
+    Bulletins,
     Boards,
     Mail,
     Who,
@@ -34,6 +37,7 @@ pub enum MenuItem {
 impl MenuItem {
     pub fn label(self) -> &'static str {
         match self {
+            MenuItem::Bulletins => "Bulletins",
             MenuItem::Boards => "Message Boards",
             MenuItem::Mail => "Private Mail",
             MenuItem::Who => "Who's Online",

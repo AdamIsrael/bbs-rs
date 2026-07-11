@@ -34,6 +34,15 @@ impl User {
     }
 }
 
+/// A sysop bulletin (dated announcement shown after login).
+#[derive(Debug, Clone, FromRow)]
+pub struct Bulletin {
+    pub id: i64,
+    pub title: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
 /// A banned IP address.
 #[derive(Debug, Clone, FromRow)]
 pub struct IpBan {
