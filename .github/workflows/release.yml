@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      # aws-lc-sys (russh's crypto backend) builds C + x86_64 assembly.
+      - name: Install build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin bbs-rs --bin bbsctl
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="bbs-rs-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$dist"
+          cp "target/${{ matrix.target }}/release/bbs-rs" \
+             "target/${{ matrix.target }}/release/bbsctl" \
+             README.md docs/ROADMAP.md "$dist"/
+          tar -czf "${dist}.tar.gz" "$dist"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+          else
+            shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bbs-rs-*.tar.gz
+            bbs-rs-*.tar.gz.sha256
+          generate_release_notes: true
