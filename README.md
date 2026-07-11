@@ -92,6 +92,9 @@ bbsctl ban-ip <ip> [--reason R]  # ban / unban an IP
 bbsctl unban-ip <ip>
 bbsctl ip-bans                   # list IP bans
 bbsctl logins [--user U] [--failures] [--limit N]   # login audit trail
+bbsctl bulletins                 # list sysop bulletins
+bbsctl post-bulletin <title> --body <text>          # post a bulletin
+bbsctl rm-bulletin <id>          # remove a bulletin
 ```
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
@@ -101,6 +104,10 @@ A ban rejects future logins *and* drops any live session for that user/IP (immed
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
 an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every login attempt
 (success or failure) is recorded with username, IP, and timestamp.
+
+**Bulletins** are short sysop announcements posted with `bbsctl post-bulletin`. When any exist, a
+session lands on the **Bulletins** screen right after login (in addition to the `bbs.welcome` MOTD);
+they're also reachable any time from the main menu.
 
 ## Architecture
 

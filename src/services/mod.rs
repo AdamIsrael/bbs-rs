@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod auth;
 pub mod boards;
+pub mod bulletins;
 pub mod mail;
 pub mod presence;
 

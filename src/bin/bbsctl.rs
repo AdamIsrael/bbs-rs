@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::admin;
+use bbs_rs::services::{admin, bulletins};
 use bbs_rs::util::fmt_time;
 
 #[derive(Parser)]
@@ -66,6 +66,16 @@ enum Cmd {
     IpBans,
     /// Set a user's role (guest | user | admin).
     Role { username: String, role: String },
+    /// List sysop bulletins.
+    Bulletins,
+    /// Post a new sysop bulletin (shown to users after login).
+    PostBulletin {
+        title: String,
+        #[arg(long)]
+        body: String,
+    },
+    /// Remove a bulletin by id.
+    RmBulletin { id: i64 },
     /// Show recent login attempts.
     Logins {
         /// Filter to a single username.
@@ -127,6 +137,24 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Role { username, role } => {
             admin::set_role(&pool, &username, &role).await?;
             println!("set role of '{username}' to '{role}'");
+        }
+        Cmd::Bulletins => {
+            let list = bulletins::list(&pool).await?;
+            println!("{:<5} {:<20} TITLE", "ID", "WHEN");
+            for b in list {
+                println!("{:<5} {:<20} {}", b.id, fmt_time(b.created_at), b.title);
+            }
+        }
+        Cmd::PostBulletin { title, body } => {
+            let id = bulletins::add(&pool, &title, &body).await?;
+            println!("posted bulletin #{id}");
+        }
+        Cmd::RmBulletin { id } => {
+            if bulletins::delete(&pool, id).await? {
+                println!("removed bulletin #{id}");
+            } else {
+                println!("no bulletin #{id}");
+            }
         }
         Cmd::Logins {
             user,

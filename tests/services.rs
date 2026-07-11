@@ -124,6 +124,37 @@ async fn mail_send_read_and_guardrails() {
 }
 
 #[tokio::test]
+async fn bulletins_add_list_delete() {
+    let pool = setup().await;
+    assert_eq!(bbs_rs::services::bulletins::count(&pool).await.unwrap(), 0);
+
+    let id1 = bbs_rs::services::bulletins::add(&pool, "Welcome", "First bulletin")
+        .await
+        .unwrap();
+    bbs_rs::services::bulletins::add(&pool, "Downtime", "Maintenance Sunday")
+        .await
+        .unwrap();
+
+    let list = bbs_rs::services::bulletins::list(&pool).await.unwrap();
+    assert_eq!(list.len(), 2);
+    // Newest first.
+    assert_eq!(list[0].title, "Downtime");
+    assert_eq!(list[1].title, "Welcome");
+
+    assert!(
+        bbs_rs::services::bulletins::delete(&pool, id1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !bbs_rs::services::bulletins::delete(&pool, id1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(bbs_rs::services::bulletins::count(&pool).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn presence_join_and_leave() {
     let presence = bbs_rs::services::presence::Presence::new();
     let (tx1, _rx1) = tokio::sync::mpsc::channel(1);

@@ -15,10 +15,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::Settings;
-use crate::db::models::{Board, Login, Mail, Message, User};
+use crate::db::models::{Board, Bulletin, Login, Mail, Message, User};
 use crate::error::AppError;
 use crate::services::presence::{OnlineUser, Presence};
-use crate::services::{admin, auth, boards, mail};
+use crate::services::{admin, auth, boards, bulletins, mail};
 use crate::transport::Event;
 
 use state::{Field, Form, MenuItem, Screen};
@@ -38,6 +38,11 @@ pub struct App {
     // Main menu
     pub menu: Vec<MenuItem>,
     pub menu_sel: usize,
+
+    // Bulletins
+    pub bulletins: Vec<Bulletin>,
+    pub bulletin_sel: usize,
+    pub current_bulletin: Option<Bulletin>,
 
     // Boards
     pub boards: Vec<Board>,
@@ -78,7 +83,7 @@ impl App {
         // Menu honors the feature toggles. Registration is the newcomer
         // bootstrap path, so it's only offered to the guest account.
         let f = &config.features;
-        let mut menu = vec![MenuItem::Boards];
+        let mut menu = vec![MenuItem::Bulletins, MenuItem::Boards];
         if f.private_mail {
             menu.push(MenuItem::Mail);
         }
@@ -104,6 +109,9 @@ impl App {
             status: String::new(),
             menu,
             menu_sel: 0,
+            bulletins: Vec::new(),
+            bulletin_sel: 0,
+            current_bulletin: None,
             boards: Vec::new(),
             board_sel: 0,
             current_board_id: None,
@@ -133,6 +141,8 @@ impl App {
 
         match self.screen {
             Screen::MainMenu => self.on_main_menu(key).await,
+            Screen::Bulletins => self.on_bulletins(key).await,
+            Screen::ReadBulletin => self.on_reader(key, Screen::Bulletins),
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
             Screen::ReadMessage => self.on_reader(key, Screen::MessageList),
@@ -164,6 +174,7 @@ impl App {
 
     async fn activate_menu(&mut self) {
         match self.menu[self.menu_sel] {
+            MenuItem::Bulletins => self.open_bulletins().await,
             MenuItem::Boards => self.open_boards().await,
             MenuItem::Mail => {
                 if self.user.is_guest() {
@@ -185,6 +196,49 @@ impl App {
             MenuItem::Admin => self.open_admin_users().await,
             MenuItem::Help => self.screen = Screen::Help,
             MenuItem::Quit => self.should_quit = true,
+        }
+    }
+
+    // ---- Bulletins -------------------------------------------------------
+
+    /// Load bulletins on startup; if any exist, land the session on the
+    /// Bulletins screen (classic "shown after login" behavior).
+    pub async fn load_startup_bulletins(&mut self) {
+        if let Ok(list) = bulletins::list(&self.pool).await
+            && !list.is_empty()
+        {
+            self.bulletins = list;
+            self.bulletin_sel = 0;
+            self.screen = Screen::Bulletins;
+        }
+    }
+
+    async fn open_bulletins(&mut self) {
+        match bulletins::list(&self.pool).await {
+            Ok(list) => {
+                self.bulletins = list;
+                self.bulletin_sel = 0;
+                self.screen = Screen::Bulletins;
+            }
+            Err(e) => self.status = format!("Error loading bulletins: {e}"),
+        }
+    }
+
+    async fn on_bulletins(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.bulletin_sel = self.bulletin_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.bulletin_sel =
+                    (self.bulletin_sel + 1).min(self.bulletins.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(b) = self.bulletins.get(self.bulletin_sel) {
+                    self.current_bulletin = Some(b.clone());
+                    self.screen = Screen::ReadBulletin;
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
         }
     }
 
@@ -542,6 +596,8 @@ pub async fn run<W: std::io::Write>(
     mut terminal: Terminal<CrosstermBackend<W>>,
     mut events: Receiver<Event>,
 ) -> anyhow::Result<()> {
+    // Show bulletins after login when any exist.
+    app.load_startup_bulletins().await;
     terminal.draw(|f| ui::draw(f, &app))?;
 
     while let Some(event) = events.recv().await {

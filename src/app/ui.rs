@@ -23,6 +23,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let body = chunks[1];
     match app.screen {
         Screen::MainMenu => render_main_menu(f, body, app),
+        Screen::Bulletins => render_bulletins(f, body, app),
+        Screen::ReadBulletin => render_read_bulletin(f, body, app),
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
         Screen::ReadMessage => render_read_message(f, body, app),
@@ -126,6 +128,35 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     render_selectable(f, rows[1], " Main Menu ", lines, app.menu_sel);
+}
+
+fn render_bulletins(f: &mut Frame, area: Rect, app: &App) {
+    if app.bulletins.is_empty() {
+        return placeholder(f, area, " Bulletins ", "No bulletins.");
+    }
+    let lines: Vec<Line> = app
+        .bulletins
+        .iter()
+        .map(|b| {
+            Line::from(format!(
+                "{:<12} {}",
+                fmt_time(b.created_at),
+                truncate(&b.title, 60)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Bulletins ", lines, app.bulletin_sel);
+}
+
+fn render_read_bulletin(f: &mut Frame, area: Rect, app: &App) {
+    let Some(b) = &app.current_bulletin else {
+        return placeholder(f, area, " Bulletin ", "Nothing to show.");
+    };
+    let body = format!("Date: {}\n\n{}", fmt_time(b.created_at), b.body);
+    let p = Paragraph::new(body)
+        .block(Block::bordered().title(format!(" {} ", truncate(&b.title, 60))))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
 }
 
 fn render_boards(f: &mut Frame, area: Rect, app: &App) {
@@ -335,6 +366,8 @@ fn placeholder(f: &mut Frame, area: Rect, title: &str, msg: &str) {
 fn screen_name(screen: Screen) -> &'static str {
     match screen {
         Screen::MainMenu => "Main Menu",
+        Screen::Bulletins => "Bulletins",
+        Screen::ReadBulletin => "Bulletin",
         Screen::BoardList => "Boards",
         Screen::MessageList => "Messages",
         Screen::ReadMessage => "Reading",
@@ -353,9 +386,12 @@ fn screen_name(screen: Screen) -> &'static str {
 fn hints(screen: Screen) -> &'static str {
     match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
+        Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
         Screen::BoardList => " ↑/↓ move · Enter open · Esc back ",
         Screen::MessageList => " ↑/↓ move · Enter read · n new post · Esc back ",
-        Screen::ReadMessage | Screen::ReadMail | Screen::Help => " Esc back ",
+        Screen::ReadMessage | Screen::ReadMail | Screen::ReadBulletin | Screen::Help => {
+            " Esc back "
+        }
         Screen::ComposePost | Screen::ComposeMail | Screen::Register => {
             " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel "
         }
