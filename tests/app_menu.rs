@@ -1,11 +1,11 @@
 //! The main menu should offer "Register New Account" only to the guest account
 //! (the newcomer bootstrap path); registered users must not see it.
 
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 
-use sshtui::app::state::MenuItem;
 use sshtui::app::App;
+use sshtui::app::state::MenuItem;
 use sshtui::services::{self, auth, presence::Presence};
 
 async fn setup() -> SqlitePool {

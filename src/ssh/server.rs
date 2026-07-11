@@ -19,8 +19,8 @@ use crate::app::{self, App};
 use crate::config;
 use crate::db::models::User;
 use crate::input;
-use crate::services::auth;
 use crate::services::presence::Presence;
+use crate::services::{admin, auth};
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
 use crate::transport::Event;
 
@@ -35,12 +35,13 @@ struct BbsServer {
 impl Server for BbsServer {
     type Handler = SessionHandler;
 
-    fn new_client(&mut self, _addr: Option<SocketAddr>) -> SessionHandler {
+    fn new_client(&mut self, addr: Option<SocketAddr>) -> SessionHandler {
         self.next_id += 1;
         SessionHandler {
             pool: self.pool.clone(),
             presence: self.presence.clone(),
             id: self.next_id,
+            peer: addr,
             user: None,
             terminal: None,
             events_tx: None,
@@ -54,6 +55,8 @@ struct SessionHandler {
     pool: SqlitePool,
     presence: Presence,
     id: usize,
+    /// The client's address, captured at connection for login logging and IP bans.
+    peer: Option<SocketAddr>,
     user: Option<User>,
     /// Built at channel open, moved into the app task at shell request.
     terminal: Option<SshTerminal>,
@@ -63,18 +66,28 @@ struct SessionHandler {
     input_buf: Vec<u8>,
 }
 
+impl SessionHandler {
+    /// The peer IP (without port) as a string, for logging and IP-ban checks.
+    fn ip(&self) -> Option<String> {
+        self.peer.map(|a| a.ip().to_string())
+    }
+}
+
 impl Handler for SessionHandler {
     type Error = anyhow::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        match auth::verify_login(&self.pool, user, password).await {
+        let ip = self.ip();
+        // `attempt_login` handles IP-ban and account-ban checks and records the
+        // attempt (success or failure) in the login audit trail.
+        match auth::attempt_login(&self.pool, user, password, ip.as_deref()).await {
             Ok(Some(u)) => {
                 self.user = Some(u);
                 Ok(Auth::Accept)
             }
             Ok(None) => Ok(Auth::reject()),
             Err(e) => {
-                tracing::warn!("auth lookup failed: {e}");
+                tracing::warn!("auth failed for {user:?}: {e}");
                 Ok(Auth::reject())
             }
         }
@@ -115,7 +128,7 @@ impl Handler for SessionHandler {
     ) -> Result<(), Self::Error> {
         let (w, h) = clamp_size(col_width, row_height);
         if let Some(terminal) = self.terminal.as_mut() {
-            terminal.resize(Rect::new(0, 0, w, h))?;
+            resize_terminal(terminal, w, h);
         }
         session.channel_success(channel)?;
         Ok(())
@@ -129,8 +142,10 @@ impl Handler for SessionHandler {
         match (self.terminal.take(), self.user.clone()) {
             (Some(terminal), Some(user)) => {
                 let (tx, rx) = mpsc::channel::<Event>(64);
-                self.events_tx = Some(tx);
-                self.presence.join(self.id, user.username.clone()).await;
+                self.events_tx = Some(tx.clone());
+                self.presence
+                    .join(self.id, user.username.clone(), self.ip(), tx)
+                    .await;
 
                 let app = App::new(self.pool.clone(), self.presence.clone(), user, self.id);
                 let id = self.id;
@@ -186,6 +201,20 @@ impl Handler for SessionHandler {
     }
 }
 
+/// Resize the ratatui terminal, best-effort.
+///
+/// ratatui's `resize` clears the viewport, which queries the *backend's*
+/// terminal size (`crossterm::terminal::size()` — an ioctl on the server's own
+/// stdout). When the server has no controlling tty (run as a daemon / stdout
+/// redirected), that query fails. The buffers and viewport are already resized
+/// before that call, so a failure is harmless for our full-redraw Fixed
+/// viewport: we log it and carry on.
+fn resize_terminal(terminal: &mut SshTerminal, w: u16, h: u16) {
+    if let Err(e) = terminal.resize(Rect::new(0, 0, w, h)) {
+        tracing::debug!("terminal resize was non-fatal: {e}");
+    }
+}
+
 /// Clamp a client-reported terminal size to something drawable. Some clients
 /// (and non-interactive PTYs) report 0x0; fall back to a conventional 80x24.
 fn clamp_size(cols: u32, rows: u32) -> (u16, u16) {
@@ -234,10 +263,40 @@ fn load_or_generate_host_key(path: &Path) -> anyhow::Result<russh::keys::Private
     }
 }
 
+/// How often the ban sweeper checks live sessions against the ban lists.
+const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Periodically drop live sessions belonging to banned users or IPs. This is
+/// how bans applied out-of-process (by `bbsctl`) reach active sessions; in-BBS
+/// admin bans also kick immediately.
+async fn ban_sweeper(pool: SqlitePool, presence: Presence) {
+    let mut ticker = tokio::time::interval(BAN_SWEEP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let (users, ips) =
+            match tokio::try_join!(admin::banned_usernames(&pool), admin::banned_ips(&pool),) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!("ban sweeper query failed: {e}");
+                    continue;
+                }
+            };
+        if users.is_empty() && ips.is_empty() {
+            continue;
+        }
+        let kicked = presence.kick(&users, &ips).await;
+        if kicked > 0 {
+            tracing::info!("ban sweeper kicked {kicked} session(s)");
+        }
+    }
+}
+
 /// Bind and serve the SSH BBS until the process is stopped.
 pub async fn run(cfg: &config::Config, pool: SqlitePool) -> anyhow::Result<()> {
     let presence = Presence::new();
     let key = load_or_generate_host_key(&cfg.host_key)?;
+
+    tokio::spawn(ban_sweeper(pool.clone(), presence.clone()));
 
     let ssh_config = Config {
         inactivity_timeout: Some(Duration::from_secs(3600)),

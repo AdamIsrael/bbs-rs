@@ -10,7 +10,11 @@ default:
 
 # Run the BBS server (SSH on :2222; `ssh guest@localhost -p 2222`, password 'guest').
 run *ARGS:
-    cargo run -- {{ARGS}}
+    cargo run --bin sshtui -- {{ARGS}}
+
+# Run the bbsctl admin tool (e.g. `just ctl users`, `just ctl ban alice`).
+ctl *ARGS:
+    cargo run --bin bbsctl -- {{ARGS}}
 
 # Build the debug binary.
 build:

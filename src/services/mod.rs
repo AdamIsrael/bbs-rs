@@ -1,6 +1,7 @@
 //! Transport-agnostic domain logic: everything the TUI needs, independent of
 //! how the user connected (SSH today, WebSocket in the future).
 
+pub mod admin;
 pub mod auth;
 pub mod boards;
 pub mod mail;

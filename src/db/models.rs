@@ -13,6 +13,8 @@ pub struct User {
     pub password_hash: String,
     pub role: String,
     pub created_at: i64,
+    /// Unix timestamp of the ban, or `None` if the account is not banned.
+    pub banned_at: Option<i64>,
 }
 
 impl User {
@@ -20,6 +22,34 @@ impl User {
     pub fn is_guest(&self) -> bool {
         self.role == "guest"
     }
+
+    /// Operators who may manage users (list, ban/unban, view logins).
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
+
+    /// A banned account is refused at login.
+    pub fn is_banned(&self) -> bool {
+        self.banned_at.is_some()
+    }
+}
+
+/// A banned IP address.
+#[derive(Debug, Clone, FromRow)]
+pub struct IpBan {
+    pub ip: String,
+    pub reason: String,
+    pub created_at: i64,
+}
+
+/// A recorded login attempt (successful or not).
+#[derive(Debug, Clone, FromRow)]
+pub struct Login {
+    pub id: i64,
+    pub username: String,
+    pub ip: Option<String>,
+    pub success: bool,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, FromRow)]

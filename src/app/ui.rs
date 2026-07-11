@@ -33,6 +33,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::WhoOnline => render_who(f, body, app),
         Screen::Register => render_form(f, body, " Register ", app),
         Screen::Help => render_help(f, body),
+        Screen::AdminUsers => render_admin_users(f, body, app),
+        Screen::AdminLogins => render_admin_logins(f, body, app),
     }
 
     render_status(f, chunks[2], app);
@@ -230,6 +232,48 @@ fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
     f.render_widget(p, area);
 }
 
+fn render_admin_users(f: &mut Frame, area: Rect, app: &App) {
+    if app.admin_users.is_empty() {
+        return placeholder(f, area, " Admin · Users ", "No users.");
+    }
+    let lines: Vec<Line> = app
+        .admin_users
+        .iter()
+        .map(|u| {
+            let status = if u.is_banned() { "BANNED" } else { "" };
+            Line::from(format!(
+                "{:<20} {:<7} {:<7} {}",
+                truncate(&u.username, 20),
+                u.role,
+                status,
+                fmt_time(u.created_at)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Admin · Users ", lines, app.admin_user_sel);
+}
+
+fn render_admin_logins(f: &mut Frame, area: Rect, app: &App) {
+    if app.admin_logins.is_empty() {
+        return placeholder(f, area, " Admin · Logins ", "No login attempts recorded.");
+    }
+    let lines: Vec<Line> = app
+        .admin_logins
+        .iter()
+        .map(|l| {
+            let result = if l.success { "ok" } else { "reject" };
+            Line::from(format!(
+                "{:<17} {:<7} {:<20} {}",
+                fmt_time(l.created_at),
+                result,
+                truncate(&l.username, 20),
+                l.ip.as_deref().unwrap_or("-")
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Admin · Logins ", lines, usize::MAX);
+}
+
 fn render_help(f: &mut Frame, area: Rect) {
     let text = "\
 sshtui — a tiny bulletin board over SSH
@@ -271,6 +315,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::WhoOnline => "Who's Online",
         Screen::Register => "Register",
         Screen::Help => "Help",
+        Screen::AdminUsers => "Admin · Users",
+        Screen::AdminLogins => "Admin · Logins",
     }
 }
 
@@ -285,6 +331,8 @@ fn hints(screen: Screen) -> &'static str {
         }
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · Esc back ",
         Screen::WhoOnline => " r refresh · Esc back ",
+        Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
+        Screen::AdminLogins => " Esc back ",
     }
 }
 

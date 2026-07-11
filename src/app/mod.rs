@@ -11,10 +11,12 @@ use ratatui::layout::Rect;
 use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc::Receiver;
 
-use crate::db::models::{Board, Mail, Message, User};
+use std::collections::HashSet;
+
+use crate::db::models::{Board, Login, Mail, Message, User};
 use crate::error::AppError;
 use crate::services::presence::{OnlineUser, Presence};
-use crate::services::{auth, boards, mail};
+use crate::services::{admin, auth, boards, mail};
 use crate::transport::Event;
 
 use state::{Field, Form, MenuItem, Screen};
@@ -53,6 +55,11 @@ pub struct App {
     // Who's online
     pub online: Vec<OnlineUser>,
 
+    // Admin
+    pub admin_users: Vec<User>,
+    pub admin_user_sel: usize,
+    pub admin_logins: Vec<Login>,
+
     // Shared form for compose/register screens
     pub form: Form,
 }
@@ -64,6 +71,9 @@ impl App {
         let mut menu = vec![MenuItem::Boards, MenuItem::Mail, MenuItem::Who];
         if user.is_guest() {
             menu.push(MenuItem::Register);
+        }
+        if user.is_admin() {
+            menu.push(MenuItem::Admin);
         }
         menu.push(MenuItem::Help);
         menu.push(MenuItem::Quit);
@@ -88,6 +98,9 @@ impl App {
             mail_sel: 0,
             current_mail: None,
             online: Vec::new(),
+            admin_users: Vec::new(),
+            admin_user_sel: 0,
+            admin_logins: Vec::new(),
             form: Form::new(Vec::new()),
         }
     }
@@ -113,6 +126,8 @@ impl App {
             Screen::WhoOnline => self.on_who(key).await,
             Screen::Register => self.on_register(key).await,
             Screen::Help => self.on_reader(key, Screen::MainMenu),
+            Screen::AdminUsers => self.on_admin_users(key).await,
+            Screen::AdminLogins => self.on_admin_logins(key).await,
         }
     }
 
@@ -150,8 +165,100 @@ impl App {
                 ]);
                 self.screen = Screen::Register;
             }
+            MenuItem::Admin => self.open_admin_users().await,
             MenuItem::Help => self.screen = Screen::Help,
             MenuItem::Quit => self.should_quit = true,
+        }
+    }
+
+    // ---- Admin -----------------------------------------------------------
+
+    async fn open_admin_users(&mut self) {
+        match admin::list_users(&self.pool).await {
+            Ok(users) => {
+                self.admin_users = users;
+                self.admin_user_sel = 0;
+                self.screen = Screen::AdminUsers;
+            }
+            Err(e) => self.status = format!("Error loading users: {e}"),
+        }
+    }
+
+    async fn on_admin_users(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.admin_user_sel = self.admin_user_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.admin_user_sel =
+                    (self.admin_user_sel + 1).min(self.admin_users.len().saturating_sub(1))
+            }
+            KeyCode::Char('b') => self.admin_ban_selected().await,
+            KeyCode::Char('u') => self.admin_unban_selected().await,
+            KeyCode::Char('l') => self.open_admin_logins().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    async fn admin_ban_selected(&mut self) {
+        let Some(target) = self.admin_users.get(self.admin_user_sel).cloned() else {
+            return;
+        };
+        // Guardrails: never ban the shared guest account (that would lock out
+        // read-only access for everyone) or your own account.
+        if target.is_guest() {
+            self.status = "Cannot ban the guest account.".into();
+            return;
+        }
+        if target.id == self.user.id {
+            self.status = "You cannot ban yourself.".into();
+            return;
+        }
+        match admin::ban_user(&self.pool, &target.username).await {
+            Ok(()) => {
+                // Kick the banned user's live sessions immediately.
+                let users = HashSet::from([target.username.clone()]);
+                self.presence.kick(&users, &HashSet::new()).await;
+                self.status = format!("Banned {}.", target.username);
+                self.reload_admin_users().await;
+            }
+            Err(e) => self.status = format!("Could not ban: {e}"),
+        }
+    }
+
+    async fn admin_unban_selected(&mut self) {
+        let Some(target) = self.admin_users.get(self.admin_user_sel).cloned() else {
+            return;
+        };
+        match admin::unban_user(&self.pool, &target.username).await {
+            Ok(()) => {
+                self.status = format!("Unbanned {}.", target.username);
+                self.reload_admin_users().await;
+            }
+            Err(e) => self.status = format!("Could not unban: {e}"),
+        }
+    }
+
+    async fn reload_admin_users(&mut self) {
+        if let Ok(users) = admin::list_users(&self.pool).await {
+            self.admin_user_sel = self.admin_user_sel.min(users.len().saturating_sub(1));
+            self.admin_users = users;
+        }
+    }
+
+    async fn open_admin_logins(&mut self) {
+        match admin::recent_logins(&self.pool, None, 100).await {
+            Ok(logins) => {
+                self.admin_logins = logins;
+                self.screen = Screen::AdminLogins;
+            }
+            Err(e) => self.status = format!("Error loading logins: {e}"),
+        }
+    }
+
+    async fn on_admin_logins(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::AdminUsers,
+            _ => {}
         }
     }
 
@@ -420,7 +527,10 @@ pub async fn run<W: std::io::Write>(
         match event {
             Event::Key(key) => app.handle_key(key).await,
             Event::Resize(w, h) => {
-                terminal.resize(Rect::new(0, 0, w, h))?;
+                // Best-effort: ratatui's `resize` may fail when the backend has
+                // no controlling tty to query, but it still updates the buffers
+                // and viewport, so drawing continues correctly.
+                let _ = terminal.resize(Rect::new(0, 0, w, h));
             }
             Event::Quit => app.should_quit = true,
         }

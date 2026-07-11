@@ -15,6 +15,8 @@ pub enum Screen {
     WhoOnline,
     Register,
     Help,
+    AdminUsers,
+    AdminLogins,
 }
 
 /// Actions reachable from the main menu.
@@ -24,6 +26,7 @@ pub enum MenuItem {
     Mail,
     Who,
     Register,
+    Admin,
     Help,
     Quit,
 }
@@ -35,6 +38,7 @@ impl MenuItem {
             MenuItem::Mail => "Private Mail",
             MenuItem::Who => "Who's Online",
             MenuItem::Register => "Register New Account",
+            MenuItem::Admin => "Admin",
             MenuItem::Help => "Help",
             MenuItem::Quit => "Quit",
         }

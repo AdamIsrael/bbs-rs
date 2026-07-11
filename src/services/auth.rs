@@ -6,6 +6,7 @@ use sqlx::sqlite::SqlitePool;
 
 use crate::db::models::User;
 use crate::error::{AppError, Result};
+use crate::services::admin;
 use crate::util::now_unix;
 
 /// Hash a plaintext password into a PHC string suitable for storage.
@@ -34,7 +35,8 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 /// Look up a user by name.
 pub async fn find_user(pool: &SqlitePool, username: &str) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?",
+        "SELECT id, username, password_hash, role, created_at, banned_at \
+         FROM users WHERE username = ?",
     )
     .bind(username)
     .fetch_optional(pool)
@@ -54,6 +56,33 @@ pub async fn verify_login(
         return Ok(Some(user));
     }
     Ok(None)
+}
+
+/// The full login decision used by the SSH handler: reject banned IPs and
+/// banned accounts, verify the password, and record every attempt (success or
+/// failure) in the `logins` audit table. Returns the authenticated user, or
+/// `None` for any rejection.
+pub async fn attempt_login(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+    ip: Option<&str>,
+) -> Result<Option<User>> {
+    // Reject connections from a banned IP outright.
+    if let Some(ip) = ip
+        && admin::is_ip_banned(pool, ip).await?
+    {
+        admin::record_login(pool, username, Some(ip), false).await?;
+        return Ok(None);
+    }
+
+    let outcome = match verify_login(pool, username, password).await? {
+        Some(user) if !user.is_banned() => Some(user),
+        _ => None,
+    };
+
+    admin::record_login(pool, username, ip, outcome.is_some()).await?;
+    Ok(outcome)
 }
 
 /// Create a new `user`-role account. Registration is reachable from the guest

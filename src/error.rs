@@ -25,6 +25,9 @@ pub enum AppError {
     #[error("not found")]
     NotFound,
 
+    #[error("invalid role (expected guest, user, or admin): {0}")]
+    BadRole(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

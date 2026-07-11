@@ -13,13 +13,17 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
+- **Access control** — three roles (`guest` / `user` / `admin`); admins get an in-BBS admin view.
+- **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.
+- **Login audit** — every attempt (success or failure) is recorded with username, IP, and time.
+- **`bbsctl`** — an operator CLI for user management that works even when the server is down.
 
 ## Run it
 
 ```sh
-cargo run
+cargo run --bin sshtui        # or: just run   (the crate builds two binaries: sshtui + bbsctl)
 # then, from another terminal:
-ssh guest@localhost -p 2222      # password: guest
+ssh guest@localhost -p 2222   # password: guest
 ```
 
 On first run the server creates `bbs.db` (SQLite) and generates a persistent ed25519 host key
@@ -41,6 +45,30 @@ Set `RUST_LOG=info` for server logs (written to stderr, never into a client's te
 
 `↑/↓` move · `Enter` select/open · `Esc`/`←`/`q` back · `Ctrl-C` disconnect. In forms, `Tab`/`↑`/`↓`
 switch fields and `Enter` submits on the last field.
+
+## Administration
+
+Users have one of three roles: `guest`, `user`, or `admin`. Manage users with the **`bbsctl`** CLI
+(operates on the same SQLite database as the server):
+
+```sh
+bbsctl users                     # list users (role + ban status)
+bbsctl role <user> admin         # promote/demote (guest|user|admin)
+bbsctl ban <user>                # ban / unban a user
+bbsctl unban <user>
+bbsctl ban-ip <ip> [--reason R]  # ban / unban an IP
+bbsctl unban-ip <ip>
+bbsctl ip-bans                   # list IP bans
+bbsctl logins [--user U] [--failures] [--limit N]   # login audit trail
+```
+
+Point it at a non-default database with `--database-url`. To create your **first admin**, register a
+normal account, then run `bbsctl role <that-user> admin`.
+
+A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
+admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
+an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every login attempt
+(success or failure) is recorded with username, IP, and timestamp.
 
 ## Architecture
 

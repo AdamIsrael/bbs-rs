@@ -1,0 +1,132 @@
+//! bbsctl — operator CLI for managing the sshtui BBS database.
+//!
+//! Operates directly on the SQLite database (the same one the server uses), so
+//! it works even when the server is offline. Bans applied here reach live
+//! sessions via the server's periodic ban sweeper.
+
+use clap::{Parser, Subcommand};
+
+use sshtui::db;
+use sshtui::services::admin;
+use sshtui::util::fmt_time;
+
+#[derive(Parser)]
+#[command(
+    name = "bbsctl",
+    about = "Manage the sshtui BBS: users, bans, and login history"
+)]
+struct Cli {
+    /// SQLite database URL (must match the server's).
+    #[arg(long, default_value = "sqlite://bbs.db?mode=rwc")]
+    database_url: String,
+
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// List all registered users.
+    Users,
+    /// Ban a user by username.
+    Ban { username: String },
+    /// Lift a user's ban.
+    Unban { username: String },
+    /// Ban an IP address.
+    BanIp {
+        ip: String,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+    /// Lift an IP ban.
+    UnbanIp { ip: String },
+    /// List banned IP addresses.
+    IpBans,
+    /// Set a user's role (guest | user | admin).
+    Role { username: String, role: String },
+    /// Show recent login attempts.
+    Logins {
+        /// Filter to a single username.
+        #[arg(long)]
+        user: Option<String>,
+        /// Maximum rows to show.
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+        /// Show only failed attempts.
+        #[arg(long)]
+        failures: bool,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let pool = db::connect(&cli.database_url).await?;
+    db::run_migrations(&pool).await?;
+
+    match cli.cmd {
+        Cmd::Users => {
+            let users = admin::list_users(&pool).await?;
+            println!("{:<20} {:<8} {:<8} CREATED", "USERNAME", "ROLE", "STATUS");
+            for u in users {
+                let status = if u.is_banned() { "banned" } else { "ok" };
+                println!(
+                    "{:<20} {:<8} {:<8} {}",
+                    u.username,
+                    u.role,
+                    status,
+                    fmt_time(u.created_at)
+                );
+            }
+        }
+        Cmd::Ban { username } => {
+            admin::ban_user(&pool, &username).await?;
+            println!("banned user '{username}'");
+        }
+        Cmd::Unban { username } => {
+            admin::unban_user(&pool, &username).await?;
+            println!("unbanned user '{username}'");
+        }
+        Cmd::BanIp { ip, reason } => {
+            admin::ban_ip(&pool, &ip, &reason).await?;
+            println!("banned ip '{ip}'");
+        }
+        Cmd::UnbanIp { ip } => {
+            admin::unban_ip(&pool, &ip).await?;
+            println!("unbanned ip '{ip}'");
+        }
+        Cmd::IpBans => {
+            let bans = admin::list_ip_bans(&pool).await?;
+            println!("{:<40} {:<20} REASON", "IP", "WHEN");
+            for b in bans {
+                println!("{:<40} {:<20} {}", b.ip, fmt_time(b.created_at), b.reason);
+            }
+        }
+        Cmd::Role { username, role } => {
+            admin::set_role(&pool, &username, &role).await?;
+            println!("set role of '{username}' to '{role}'");
+        }
+        Cmd::Logins {
+            user,
+            limit,
+            failures,
+        } => {
+            let logins = admin::recent_logins(&pool, user.as_deref(), limit).await?;
+            println!("{:<20} {:<20} {:<8} IP", "WHEN", "USERNAME", "RESULT");
+            for l in logins {
+                if failures && l.success {
+                    continue;
+                }
+                let result = if l.success { "ok" } else { "reject" };
+                println!(
+                    "{:<20} {:<20} {:<8} {}",
+                    fmt_time(l.created_at),
+                    l.username,
+                    result,
+                    l.ip.as_deref().unwrap_or("-")
+                );
+            }
+        }
+    }
+    Ok(())
+}
