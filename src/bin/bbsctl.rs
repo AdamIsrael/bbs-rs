@@ -4,8 +4,11 @@
 //! it works even when the server is offline. Bans applied here reach live
 //! sessions via the server's periodic ban sweeper.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
+use sshtui::config::Settings;
 use sshtui::db;
 use sshtui::services::admin;
 use sshtui::util::fmt_time;
@@ -16,12 +19,31 @@ use sshtui::util::fmt_time;
     about = "Manage the sshtui BBS: users, bans, and login history"
 )]
 struct Cli {
-    /// SQLite database URL (must match the server's).
-    #[arg(long, default_value = "sqlite://bbs.db?mode=rwc")]
-    database_url: String,
+    /// Config file to read the database URL from (must match the server's).
+    #[arg(long, default_value = "bbs.toml")]
+    config: PathBuf,
+
+    /// SQLite database URL. Overrides the value from the config file.
+    #[arg(long)]
+    database_url: Option<String>,
 
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+impl Cli {
+    /// Resolve the database URL: `--database-url` wins, else the config file's
+    /// value, else the built-in default.
+    fn resolve_database_url(&self) -> String {
+        if let Some(url) = &self.database_url {
+            return url.clone();
+        }
+        std::fs::read_to_string(&self.config)
+            .ok()
+            .and_then(|text| toml::from_str::<Settings>(&text).ok())
+            .map(|s| s.network.database_url)
+            .unwrap_or_else(|| Settings::default().network.database_url)
+    }
 }
 
 #[derive(Subcommand)]
@@ -61,7 +83,7 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let pool = db::connect(&cli.database_url).await?;
+    let pool = db::connect(&cli.resolve_database_url()).await?;
     db::run_migrations(&pool).await?;
 
     match cli.cmd {

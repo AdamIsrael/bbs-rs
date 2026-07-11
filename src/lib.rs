@@ -17,21 +17,23 @@ pub mod ssh;
 pub mod transport;
 pub mod util;
 
-use config::Config;
+use std::sync::Arc;
+
+use config::Settings;
 
 /// Open the database, run migrations, seed defaults, and serve over SSH.
-pub async fn serve(config: Config) -> anyhow::Result<()> {
-    let pool = db::connect(&config.database_url).await?;
+pub async fn serve(settings: Settings) -> anyhow::Result<()> {
+    let pool = db::connect(&settings.network.database_url).await?;
     db::run_migrations(&pool).await?;
     services::seed(&pool).await?;
 
+    let config = Arc::new(settings);
     tracing::info!(
-        "sshtui BBS listening on {}:{} (try: ssh guest@{} -p {}, password 'guest')",
-        config.host,
-        config.port,
-        config.host,
-        config.port
+        "{} listening on {}:{}",
+        config.bbs.name,
+        config.network.host,
+        config.network.port
     );
 
-    ssh::run(&config, pool).await
+    ssh::run(config, pool).await
 }

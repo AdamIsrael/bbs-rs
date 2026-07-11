@@ -1,12 +1,19 @@
 //! The main menu should offer "Register New Account" only to the guest account
 //! (the newcomer bootstrap path); registered users must not see it.
 
+use std::sync::Arc;
+
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
 use sshtui::app::App;
 use sshtui::app::state::MenuItem;
+use sshtui::config::Settings;
 use sshtui::services::{self, auth, presence::Presence};
+
+fn config() -> Arc<Settings> {
+    Arc::new(Settings::default())
+}
 
 async fn setup() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
@@ -26,7 +33,7 @@ async fn setup() -> SqlitePool {
 async fn guest_sees_register() {
     let pool = setup().await;
     let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
-    let app = App::new(pool, Presence::new(), guest, 1);
+    let app = App::new(pool, Presence::new(), config(), guest, 1);
     assert!(
         app.menu.contains(&MenuItem::Register),
         "guest should see the Register option"
@@ -37,7 +44,7 @@ async fn guest_sees_register() {
 async fn registered_user_does_not_see_register() {
     let pool = setup().await;
     let user = auth::register_user(&pool, "alice", "pw").await.unwrap();
-    let app = App::new(pool, Presence::new(), user, 1);
+    let app = App::new(pool, Presence::new(), config(), user, 1);
     assert!(
         !app.menu.contains(&MenuItem::Register),
         "registered users should not see the Register option"

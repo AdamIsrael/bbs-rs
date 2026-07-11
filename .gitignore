@@ -1,6 +1,7 @@
 /target
 
 # Runtime artifacts (generated on first run)
+/bbs.toml
 /bbs.db
 /bbs.db-journal
 /bbs.db-wal

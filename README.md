@@ -17,6 +17,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.
 - **Login audit** — every attempt (success or failure) is recorded with username, IP, and time.
 - **`bbsctl`** — an operator CLI for user management that works even when the server is down.
+- **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles.
 
 ## Run it
 
@@ -26,18 +27,49 @@ cargo run --bin sshtui        # or: just run   (the crate builds two binaries: s
 ssh guest@localhost -p 2222   # password: guest
 ```
 
-On first run the server creates `bbs.db` (SQLite) and generates a persistent ed25519 host key
-(`host_key`). Register an account from the guest session (main menu → *Register New Account*), then
-reconnect over SSH as that user for full access.
+On first run the server writes a commented `bbs.toml`, creates `bbs.db` (SQLite), and generates a
+persistent ed25519 host key (`host_key`). Register an account from the guest session
+(main menu → *Register New Account*), then reconnect over SSH as that user for full access.
 
-### Options
+## Configuration
+
+Settings live in **`bbs.toml`** (created with documented defaults on first run). Precedence is
+**defaults < file < CLI flag**. CLI flags:
 
 ```
---host <ADDR>          bind address (default 0.0.0.0)
---port <PORT>          SSH port (default 2222)
---database-url <URL>   SQLite URL (default sqlite://bbs.db?mode=rwc)
---host-key <PATH>      host key path (default host_key)
+--config <PATH>        config file (default bbs.toml)
+--host <ADDR>          override network.host
+--port <PORT>          override network.port
+--database-url <URL>   override network.database_url
+--host-key <PATH>      override network.host_key
 ```
+
+The file has three sections:
+
+```toml
+[bbs]        # branding
+name = "sshtui BBS"
+tagline = "a tiny bulletin board over SSH"
+sysop = ""                       # shown in help footer (blank hides)
+welcome = "Welcome to the board."   # MOTD on the main menu (blank hides)
+
+[network]    # host, port, database_url, host_key, plus:
+inactivity_timeout_secs = 3600
+auth_rejection_time_secs = 2
+ban_sweep_interval_secs = 10
+default_cols = 80
+default_rows = 24
+
+[features]   # turn parts of the BBS off
+registration = true    # in-TUI account creation (from the guest session)
+guest = true           # allow the shared guest account to log in
+private_mail = true
+who_online = true
+```
+
+Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
+(registration is reached from the guest session). `bbsctl` reads the same `bbs.toml` for its database
+URL (`bbsctl --config bbs.toml …`), or takes `--database-url` directly.
 
 Set `RUST_LOG=info` for server logs (written to stderr, never into a client's terminal).
 

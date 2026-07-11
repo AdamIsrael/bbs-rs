@@ -3,7 +3,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 
 use crate::app::App;
@@ -32,7 +32,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ComposeMail => render_form(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
         Screen::Register => render_form(f, body, " Register ", app),
-        Screen::Help => render_help(f, body),
+        Screen::Help => render_help(f, body, app),
         Screen::AdminUsers => render_admin_users(f, body, app),
         Screen::AdminLogins => render_admin_logins(f, body, app),
     }
@@ -42,7 +42,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn render_title(f: &mut Frame, area: Rect, app: &App) {
     let title = format!(
-        " sshtui BBS  ·  {} ({})  ·  {} ",
+        " {}  ·  {} ({})  ·  {} ",
+        app.config.bbs.name,
         app.user.username,
         app.user.role,
         screen_name(app.screen)
@@ -89,6 +90,30 @@ fn render_selectable(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, s
 }
 
 fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
+    let bbs = &app.config.bbs;
+
+    // Branding / MOTD banner above the menu.
+    let mut banner: Vec<Line> = vec![Line::from(Span::styled(
+        bbs.name.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    if !bbs.tagline.is_empty() {
+        banner.push(Line::from(Span::styled(
+            bbs.tagline.clone(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if !bbs.welcome.is_empty() {
+        banner.push(Line::from(""));
+        banner.push(Line::from(bbs.welcome.clone()));
+    }
+    let banner_h = banner.len() as u16 + 2; // + borders
+    let rows = Layout::vertical([Constraint::Length(banner_h), Constraint::Min(1)]).split(area);
+    let banner_widget = Paragraph::new(Text::from(banner))
+        .block(Block::bordered())
+        .wrap(Wrap { trim: false });
+    f.render_widget(banner_widget, rows[0]);
+
     let lines: Vec<Line> = app
         .menu
         .iter()
@@ -100,7 +125,7 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
             Line::from(label)
         })
         .collect();
-    render_selectable(f, area, " Main Menu ", lines, app.menu_sel);
+    render_selectable(f, rows[1], " Main Menu ", lines, app.menu_sel);
 }
 
 fn render_boards(f: &mut Frame, area: Rect, app: &App) {
@@ -274,10 +299,11 @@ fn render_admin_logins(f: &mut Frame, area: Rect, app: &App) {
     render_selectable(f, area, " Admin · Logins ", lines, usize::MAX);
 }
 
-fn render_help(f: &mut Frame, area: Rect) {
-    let text = "\
-sshtui — a tiny bulletin board over SSH
-
+fn render_help(f: &mut Frame, area: Rect, app: &App) {
+    let bbs = &app.config.bbs;
+    let mut text = format!("{} — {}\n\n", bbs.name, bbs.tagline);
+    text.push_str(
+        "\
   • Message Boards : browse boards, read and (registered users) post messages
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
@@ -288,7 +314,11 @@ Navigation
   In forms: Tab/↑/↓ switch fields, Enter submits on the last field.
 
 The guest account is read-only: it can browse boards and see who's online,
-but cannot post or use mail. Register an account for the full experience.";
+but cannot post or use mail. Register an account for the full experience.",
+    );
+    if !bbs.sysop.is_empty() {
+        text.push_str(&format!("\n\nSysop: {}", bbs.sysop));
+    }
     let p = Paragraph::new(text)
         .block(Block::bordered().title(" Help "))
         .wrap(Wrap { trim: false });

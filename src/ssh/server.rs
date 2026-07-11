@@ -16,7 +16,7 @@ use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc;
 
 use crate::app::{self, App};
-use crate::config;
+use crate::config::Settings;
 use crate::db::models::User;
 use crate::input;
 use crate::services::presence::Presence;
@@ -29,6 +29,7 @@ use crate::transport::Event;
 struct BbsServer {
     pool: SqlitePool,
     presence: Presence,
+    config: Arc<Settings>,
     next_id: usize,
 }
 
@@ -40,6 +41,7 @@ impl Server for BbsServer {
         SessionHandler {
             pool: self.pool.clone(),
             presence: self.presence.clone(),
+            config: self.config.clone(),
             id: self.next_id,
             peer: addr,
             user: None,
@@ -54,6 +56,7 @@ impl Server for BbsServer {
 struct SessionHandler {
     pool: SqlitePool,
     presence: Presence,
+    config: Arc<Settings>,
     id: usize,
     /// The client's address, captured at connection for login logging and IP bans.
     peer: Option<SocketAddr>,
@@ -78,6 +81,12 @@ impl Handler for SessionHandler {
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         let ip = self.ip();
+        // The guest account can be disabled by config; record the rejected
+        // attempt for the audit trail and refuse.
+        if user == "guest" && !self.config.features.guest {
+            let _ = admin::record_login(&self.pool, user, ip.as_deref(), false).await;
+            return Ok(Auth::reject());
+        }
         // `attempt_login` handles IP-ban and account-ban checks and records the
         // attempt (success or failure) in the login audit trail.
         match auth::attempt_login(&self.pool, user, password, ip.as_deref()).await {
@@ -126,7 +135,7 @@ impl Handler for SessionHandler {
         _modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let (w, h) = clamp_size(col_width, row_height);
+        let (w, h) = clamp_size(col_width, row_height, &self.config);
         if let Some(terminal) = self.terminal.as_mut() {
             resize_terminal(terminal, w, h);
         }
@@ -147,7 +156,13 @@ impl Handler for SessionHandler {
                     .join(self.id, user.username.clone(), self.ip(), tx)
                     .await;
 
-                let app = App::new(self.pool.clone(), self.presence.clone(), user, self.id);
+                let app = App::new(
+                    self.pool.clone(),
+                    self.presence.clone(),
+                    self.config.clone(),
+                    user,
+                    self.id,
+                );
                 let id = self.id;
                 // The app loop is transport-agnostic; when it returns (user quit
                 // or disconnect), close the SSH channel here so the client exits.
@@ -194,7 +209,7 @@ impl Handler for SessionHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         if let Some(tx) = &self.events_tx {
-            let (w, h) = clamp_size(col_width, row_height);
+            let (w, h) = clamp_size(col_width, row_height, &self.config);
             let _ = tx.send(Event::Resize(w, h)).await;
         }
         Ok(())
@@ -216,15 +231,15 @@ fn resize_terminal(terminal: &mut SshTerminal, w: u16, h: u16) {
 }
 
 /// Clamp a client-reported terminal size to something drawable. Some clients
-/// (and non-interactive PTYs) report 0x0; fall back to a conventional 80x24.
-fn clamp_size(cols: u32, rows: u32) -> (u16, u16) {
+/// (and non-interactive PTYs) report 0x0; fall back to the configured default.
+fn clamp_size(cols: u32, rows: u32, config: &Settings) -> (u16, u16) {
     let w = if cols == 0 {
-        80
+        config.network.default_cols
     } else {
         cols.min(u16::MAX as u32) as u16
     };
     let h = if rows == 0 {
-        24
+        config.network.default_rows
     } else {
         rows.min(u16::MAX as u32) as u16
     };
@@ -263,14 +278,11 @@ fn load_or_generate_host_key(path: &Path) -> anyhow::Result<russh::keys::Private
     }
 }
 
-/// How often the ban sweeper checks live sessions against the ban lists.
-const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
-
 /// Periodically drop live sessions belonging to banned users or IPs. This is
 /// how bans applied out-of-process (by `bbsctl`) reach active sessions; in-BBS
 /// admin bans also kick immediately.
-async fn ban_sweeper(pool: SqlitePool, presence: Presence) {
-    let mut ticker = tokio::time::interval(BAN_SWEEP_INTERVAL);
+async fn ban_sweeper(pool: SqlitePool, presence: Presence, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
         let (users, ips) =
@@ -292,28 +304,33 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence) {
 }
 
 /// Bind and serve the SSH BBS until the process is stopped.
-pub async fn run(cfg: &config::Config, pool: SqlitePool) -> anyhow::Result<()> {
+pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> {
+    let net = &config.network;
     let presence = Presence::new();
-    let key = load_or_generate_host_key(&cfg.host_key)?;
+    let key = load_or_generate_host_key(&net.host_key)?;
 
-    tokio::spawn(ban_sweeper(pool.clone(), presence.clone()));
+    tokio::spawn(ban_sweeper(
+        pool.clone(),
+        presence.clone(),
+        net.ban_sweep_interval(),
+    ));
 
     let ssh_config = Config {
-        inactivity_timeout: Some(Duration::from_secs(3600)),
-        auth_rejection_time: Duration::from_secs(2),
+        inactivity_timeout: Some(net.inactivity_timeout()),
+        auth_rejection_time: net.auth_rejection_time(),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
         keys: vec![key],
         nodelay: true,
         ..Default::default()
     };
 
+    let addr = (net.host.clone(), net.port);
     let mut server = BbsServer {
         pool,
         presence,
+        config,
         next_id: 0,
     };
-    server
-        .run_on_address(Arc::new(ssh_config), (cfg.host.as_str(), cfg.port))
-        .await?;
+    server.run_on_address(Arc::new(ssh_config), addr).await?;
     Ok(())
 }

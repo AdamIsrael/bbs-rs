@@ -12,7 +12,9 @@ use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc::Receiver;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use crate::config::Settings;
 use crate::db::models::{Board, Login, Mail, Message, User};
 use crate::error::AppError;
 use crate::services::presence::{OnlineUser, Presence};
@@ -25,6 +27,7 @@ use state::{Field, Form, MenuItem, Screen};
 pub struct App {
     pool: SqlitePool,
     presence: Presence,
+    pub config: Arc<Settings>,
     pub user: User,
     session_id: usize,
 
@@ -65,11 +68,24 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(pool: SqlitePool, presence: Presence, user: User, session_id: usize) -> Self {
-        // Registration is the newcomer bootstrap path — only the guest account,
-        // which is how newcomers get in, needs it. Registered users don't.
-        let mut menu = vec![MenuItem::Boards, MenuItem::Mail, MenuItem::Who];
-        if user.is_guest() {
+    pub fn new(
+        pool: SqlitePool,
+        presence: Presence,
+        config: Arc<Settings>,
+        user: User,
+        session_id: usize,
+    ) -> Self {
+        // Menu honors the feature toggles. Registration is the newcomer
+        // bootstrap path, so it's only offered to the guest account.
+        let f = &config.features;
+        let mut menu = vec![MenuItem::Boards];
+        if f.private_mail {
+            menu.push(MenuItem::Mail);
+        }
+        if f.who_online {
+            menu.push(MenuItem::Who);
+        }
+        if user.is_guest() && f.registration {
             menu.push(MenuItem::Register);
         }
         if user.is_admin() {
@@ -80,6 +96,7 @@ impl App {
         Self {
             pool,
             presence,
+            config,
             user,
             session_id,
             screen: Screen::MainMenu,
@@ -480,6 +497,10 @@ impl App {
     }
 
     async fn submit_register(&mut self) {
+        if !self.config.features.registration {
+            self.status = "Registration is disabled.".into();
+            return;
+        }
         let username = self.form.value(0).to_string();
         let password = self.form.value(1).to_string();
         let confirm = self.form.value(2).to_string();
