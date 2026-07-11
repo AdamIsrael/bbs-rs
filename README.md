@@ -1,5 +1,7 @@
 # bbs-rs
 
+[![CI](https://github.com/AdamIsrael/bbs-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/AdamIsrael/bbs-rs/actions/workflows/ci.yml)
+
 A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust with
 [`russh`](https://crates.io/crates/russh) (SSH server), [`ratatui`](https://crates.io/crates/ratatui)
 (terminal UI), and [`sqlx`](https://crates.io/crates/sqlx) + SQLite (users, boards, messages, mail).
@@ -141,4 +143,14 @@ just lint         # clippy (warnings as errors) + rustfmt check
 just fmt          # format the source
 just reset-db     # delete bbs.db (recreated + seeded on next run)
 just ci           # fmt + lint + test
+```
+
+## CI & releases
+
+[GitHub Actions](.github/workflows) run `fmt`/`clippy`/`build`/`test` on every push and PR. Pushing a
+version tag builds release binaries (`bbs-rs` + `bbsctl`) for Linux and macOS and publishes them as a
+GitHub Release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
 ```
