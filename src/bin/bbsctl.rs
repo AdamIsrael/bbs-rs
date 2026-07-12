@@ -10,7 +10,8 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::{admin, boards, bulletins, oneliners};
+use bbs_rs::services::{admin, auth, boards, bulletins, keys, oneliners};
+use bbs_rs::ssh::pubkey;
 use bbs_rs::util::fmt_time;
 
 #[derive(Parser)]
@@ -72,6 +73,22 @@ enum Cmd {
     IpBans,
     /// Set a user's role (guest | user | admin).
     Role { username: String, role: String },
+    /// List a user's registered SSH public keys.
+    Keys { username: String },
+    /// Register an SSH public key for a user (pass the key line, or --file).
+    AddKey {
+        username: String,
+        /// The public-key line ("ssh-ed25519 AAAA… comment").
+        key: Option<String>,
+        /// Read the key from a file instead of the positional argument.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Optional label (defaults to the key's comment).
+        #[arg(long, default_value = "")]
+        label: String,
+    },
+    /// Remove a registered SSH public key by its id.
+    RmKey { id: i64 },
     /// List boards with their read/write ACLs and lock state.
     Boards,
     /// Configure a board's ACLs and/or lock state.
@@ -204,6 +221,50 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Role { username, role } => {
             admin::set_role(&pool, &username, &role).await?;
             println!("set role of '{username}' to '{role}'");
+        }
+        Cmd::Keys { username } => {
+            let user = auth::find_user(&pool, &username)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no such user: {username}"))?;
+            let list = keys::list_keys(&pool, user.id).await?;
+            println!("{:<5} {:<12} {:<20} FINGERPRINT", "ID", "ALGO", "LABEL");
+            for k in list {
+                let label = if k.label.is_empty() { "-" } else { &k.label };
+                println!(
+                    "{:<5} {:<12} {:<20} {}",
+                    k.id, k.algorithm, label, k.fingerprint
+                );
+            }
+        }
+        Cmd::AddKey {
+            username,
+            key,
+            file,
+            label,
+        } => {
+            let user = auth::find_user(&pool, &username)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no such user: {username}"))?;
+            let line = match (key, file) {
+                (Some(k), None) => k,
+                (None, Some(path)) => std::fs::read_to_string(&path)?,
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("pass either a key argument or --file, not both")
+                }
+                (None, None) => anyhow::bail!("provide the key line or --file <path>"),
+            };
+            let parsed = pubkey::register(&pool, user.id, &line, &label).await?;
+            println!(
+                "added {} key for '{username}' ({})",
+                parsed.algorithm, parsed.fingerprint
+            );
+        }
+        Cmd::RmKey { id } => {
+            if keys::delete_key_by_id(&pool, id).await? {
+                println!("removed key #{id}");
+            } else {
+                println!("no key #{id}");
+            }
         }
         Cmd::Boards => {
             let list = boards::list_boards(&pool).await?;

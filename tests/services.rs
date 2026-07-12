@@ -352,6 +352,93 @@ async fn rate_limits_throttle_non_admins() {
 }
 
 #[tokio::test]
+async fn pubkey_register_authorize_and_delete() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{admin, auth, keys};
+    use bbs_rs::ssh::pubkey;
+    const K1: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJUWRla9Q/lGz4Xu2VckCtOLy1oQQIaFUAfak+oJMNO9 alice@laptop";
+    const K2: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIDJ3mlwBDZiIC4VrfpTcrFBGOlAKltRIoPjd2ONkD2 bob@desktop";
+    let pool = setup().await;
+
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // Parsing extracts algorithm / fingerprint / comment.
+    let parsed = pubkey::parse(K1).unwrap();
+    assert_eq!(parsed.algorithm, "ssh-ed25519");
+    assert!(parsed.fingerprint.starts_with("SHA256:"));
+    assert_eq!(parsed.comment, "alice@laptop");
+
+    // Register it for alice; the label defaults to the key's comment.
+    pubkey::register(&pool, alice.id, K1, "").await.unwrap();
+    let list = keys::list_keys(&pool, alice.id).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].label, "alice@laptop");
+    let fpr = list[0].fingerprint.clone();
+    let key_id = list[0].id;
+
+    // Duplicate and invalid registrations are rejected.
+    assert!(matches!(
+        pubkey::register(&pool, alice.id, K1, "").await,
+        Err(AppError::KeyExists)
+    ));
+    assert!(matches!(
+        pubkey::register(&pool, alice.id, "not a key", "").await,
+        Err(AppError::InvalidKey(_))
+    ));
+
+    // Authorization matches the right (username, fingerprint) pair only.
+    assert!(keys::is_authorized(&pool, "alice", &fpr).await.unwrap());
+    assert_eq!(
+        keys::find_authorized(&pool, "alice", &fpr)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        alice.id
+    );
+    assert!(!keys::is_authorized(&pool, "guest", &fpr).await.unwrap());
+    let other = pubkey::parse(K2).unwrap();
+    assert!(
+        !keys::is_authorized(&pool, "alice", &other.fingerprint)
+            .await
+            .unwrap()
+    );
+
+    // The full login helper authenticates a known key and rejects an unknown one.
+    assert_eq!(
+        auth::attempt_pubkey_login(&pool, "alice", &fpr, Some("1.2.3.4"))
+            .await
+            .unwrap()
+            .unwrap()
+            .username,
+        "alice"
+    );
+    assert!(
+        auth::attempt_pubkey_login(&pool, "alice", &other.fingerprint, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A banned account can't authenticate even with a valid key.
+    admin::ban_user(&pool, "alice").await.unwrap();
+    assert!(
+        auth::attempt_pubkey_login(&pool, "alice", &fpr, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    admin::unban_user(&pool, "alice").await.unwrap();
+
+    // Deletion is scoped to the owner.
+    assert!(!keys::delete_key(&pool, 999, key_id).await.unwrap());
+    assert!(keys::delete_key(&pool, alice.id, key_id).await.unwrap());
+    assert!(keys::list_keys(&pool, alice.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn mail_send_read_and_guardrails() {
     let pool = setup().await;
     let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())

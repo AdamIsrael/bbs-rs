@@ -20,7 +20,8 @@ use crate::config::Settings;
 use crate::db::models::User;
 use crate::input;
 use crate::services::presence::Presence;
-use crate::services::{admin, auth};
+use crate::services::{admin, auth, keys};
+use crate::ssh::pubkey;
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
 use crate::transport::Event;
 
@@ -102,9 +103,44 @@ impl Handler for SessionHandler {
         }
     }
 
-    // Public-key auth is not offered yet; password only for now.
-    async fn auth_publickey(&mut self, _user: &str, _key: &PublicKey) -> Result<Auth, Self::Error> {
-        Ok(Auth::reject())
+    /// Pre-signature probe: accept only keys already registered to `user`, so a
+    /// client isn't prompted to sign with keys we'd reject anyway. Ownership is
+    /// still proven later in [`Self::auth_publickey`].
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if !self.config.features.pubkey_auth {
+            return Ok(Auth::reject());
+        }
+        let fpr = pubkey::fingerprint(key);
+        match keys::is_authorized(&self.pool, user, &fpr).await {
+            Ok(true) => Ok(Auth::Accept),
+            _ => Ok(Auth::reject()),
+        }
+    }
+
+    /// Called after russh has verified the client owns `key` (signature check).
+    /// Authenticate iff the key is registered to `user` and the account/IP is
+    /// not banned.
+    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+        if !self.config.features.pubkey_auth {
+            return Ok(Auth::reject());
+        }
+        let ip = self.ip();
+        let fpr = pubkey::fingerprint(key);
+        match auth::attempt_pubkey_login(&self.pool, user, &fpr, ip.as_deref()).await {
+            Ok(Some(u)) => {
+                self.user = Some(u);
+                Ok(Auth::Accept)
+            }
+            Ok(None) => Ok(Auth::reject()),
+            Err(e) => {
+                tracing::warn!("pubkey auth failed for {user:?}: {e}");
+                Ok(Auth::reject())
+            }
+        }
     }
 
     async fn channel_open_session(
@@ -340,16 +376,21 @@ async fn auto_ban(pool: &SqlitePool, abuse: &crate::config::Abuse) {
     }
 }
 
-/// The SSH auth methods to advertise. We only implement password auth, so we
-/// advertise *only* password — never russh's default `MethodSet::all()`.
+/// The SSH auth methods to advertise — only the ones we actually accept, never
+/// russh's default `MethodSet::all()`.
 ///
-/// Advertising publickey/hostbased/keyboard-interactive (which we don't accept)
-/// makes clients offer every key in their ssh-agent; russh delays each
-/// rejection by `auth_rejection_time`, so a full agent means 30–60s of dead air
-/// before the password prompt appears — a login that looks hung but isn't.
-fn advertised_methods() -> russh::MethodSet {
+/// Advertising methods we don't implement (hostbased, keyboard-interactive, or
+/// publickey when it's disabled) makes clients offer credentials we'd reject;
+/// russh delays each rejection by `auth_rejection_time`, so a full ssh-agent
+/// means 30–60s of dead air before the password prompt — a login that looks
+/// hung but isn't. Publickey is advertised only when `features.pubkey_auth` is
+/// on (and even then a client only offers its own keys).
+fn advertised_methods(config: &Settings) -> russh::MethodSet {
     let mut methods = russh::MethodSet::empty();
     methods.push(russh::MethodKind::Password);
+    if config.features.pubkey_auth {
+        methods.push(russh::MethodKind::PublicKey);
+    }
     methods
 }
 
@@ -362,7 +403,7 @@ pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> 
     tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
 
     let ssh_config = Config {
-        methods: advertised_methods(),
+        methods: advertised_methods(&config),
         inactivity_timeout: Some(net.inactivity_timeout()),
         auth_rejection_time: net.auth_rejection_time(),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
@@ -387,14 +428,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advertises_only_password() {
+    fn never_advertises_methods_we_dont_implement() {
         // Regression guard for the "hung login" bug: we must not advertise auth
-        // methods we don't implement, or clients waste 30–60s offering keys.
-        let m = advertised_methods();
-        assert!(m.contains(&russh::MethodKind::Password));
-        assert!(!m.contains(&russh::MethodKind::PublicKey));
-        assert!(!m.contains(&russh::MethodKind::KeyboardInteractive));
-        assert!(!m.contains(&russh::MethodKind::HostBased));
-        assert!(!m.contains(&russh::MethodKind::None));
+        // methods we don't accept, or clients waste 30–60s offering keys.
+        for pubkey in [true, false] {
+            let mut cfg = Settings::default();
+            cfg.features.pubkey_auth = pubkey;
+            let m = advertised_methods(&cfg);
+            assert!(m.contains(&russh::MethodKind::Password));
+            assert!(!m.contains(&russh::MethodKind::KeyboardInteractive));
+            assert!(!m.contains(&russh::MethodKind::HostBased));
+            assert!(!m.contains(&russh::MethodKind::None));
+            // Publickey is advertised iff the feature is enabled.
+            assert_eq!(m.contains(&russh::MethodKind::PublicKey), pubkey);
+        }
     }
 }

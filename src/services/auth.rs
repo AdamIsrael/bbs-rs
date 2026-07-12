@@ -86,6 +86,32 @@ pub async fn attempt_login(
     Ok(outcome)
 }
 
+/// The public-key counterpart to [`attempt_login`]: authenticate `username` by
+/// a verified SSH key `fingerprint`. russh has already checked the client owns
+/// the key (signature verified) before this is called. Rejects banned IPs and
+/// banned accounts, and records every attempt in the audit trail.
+pub async fn attempt_pubkey_login(
+    pool: &SqlitePool,
+    username: &str,
+    fingerprint: &str,
+    ip: Option<&str>,
+) -> Result<Option<User>> {
+    if let Some(ip) = ip
+        && admin::is_ip_banned(pool, ip).await?
+    {
+        admin::record_login(pool, username, Some(ip), false).await?;
+        return Ok(None);
+    }
+
+    let outcome = match crate::services::keys::find_authorized(pool, username, fingerprint).await? {
+        Some(user) if !user.is_banned() => Some(user),
+        _ => None,
+    };
+
+    admin::record_login(pool, username, ip, outcome.is_some()).await?;
+    Ok(outcome)
+}
+
 /// Create a new `user`-role account. Registration is reachable from the guest
 /// session so newcomers can bootstrap an account, then reconnect over SSH.
 ///
