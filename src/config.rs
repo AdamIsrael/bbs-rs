@@ -33,6 +33,10 @@ pub struct Cli {
     /// Override the SSH host-key path.
     #[arg(long)]
     pub host_key: Option<PathBuf>,
+
+    /// Apply pending database migrations and exit, without starting the server.
+    #[arg(long)]
+    pub migrate: bool,
 }
 
 /// Full runtime configuration. Every section is `#[serde(default)]`, so a

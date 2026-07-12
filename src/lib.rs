@@ -37,3 +37,19 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 
     ssh::run(config, pool).await
 }
+
+/// Apply pending migrations and report, without starting the server. Backs
+/// `bbs-rs --migrate` so a released binary can migrate after an upgrade.
+pub async fn migrate(settings: Settings) -> anyhow::Result<()> {
+    let pool = db::connect(&settings.network.database_url).await?;
+    let newly = db::run_migrations_reporting(&pool).await?;
+    if newly.is_empty() {
+        println!("database is up to date");
+    } else {
+        for v in &newly {
+            println!("applied migration {v}");
+        }
+        println!("applied {} migration(s)", newly.len());
+    }
+    Ok(())
+}
