@@ -12,6 +12,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Accounts** — a shared limited `guest/guest` account plus in-TUI registration of real users
   (passwords hashed with argon2, stored in SQLite).
 - **Message boards** — browse boards, read messages, and (registered users) post.
+- **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
+  of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users.
@@ -111,6 +113,8 @@ bbsctl post-bulletin <title> --body <text>          # post a bulletin
 bbsctl rm-bulletin <id>          # remove a bulletin
 bbsctl oneliners [--limit N]     # list recent oneliners (graffiti wall)
 bbsctl rm-oneliner <id>          # remove a oneliner (moderation)
+bbsctl boards                    # list boards with read/write ACLs and lock state
+bbsctl set-board <name> [--read ROLE] [--write ROLE] [--lock|--unlock]   # configure a board
 ```
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
@@ -135,6 +139,15 @@ they're also reachable any time from the main menu.
 user can append one from the **Oneliners** menu (press `n`); guests are read-only, like on the boards.
 Sysops can prune the wall with `bbsctl rm-oneliner <id>`, and the whole feature can be turned off with
 `[features].oneliners = false`.
+
+**Board moderation & ACLs.** Each board has a minimum **read** and **write** role (`guest` < `user` <
+`admin`) and a **locked** flag. Defaults preserve the classic behavior — anyone may read, registered
+users may post — and the seeded *Announcements* board is admin-only to post to. Configure boards with
+`bbsctl set-board <name> --read <role> --write <role>` (or `--lock`/`--unlock`); `bbsctl boards` shows
+the current settings. In the BBS, `admin`-role users get extra keys on the board screens: `l` to
+lock/unlock the selected board, and on a board's message list `p` to pin/unpin and `d` to delete the
+selected post. Pinned posts sort to the top. A locked board rejects new posts from everyone (unlock to
+resume); boards a user can't read are hidden from their board list.
 
 ## Upgrading & migrations
 

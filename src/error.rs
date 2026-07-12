@@ -25,6 +25,12 @@ pub enum AppError {
     #[error("oneliner must be 1–{0} characters")]
     OnelinerLength(usize),
 
+    #[error("this board is locked")]
+    BoardLocked,
+
+    #[error("you don't have permission to post to this board")]
+    BoardWriteDenied,
+
     #[error("recipient not found")]
     RecipientNotFound,
 

@@ -127,6 +127,98 @@ async fn guest_cannot_post_but_users_can() {
 }
 
 #[tokio::test]
+async fn board_acls_lock_and_moderation() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+
+    let all = boards::list_boards(&pool).await.unwrap();
+    let general = all.iter().find(|b| b.name == "General").unwrap().clone();
+    let announce = all
+        .iter()
+        .find(|b| b.name == "Announcements")
+        .unwrap()
+        .clone();
+    // Seed sets Announcements to admin-only writes.
+    assert_eq!(announce.min_write_role, "admin");
+
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let admin = auth::register_user(&pool, "adminuser", "pw", &Default::default())
+        .await
+        .unwrap();
+    bbs_rs::services::admin::set_role(&pool, "adminuser", "admin")
+        .await
+        .unwrap();
+    let admin = auth::find_user(&pool, &admin.username)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Write ACL: a regular user can't post to the admin-only board; an admin can.
+    assert!(matches!(
+        boards::post_message(&pool, announce.id, &alice, "s", "b").await,
+        Err(AppError::BoardWriteDenied)
+    ));
+    boards::post_message(&pool, announce.id, &admin, "News", "hi")
+        .await
+        .unwrap();
+
+    // Lock: a locked board rejects everyone, including admins.
+    boards::set_locked(&pool, general.id, true).await.unwrap();
+    assert!(matches!(
+        boards::post_message(&pool, general.id, &alice, "s", "b").await,
+        Err(AppError::BoardLocked)
+    ));
+    assert!(matches!(
+        boards::post_message(&pool, general.id, &admin, "s", "b").await,
+        Err(AppError::BoardLocked)
+    ));
+    boards::set_locked(&pool, general.id, false).await.unwrap();
+    boards::post_message(&pool, general.id, &alice, "first", "b")
+        .await
+        .unwrap();
+    boards::post_message(&pool, general.id, &alice, "second", "b")
+        .await
+        .unwrap();
+
+    // Pin: a pinned message sorts to the top regardless of recency.
+    let msgs = boards::list_messages(&pool, general.id).await.unwrap();
+    let first = msgs.iter().find(|m| m.subject == "first").unwrap();
+    assert_eq!(msgs[0].subject, "second", "newest first before pinning");
+    boards::set_pinned(&pool, first.id, true).await.unwrap();
+    let msgs = boards::list_messages(&pool, general.id).await.unwrap();
+    assert_eq!(msgs[0].subject, "first", "pinned floats to the top");
+    assert!(msgs[0].pinned);
+
+    // Delete: moderation removes a post.
+    assert!(boards::delete_message(&pool, first.id).await.unwrap());
+    assert!(!boards::delete_message(&pool, first.id).await.unwrap());
+    let msgs = boards::list_messages(&pool, general.id).await.unwrap();
+    assert_eq!(msgs.len(), 1);
+
+    // Read ACL: making a board admin-read hides it from lower roles.
+    boards::set_roles(&pool, "General", Some("admin"), None)
+        .await
+        .unwrap();
+    let user_view = boards::list_readable_boards(&pool, &alice.role)
+        .await
+        .unwrap();
+    assert!(!user_view.iter().any(|b| b.name == "General"));
+    let admin_view = boards::list_readable_boards(&pool, &admin.role)
+        .await
+        .unwrap();
+    assert!(admin_view.iter().any(|b| b.name == "General"));
+
+    // Invalid roles are rejected.
+    assert!(matches!(
+        boards::set_roles(&pool, "General", Some("superuser"), None).await,
+        Err(AppError::BadRole(_))
+    ));
+}
+
+#[tokio::test]
 async fn mail_send_read_and_guardrails() {
     let pool = setup().await;
     let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())

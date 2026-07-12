@@ -64,7 +64,7 @@ fn render_title(f: &mut Frame, area: Rect, app: &App) {
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if app.status.is_empty() {
         (
-            hints(app.screen).to_string(),
+            hints(app.screen, app.user.is_admin()),
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -194,13 +194,38 @@ fn render_boards(f: &mut Frame, area: Rect, app: &App) {
     let lines: Vec<Line> = app
         .boards
         .iter()
-        .map(|b| Line::from(format!("{:<16} {}", b.name, b.description)))
+        .map(|b| {
+            let mut flags = String::new();
+            if b.locked {
+                flags.push_str(" [locked]");
+            }
+            if b.min_write_role != "user" {
+                flags.push_str(&format!(" [{}+ to post]", b.min_write_role));
+            }
+            if b.min_read_role != "guest" {
+                flags.push_str(&format!(" [{}+ to read]", b.min_read_role));
+            }
+            Line::from(vec![
+                Span::raw(format!("{:<16} {}", b.name, b.description)),
+                Span::styled(flags, Style::default().fg(Color::DarkGray)),
+            ])
+        })
         .collect();
     render_selectable(f, area, " Boards ", lines, app.board_sel);
 }
 
 fn render_messages(f: &mut Frame, area: Rect, app: &App) {
-    let title = format!(" {} ", app.current_board_name);
+    let name = app
+        .current_board
+        .as_ref()
+        .map(|b| b.name.as_str())
+        .unwrap_or("");
+    let locked = app.current_board.as_ref().is_some_and(|b| b.locked);
+    let title = if locked {
+        format!(" {name} [locked] ")
+    } else {
+        format!(" {name} ")
+    };
     if app.messages.is_empty() {
         return placeholder(f, area, &title, "No messages yet. Press 'n' to post.");
     }
@@ -208,8 +233,10 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
         .messages
         .iter()
         .map(|m| {
+            let pin = if m.pinned { "📌 " } else { "   " };
             Line::from(format!(
-                "{:<32} {:<12} {}",
+                "{}{:<32} {:<12} {}",
+                pin,
                 truncate(&m.subject, 32),
                 truncate(&m.author_name, 12),
                 fmt_time(m.created_at)
@@ -368,6 +395,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
     text.push_str(
         "\
   • Message Boards : browse boards, read and (registered users) post messages
+                     (admins: l lock a board, p pin, d delete a post)
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
@@ -418,14 +446,26 @@ fn screen_name(screen: Screen) -> &'static str {
     }
 }
 
-fn hints(screen: Screen) -> &'static str {
-    match screen {
+fn hints(screen: Screen, is_admin: bool) -> String {
+    let base = match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
         Screen::Oneliners => " n new · Esc back ",
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
-        Screen::BoardList => " ↑/↓ move · Enter open · Esc back ",
-        Screen::MessageList => " ↑/↓ move · Enter read · n new post · Esc back ",
+        Screen::BoardList => {
+            if is_admin {
+                " ↑/↓ move · Enter open · l lock/unlock · Esc back "
+            } else {
+                " ↑/↓ move · Enter open · Esc back "
+            }
+        }
+        Screen::MessageList => {
+            if is_admin {
+                " ↑/↓ move · Enter read · n post · p pin · d delete · Esc back "
+            } else {
+                " ↑/↓ move · Enter read · n new post · Esc back "
+            }
+        }
         Screen::ReadMessage | Screen::ReadMail | Screen::ReadBulletin | Screen::Help => {
             " Esc back "
         }
@@ -436,7 +476,8 @@ fn hints(screen: Screen) -> &'static str {
         Screen::WhoOnline => " r refresh · Esc back ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
         Screen::AdminLogins => " Esc back ",
-    }
+    };
+    base.to_string()
 }
 
 fn truncate(s: &str, max: usize) -> String {

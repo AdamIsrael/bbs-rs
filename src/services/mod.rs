@@ -13,6 +13,12 @@ use sqlx::sqlite::SqlitePool;
 
 use crate::error::Result;
 
+/// Rank a role for access comparisons: `guest` < `user` < `admin`. An unknown
+/// role ranks as the most restrictive (0), so a typo never grants access.
+pub fn role_rank(role: &str) -> usize {
+    admin::ROLES.iter().position(|r| *r == role).unwrap_or(0)
+}
+
 /// One-time startup seeding: the guest account and default boards.
 pub async fn seed(pool: &SqlitePool) -> Result<()> {
     auth::ensure_guest(pool).await?;

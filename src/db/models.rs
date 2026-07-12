@@ -77,6 +77,25 @@ pub struct Board {
     pub id: i64,
     pub name: String,
     pub description: String,
+    /// Minimum role required to read this board (`guest` | `user` | `admin`).
+    pub min_read_role: String,
+    /// Minimum role required to post to this board.
+    pub min_write_role: String,
+    /// When set, the board is frozen: no new posts (until an admin unlocks it).
+    pub locked: bool,
+}
+
+impl Board {
+    /// Whether a viewer with `role` may read this board.
+    pub fn can_read(&self, role: &str) -> bool {
+        crate::services::role_rank(role) >= crate::services::role_rank(&self.min_read_role)
+    }
+
+    /// Whether a viewer with `role` may post to this board (ignoring the lock,
+    /// which is checked separately so the UI can explain *why*).
+    pub fn can_write(&self, role: &str) -> bool {
+        crate::services::role_rank(role) >= crate::services::role_rank(&self.min_write_role)
+    }
 }
 
 /// A board message joined with its author's name (`author_name`).
@@ -89,6 +108,8 @@ pub struct Message {
     pub subject: String,
     pub body: String,
     pub created_at: i64,
+    /// Pinned messages sort to the top of a board (moderator highlight).
+    pub pinned: bool,
 }
 
 /// A private message joined with the sender's name (`from_name`).
