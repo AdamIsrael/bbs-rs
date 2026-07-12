@@ -22,6 +22,9 @@ pub enum AppError {
     #[error("that action is not available to the guest account")]
     GuestNotAllowed,
 
+    #[error("oneliner must be 1–{0} characters")]
+    OnelinerLength(usize),
+
     #[error("recipient not found")]
     RecipientNotFound,
 

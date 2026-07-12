@@ -92,6 +92,7 @@ pub struct Features {
     pub guest: bool,
     pub private_mail: bool,
     pub who_online: bool,
+    pub oneliners: bool,
 }
 
 /// Abuse protection: auto-ban IPs with repeated failed logins.
@@ -179,6 +180,7 @@ impl Default for Features {
             guest: true,
             private_mail: true,
             who_online: true,
+            oneliners: true,
         }
     }
 }
@@ -280,6 +282,8 @@ guest = true
 private_mail = true
 # Enable the who's-online view.
 who_online = true
+# Enable the oneliners / graffiti wall.
+oneliners = true
 
 [abuse]
 # Auto-ban an IP after this many failed logins within the window. 0 disables.
@@ -310,6 +314,7 @@ mod tests {
             def.network.ban_sweep_interval_secs
         );
         assert_eq!(parsed.features.registration, def.features.registration);
+        assert_eq!(parsed.features.oneliners, def.features.oneliners);
         assert_eq!(
             parsed.accounts.reserved_usernames,
             def.accounts.reserved_usernames

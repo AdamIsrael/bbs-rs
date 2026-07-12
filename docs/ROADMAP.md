@@ -30,7 +30,7 @@ These are done and are the substrate several roadmap items build on:
 | Feature | Size | What & why | Depends on / status |
 |---|---|---|---|
 | [**Bulletins / news**](https://github.com/AdamIsrael/bbs-rs/issues/1) | S | A short list of sysop bulletins shown after login, beyond the single `bbs.welcome` MOTD. Classic "call of the day" feel. | MOTD already exists via config; add a `bulletins` table + a screen. |
-| [**Oneliners / graffiti wall**](https://github.com/AdamIsrael/bbs-rs/issues/2) | S | A shared ring of short public messages users can append to and read. Iconic BBS feature, cheap to build. | New table + one screen; reuse the compose-form pattern. |
+| [**Oneliners / graffiti wall**](https://github.com/AdamIsrael/bbs-rs/issues/2) | S | A shared ring of short public messages users can append to and read. Iconic BBS feature, cheap to build. | **Shipped**: `oneliners` table + screen, `features.oneliners` toggle, `bbsctl oneliners`/`rm-oneliner`. |
 | [**Board moderation & ACLs**](https://github.com/AdamIsrael/bbs-rs/issues/3) | M | Admins/mods pin, lock, and delete posts; per-board read/write role requirements (e.g. an admin-only Announcements board). | Builds on the `admin` role and services layer; add a `min_role`/flags column to `boards`/`messages`. |
 | [**fail2ban / auto-ban**](https://github.com/AdamIsrael/bbs-rs/issues/4) | M | Auto-ban an IP after N failed logins in a window; feed the existing ban sweeper. | **Substrate exists**: the `logins` table + `admin::ban_ip`. Just needs the detection policy. |
 | [**Public-key SSH auth**](https://github.com/AdamIsrael/bbs-rs/issues/5) | M | Let users register SSH public keys and authenticate with them; `auth_publickey` currently rejects all. | russh `auth_publickey`; a `user_keys` table. |

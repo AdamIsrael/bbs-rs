@@ -189,6 +189,54 @@ async fn bulletins_add_list_delete() {
 }
 
 #[tokio::test]
+async fn oneliners_post_list_and_guardrails() {
+    use bbs_rs::services::oneliners;
+    let pool = setup().await;
+
+    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let guest = bbs_rs::services::auth::find_user(&pool, "guest")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Guests cannot post to the wall.
+    assert!(matches!(
+        oneliners::add(&pool, &guest, "hi").await,
+        Err(bbs_rs::error::AppError::GuestNotAllowed)
+    ));
+
+    // Empty / whitespace-only and over-length bodies are rejected.
+    assert!(matches!(
+        oneliners::add(&pool, &alice, "   ").await,
+        Err(bbs_rs::error::AppError::OnelinerLength(_))
+    ));
+    let too_long = "x".repeat(oneliners::MAX_LEN + 1);
+    assert!(matches!(
+        oneliners::add(&pool, &alice, &too_long).await,
+        Err(bbs_rs::error::AppError::OnelinerLength(_))
+    ));
+
+    // A valid post is trimmed and stored.
+    oneliners::add(&pool, &alice, "  first!  ").await.unwrap();
+    oneliners::add(&pool, &alice, "second").await.unwrap();
+    assert_eq!(oneliners::count(&pool).await.unwrap(), 2);
+
+    let list = oneliners::recent(&pool, 10).await.unwrap();
+    assert_eq!(list.len(), 2);
+    // Newest first, with the author name joined and the body trimmed.
+    assert_eq!(list[0].body, "second");
+    assert_eq!(list[1].body, "first!");
+    assert_eq!(list[0].author_name, "alice");
+
+    // Moderation delete.
+    assert!(oneliners::delete(&pool, list[0].id).await.unwrap());
+    assert!(!oneliners::delete(&pool, list[0].id).await.unwrap());
+    assert_eq!(oneliners::count(&pool).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn presence_join_and_leave() {
     let presence = bbs_rs::services::presence::Presence::new();
     let (tx1, _rx1) = tokio::sync::mpsc::channel(1);

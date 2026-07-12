@@ -43,6 +43,16 @@ pub struct Bulletin {
     pub created_at: i64,
 }
 
+/// A public one-line "graffiti wall" post, joined with its author's name.
+#[derive(Debug, Clone, FromRow)]
+pub struct Oneliner {
+    pub id: i64,
+    pub author_id: i64,
+    pub author_name: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
 /// A banned IP address. `expires_at` is `None` for a permanent ban.
 #[derive(Debug, Clone, FromRow)]
 pub struct IpBan {

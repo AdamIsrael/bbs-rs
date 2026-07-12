@@ -6,6 +6,7 @@ pub mod auth;
 pub mod boards;
 pub mod bulletins;
 pub mod mail;
+pub mod oneliners;
 pub mod presence;
 
 use sqlx::sqlite::SqlitePool;
