@@ -63,15 +63,23 @@ pub async fn set_role(pool: &SqlitePool, username: &str, role: &str) -> Result<(
     Ok(())
 }
 
-/// Ban an IP address (upsert reason/time).
-pub async fn ban_ip(pool: &SqlitePool, ip: &str, reason: &str) -> Result<()> {
+/// Ban an IP address (upsert). `expires_at` is `None` for a permanent ban, or a
+/// Unix timestamp for a temporary one (used by auto-bans).
+pub async fn ban_ip(
+    pool: &SqlitePool,
+    ip: &str,
+    reason: &str,
+    expires_at: Option<i64>,
+) -> Result<()> {
     sqlx::query(
-        "INSERT INTO ip_bans (ip, reason, created_at) VALUES (?, ?, ?) \
-         ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at",
+        "INSERT INTO ip_bans (ip, reason, created_at, expires_at) VALUES (?, ?, ?, ?) \
+         ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, \
+         created_at = excluded.created_at, expires_at = excluded.expires_at",
     )
     .bind(ip)
     .bind(reason)
     .bind(now_unix())
+    .bind(expires_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -86,23 +94,60 @@ pub async fn unban_ip(pool: &SqlitePool, ip: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether an IP address is currently banned.
+/// Whether an IP address is currently banned (ignoring expired bans).
 pub async fn is_ip_banned(pool: &SqlitePool, ip: &str) -> Result<bool> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ip_bans WHERE ip = ?")
-        .bind(ip)
-        .fetch_one(pool)
-        .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ip_bans WHERE ip = ? AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(ip)
+    .bind(now_unix())
+    .fetch_one(pool)
+    .await?;
     Ok(count > 0)
 }
 
-/// All IP bans, newest first.
+/// All active IP bans, newest first (expired bans are excluded).
 pub async fn list_ip_bans(pool: &SqlitePool) -> Result<Vec<IpBan>> {
     let bans = sqlx::query_as::<_, IpBan>(
-        "SELECT ip, reason, created_at FROM ip_bans ORDER BY created_at DESC",
+        "SELECT ip, reason, created_at, expires_at FROM ip_bans \
+         WHERE expires_at IS NULL OR expires_at > ? ORDER BY created_at DESC",
     )
+    .bind(now_unix())
     .fetch_all(pool)
     .await?;
     Ok(bans)
+}
+
+/// Delete IP bans whose expiry has passed. Returns how many were removed.
+pub async fn purge_expired_ip_bans(pool: &SqlitePool) -> Result<u64> {
+    let removed =
+        sqlx::query("DELETE FROM ip_bans WHERE expires_at IS NOT NULL AND expires_at <= ?")
+            .bind(now_unix())
+            .execute(pool)
+            .await?
+            .rows_affected();
+    Ok(removed)
+}
+
+/// IPs with at least `max_failures` failed logins since `since` (Unix seconds)
+/// that are not already actively banned — the auto-ban candidates.
+pub async fn ips_over_failure_threshold(
+    pool: &SqlitePool,
+    max_failures: i64,
+    since: i64,
+) -> Result<Vec<String>> {
+    let ips: Vec<String> = sqlx::query_scalar(
+        "SELECT ip FROM logins \
+         WHERE success = 0 AND ip IS NOT NULL AND created_at >= ? \
+           AND ip NOT IN (SELECT ip FROM ip_bans WHERE expires_at IS NULL OR expires_at > ?) \
+         GROUP BY ip HAVING COUNT(*) >= ?",
+    )
+    .bind(since)
+    .bind(now_unix())
+    .bind(max_failures)
+    .fetch_all(pool)
+    .await?;
+    Ok(ips)
 }
 
 /// Record a login attempt in the audit trail.
@@ -161,10 +206,12 @@ pub async fn banned_usernames(pool: &SqlitePool) -> Result<HashSet<String>> {
     Ok(rows.into_iter().collect())
 }
 
-/// The set of currently-banned IPs — used by the ban sweeper.
+/// The set of currently-banned IPs (excluding expired) — used by the ban sweeper.
 pub async fn banned_ips(pool: &SqlitePool) -> Result<HashSet<String>> {
-    let rows: Vec<String> = sqlx::query_scalar("SELECT ip FROM ip_bans")
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT ip FROM ip_bans WHERE expires_at IS NULL OR expires_at > ?")
+            .bind(now_unix())
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().collect())
 }

@@ -120,7 +120,8 @@ async fn main() -> anyhow::Result<()> {
             println!("unbanned user '{username}'");
         }
         Cmd::BanIp { ip, reason } => {
-            admin::ban_ip(&pool, &ip, &reason).await?;
+            // Manual bans are permanent (no expiry).
+            admin::ban_ip(&pool, &ip, &reason, None).await?;
             println!("banned ip '{ip}'");
         }
         Cmd::UnbanIp { ip } => {
@@ -129,9 +130,16 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::IpBans => {
             let bans = admin::list_ip_bans(&pool).await?;
-            println!("{:<40} {:<20} REASON", "IP", "WHEN");
+            println!("{:<40} {:<20} {:<20} REASON", "IP", "WHEN", "EXPIRES");
             for b in bans {
-                println!("{:<40} {:<20} {}", b.ip, fmt_time(b.created_at), b.reason);
+                let expires = b.expires_at.map(fmt_time).unwrap_or_else(|| "never".into());
+                println!(
+                    "{:<40} {:<20} {:<20} {}",
+                    b.ip,
+                    fmt_time(b.created_at),
+                    expires,
+                    b.reason
+                );
             }
         }
         Cmd::Role { username, role } => {
