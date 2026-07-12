@@ -49,6 +49,7 @@ pub struct Settings {
     pub features: Features,
     pub abuse: Abuse,
     pub accounts: Accounts,
+    pub limits: Limits,
 }
 
 /// Branding shown to connected users.
@@ -143,6 +144,43 @@ impl Accounts {
                 .reserved_usernames
                 .iter()
                 .any(|r| r.trim().eq_ignore_ascii_case(name))
+    }
+}
+
+/// Per-user rate limits (post/mail/oneliner throttling). Counts a user's own
+/// rows created within `window_secs`; a `0` cap disables that limit. Admins are
+/// never throttled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Limits {
+    /// Sliding window for counting a user's recent actions, in seconds.
+    pub window_secs: i64,
+    /// Max board posts per user per window (0 disables).
+    pub max_posts: u32,
+    /// Max mail sent per user per window (0 disables).
+    pub max_mail: u32,
+    /// Max oneliners per user per window (0 disables).
+    pub max_oneliners: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        // A generous default: enough for normal use, tight enough to blunt
+        // scripted spam. Pairs with the [abuse] auto-ban guard.
+        Self {
+            window_secs: 60,
+            max_posts: 5,
+            max_mail: 10,
+            max_oneliners: 8,
+        }
+    }
+}
+
+impl Limits {
+    /// The start of the current window (Unix seconds), or `None` if the window
+    /// is disabled (`window_secs <= 0`).
+    pub fn window_start(&self, now: i64) -> Option<i64> {
+        (self.window_secs > 0).then(|| now - self.window_secs)
     }
 }
 
@@ -297,6 +335,17 @@ ban_secs = 3600
 # Usernames that may not be registered (case-insensitive; whitespace-trimmed).
 # \"guest\" is always reserved regardless of this list.
 reserved_usernames = [\"root\", \"admin\"]
+
+[limits]
+# Per-user rate limits (admins are never throttled). A 0 cap disables that
+# limit. Counts the user's own rows created within the window.
+window_secs = 60
+# Max board posts per user per window.
+max_posts = 5
+# Max mail sent per user per window.
+max_mail = 10
+# Max oneliners per user per window.
+max_oneliners = 8
 ";
 
 #[cfg(test)]
@@ -315,6 +364,8 @@ mod tests {
         );
         assert_eq!(parsed.features.registration, def.features.registration);
         assert_eq!(parsed.features.oneliners, def.features.oneliners);
+        assert_eq!(parsed.limits.max_posts, def.limits.max_posts);
+        assert_eq!(parsed.limits.window_secs, def.limits.window_secs);
         assert_eq!(
             parsed.accounts.reserved_usernames,
             def.accounts.reserved_usernames

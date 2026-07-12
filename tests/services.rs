@@ -107,16 +107,31 @@ async fn guest_cannot_post_but_users_can() {
         .unwrap()
         .unwrap();
     assert!(matches!(
-        bbs_rs::services::boards::post_message(&pool, board_id, &guest, "hi", "body").await,
+        bbs_rs::services::boards::post_message(
+            &pool,
+            board_id,
+            &guest,
+            "hi",
+            "body",
+            &Default::default()
+        )
+        .await,
         Err(bbs_rs::error::AppError::GuestNotAllowed)
     ));
 
     let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())
         .await
         .unwrap();
-    bbs_rs::services::boards::post_message(&pool, board_id, &alice, "Hello", "world")
-        .await
-        .unwrap();
+    bbs_rs::services::boards::post_message(
+        &pool,
+        board_id,
+        &alice,
+        "Hello",
+        "world",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
 
     let messages = bbs_rs::services::boards::list_messages(&pool, board_id)
         .await
@@ -158,29 +173,50 @@ async fn board_acls_lock_and_moderation() {
 
     // Write ACL: a regular user can't post to the admin-only board; an admin can.
     assert!(matches!(
-        boards::post_message(&pool, announce.id, &alice, "s", "b").await,
+        boards::post_message(&pool, announce.id, &alice, "s", "b", &Default::default()).await,
         Err(AppError::BoardWriteDenied)
     ));
-    boards::post_message(&pool, announce.id, &admin, "News", "hi")
-        .await
-        .unwrap();
+    boards::post_message(
+        &pool,
+        announce.id,
+        &admin,
+        "News",
+        "hi",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
 
     // Lock: a locked board rejects non-admins, but admins can still post.
     boards::set_locked(&pool, general.id, true).await.unwrap();
     assert!(matches!(
-        boards::post_message(&pool, general.id, &alice, "s", "b").await,
+        boards::post_message(&pool, general.id, &alice, "s", "b", &Default::default()).await,
         Err(AppError::BoardLocked)
     ));
-    boards::post_message(&pool, general.id, &admin, "admin note", "b")
-        .await
-        .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &admin,
+        "admin note",
+        "b",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     boards::set_locked(&pool, general.id, false).await.unwrap();
-    boards::post_message(&pool, general.id, &alice, "first", "b")
+    boards::post_message(&pool, general.id, &alice, "first", "b", &Default::default())
         .await
         .unwrap();
-    boards::post_message(&pool, general.id, &alice, "second", "b")
-        .await
-        .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "second",
+        "b",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
 
     // Pin: a pinned message sorts to the top regardless of recency.
     let msgs = boards::list_messages(&pool, general.id).await.unwrap();
@@ -219,6 +255,103 @@ async fn board_acls_lock_and_moderation() {
 }
 
 #[tokio::test]
+async fn rate_limits_throttle_non_admins() {
+    use bbs_rs::config::Limits;
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, boards, mail, oneliners};
+    let pool = setup().await;
+
+    let limits = Limits {
+        window_secs: 60,
+        max_posts: 2,
+        max_mail: 2,
+        max_oneliners: 2,
+    };
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::find_user(&pool, "bob").await.unwrap().unwrap();
+
+    // Posts: two allowed within the window, the third is throttled.
+    boards::post_message(&pool, general.id, &alice, "1", "b", &limits)
+        .await
+        .unwrap();
+    boards::post_message(&pool, general.id, &alice, "2", "b", &limits)
+        .await
+        .unwrap();
+    assert!(matches!(
+        boards::post_message(&pool, general.id, &alice, "3", "b", &limits).await,
+        Err(AppError::RateLimited)
+    ));
+
+    // Mail and oneliners throttle independently, per user.
+    mail::send_mail(&pool, &alice, "bob", "s", "b", &limits)
+        .await
+        .unwrap();
+    mail::send_mail(&pool, &alice, "bob", "s", "b", &limits)
+        .await
+        .unwrap();
+    assert!(matches!(
+        mail::send_mail(&pool, &alice, "bob", "s", "b", &limits).await,
+        Err(AppError::RateLimited)
+    ));
+    oneliners::add(&pool, &alice, "a", &limits).await.unwrap();
+    oneliners::add(&pool, &alice, "b", &limits).await.unwrap();
+    assert!(matches!(
+        oneliners::add(&pool, &alice, "c", &limits).await,
+        Err(AppError::RateLimited)
+    ));
+
+    // Admins are never throttled.
+    auth::register_user(&pool, "adminuser", "pw", &Default::default())
+        .await
+        .unwrap();
+    bbs_rs::services::admin::set_role(&pool, "adminuser", "admin")
+        .await
+        .unwrap();
+    let admin = auth::find_user(&pool, "adminuser").await.unwrap().unwrap();
+    for i in 0..5 {
+        boards::post_message(&pool, general.id, &admin, &format!("m{i}"), "b", &limits)
+            .await
+            .unwrap();
+    }
+
+    // A zero cap disables that limit; a zero window disables all of them.
+    let no_cap = Limits {
+        window_secs: 60,
+        max_posts: 0,
+        max_mail: 0,
+        max_oneliners: 0,
+    };
+    for i in 0..5 {
+        boards::post_message(&pool, general.id, &bob, &format!("x{i}"), "b", &no_cap)
+            .await
+            .unwrap();
+    }
+    let no_window = Limits {
+        window_secs: 0,
+        max_posts: 2,
+        max_mail: 2,
+        max_oneliners: 2,
+    };
+    for i in 0..5 {
+        oneliners::add(&pool, &bob, &format!("y{i}"), &no_window)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn mail_send_read_and_guardrails() {
     let pool = setup().await;
     let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())
@@ -230,11 +363,12 @@ async fn mail_send_read_and_guardrails() {
 
     // Unknown recipient rejected.
     assert!(matches!(
-        bbs_rs::services::mail::send_mail(&pool, &alice, "nobody", "s", "b").await,
+        bbs_rs::services::mail::send_mail(&pool, &alice, "nobody", "s", "b", &Default::default())
+            .await,
         Err(bbs_rs::error::AppError::RecipientNotFound)
     ));
 
-    bbs_rs::services::mail::send_mail(&pool, &alice, "bob", "Hi Bob", "hello")
+    bbs_rs::services::mail::send_mail(&pool, &alice, "bob", "Hi Bob", "hello", &Default::default())
         .await
         .unwrap();
 
@@ -295,24 +429,28 @@ async fn oneliners_post_list_and_guardrails() {
 
     // Guests cannot post to the wall.
     assert!(matches!(
-        oneliners::add(&pool, &guest, "hi").await,
+        oneliners::add(&pool, &guest, "hi", &Default::default()).await,
         Err(bbs_rs::error::AppError::GuestNotAllowed)
     ));
 
     // Empty / whitespace-only and over-length bodies are rejected.
     assert!(matches!(
-        oneliners::add(&pool, &alice, "   ").await,
+        oneliners::add(&pool, &alice, "   ", &Default::default()).await,
         Err(bbs_rs::error::AppError::OnelinerLength(_))
     ));
     let too_long = "x".repeat(oneliners::MAX_LEN + 1);
     assert!(matches!(
-        oneliners::add(&pool, &alice, &too_long).await,
+        oneliners::add(&pool, &alice, &too_long, &Default::default()).await,
         Err(bbs_rs::error::AppError::OnelinerLength(_))
     ));
 
     // A valid post is trimmed and stored.
-    oneliners::add(&pool, &alice, "  first!  ").await.unwrap();
-    oneliners::add(&pool, &alice, "second").await.unwrap();
+    oneliners::add(&pool, &alice, "  first!  ", &Default::default())
+        .await
+        .unwrap();
+    oneliners::add(&pool, &alice, "second", &Default::default())
+        .await
+        .unwrap();
     assert_eq!(oneliners::count(&pool).await.unwrap(), 2);
 
     let list = oneliners::recent(&pool, 10).await.unwrap();

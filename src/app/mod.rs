@@ -293,13 +293,16 @@ impl App {
             self.status = "Say something first.".into();
             return;
         }
-        match oneliners::add(&self.pool, &self.user, &body).await {
+        match oneliners::add(&self.pool, &self.user, &body, &self.config.limits).await {
             Ok(()) => {
                 self.open_oneliners().await;
                 self.status = "Posted to the wall.".into();
             }
             Err(AppError::OnelinerLength(max)) => {
                 self.status = format!("Oneliner must be 1–{max} characters.");
+            }
+            Err(AppError::RateLimited) => {
+                self.status = "You're posting too quickly — please slow down.".into()
             }
             Err(e) => self.status = format!("Could not post: {e}"),
         }
@@ -582,7 +585,16 @@ impl App {
             self.status = "No board selected.".into();
             return;
         };
-        match boards::post_message(&self.pool, board_id, &self.user, &subject, &body).await {
+        match boards::post_message(
+            &self.pool,
+            board_id,
+            &self.user,
+            &subject,
+            &body,
+            &self.config.limits,
+        )
+        .await
+        {
             Ok(()) => {
                 self.reload_messages().await;
                 self.msg_sel = 0;
@@ -592,6 +604,9 @@ impl App {
             Err(AppError::BoardLocked) => self.status = "This board is locked.".into(),
             Err(AppError::BoardWriteDenied) => {
                 self.status = "You don't have permission to post to this board.".into()
+            }
+            Err(AppError::RateLimited) => {
+                self.status = "You're posting too quickly — please slow down.".into()
             }
             Err(e) => self.status = format!("Could not post: {e}"),
         }
@@ -660,13 +675,25 @@ impl App {
             self.status = "Recipient and subject are required.".into();
             return;
         }
-        match mail::send_mail(&self.pool, &self.user, &to, &subject, &body).await {
+        match mail::send_mail(
+            &self.pool,
+            &self.user,
+            &to,
+            &subject,
+            &body,
+            &self.config.limits,
+        )
+        .await
+        {
             Ok(()) => {
                 self.open_mailbox().await;
                 self.status = format!("Mail sent to {to}.");
             }
             Err(AppError::RecipientNotFound) => {
                 self.status = format!("No such user: {to}");
+            }
+            Err(AppError::RateLimited) => {
+                self.status = "You're sending mail too quickly — please slow down.".into()
             }
             Err(e) => self.status = format!("Could not send: {e}"),
         }

@@ -2,9 +2,10 @@
 
 use sqlx::sqlite::SqlitePool;
 
+use crate::config::Limits;
 use crate::db::models::{Mail, User};
 use crate::error::{AppError, Result};
-use crate::services::auth;
+use crate::services::{auth, enforce_rate};
 use crate::util::now_unix;
 
 /// All mail addressed to a user, newest first.
@@ -47,16 +48,35 @@ pub async fn read_mail(pool: &SqlitePool, id: i64, user_id: i64) -> Result<Mail>
     Ok(mail)
 }
 
-/// Send mail to a named recipient. Guests are rejected.
+/// Count mail a user has sent since `since` (Unix seconds).
+async fn recent_sent_count(pool: &SqlitePool, from_id: i64, since: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM mail WHERE from_id = ? AND created_at >= ?")
+            .bind(from_id)
+            .bind(since)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// Send mail to a named recipient. Guests are rejected; non-admin senders are
+/// subject to the per-user mail rate limit.
 pub async fn send_mail(
     pool: &SqlitePool,
     from: &User,
     to_username: &str,
     subject: &str,
     body: &str,
+    limits: &Limits,
 ) -> Result<()> {
     if from.is_guest() {
         return Err(AppError::GuestNotAllowed);
+    }
+    if !from.is_admin()
+        && let Some(since) = limits.window_start(now_unix())
+    {
+        let count = recent_sent_count(pool, from.id, since).await?;
+        enforce_rate(count, limits.max_mail)?;
     }
     let to = auth::find_user(pool, to_username)
         .await?

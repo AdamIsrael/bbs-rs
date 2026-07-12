@@ -81,6 +81,12 @@ ban_secs = 3600        # how long an auto-ban lasts (0 = permanent)
 # Usernames that may not be registered (case-insensitive, whitespace-trimmed).
 # "guest" is always reserved regardless of this list.
 reserved_usernames = ["root", "admin"]
+
+[limits]     # per-user rate limits (admins are never throttled; 0 = off)
+window_secs = 60       # sliding window for counting a user's recent actions
+max_posts = 5          # board posts per user per window
+max_mail = 10          # mail sent per user per window
+max_oneliners = 8      # oneliners per user per window
 ```
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
@@ -125,6 +131,12 @@ A ban rejects future logins *and* drops any live session for that user/IP (immed
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
 an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every login attempt
 (success or failure) is recorded with username, IP, and timestamp.
+
+**Rate limiting.** Regular users are throttled per `[limits]`: at most `max_posts` board posts,
+`max_mail` mails, and `max_oneliners` oneliners within a rolling `window_secs` (counted from their own
+recent rows — no extra table). Over the cap, the action is refused with a "slow down" message until the
+window clears. Admins are never throttled, and any cap set to `0` disables that limit. This pairs with
+the auto-ban guard below to blunt scripted spam.
 
 **Auto-ban.** The ban sweeper also watches the login audit trail and temporarily bans any IP that
 exceeds `[abuse].max_failures` failed logins within `window_secs` (a fail2ban-style guard against

@@ -35,7 +35,7 @@ These are done and are the substrate several roadmap items build on:
 | [**fail2ban / auto-ban**](https://github.com/AdamIsrael/bbs-rs/issues/4) | M | Auto-ban an IP after N failed logins in a window; feed the existing ban sweeper. | **Substrate exists**: the `logins` table + `admin::ban_ip`. Just needs the detection policy. |
 | [**Public-key SSH auth**](https://github.com/AdamIsrael/bbs-rs/issues/5) | M | Let users register SSH public keys and authenticate with them; `auth_publickey` currently rejects all. | russh `auth_publickey`; a `user_keys` table. |
 | [**File areas**](https://github.com/AdamIsrael/bbs-rs/issues/6) | L | Upload/download file areas with descriptions and quotas — a cornerstone of classic BBSes. | SFTP subsystem (russh) or an in-TUI transfer flow; storage + quota accounting. |
-| [**Rate limiting / post throttling**](https://github.com/AdamIsrael/bbs-rs/issues/7) | S | Cap posts/mail per user per interval to blunt spam. | Services layer (boards/mail); pairs with auto-ban. |
+| [**Rate limiting / post throttling**](https://github.com/AdamIsrael/bbs-rs/issues/7) | S | Cap posts/mail per user per interval to blunt spam. | **Shipped**: `[limits]` config throttles posts/mail/oneliners per user per window (admins exempt); enforced in the services layer, no new table. |
 
 ## Tier 2 — engagement
 
