@@ -340,6 +340,19 @@ async fn auto_ban(pool: &SqlitePool, abuse: &crate::config::Abuse) {
     }
 }
 
+/// The SSH auth methods to advertise. We only implement password auth, so we
+/// advertise *only* password — never russh's default `MethodSet::all()`.
+///
+/// Advertising publickey/hostbased/keyboard-interactive (which we don't accept)
+/// makes clients offer every key in their ssh-agent; russh delays each
+/// rejection by `auth_rejection_time`, so a full agent means 30–60s of dead air
+/// before the password prompt appears — a login that looks hung but isn't.
+fn advertised_methods() -> russh::MethodSet {
+    let mut methods = russh::MethodSet::empty();
+    methods.push(russh::MethodKind::Password);
+    methods
+}
+
 /// Bind and serve the SSH BBS until the process is stopped.
 pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> {
     let net = &config.network;
@@ -349,6 +362,7 @@ pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> 
     tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
 
     let ssh_config = Config {
+        methods: advertised_methods(),
         inactivity_timeout: Some(net.inactivity_timeout()),
         auth_rejection_time: net.auth_rejection_time(),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
@@ -366,4 +380,21 @@ pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> 
     };
     server.run_on_address(Arc::new(ssh_config), addr).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_only_password() {
+        // Regression guard for the "hung login" bug: we must not advertise auth
+        // methods we don't implement, or clients waste 30–60s offering keys.
+        let m = advertised_methods();
+        assert!(m.contains(&russh::MethodKind::Password));
+        assert!(!m.contains(&russh::MethodKind::PublicKey));
+        assert!(!m.contains(&russh::MethodKind::KeyboardInteractive));
+        assert!(!m.contains(&russh::MethodKind::HostBased));
+        assert!(!m.contains(&russh::MethodKind::None));
+    }
 }
