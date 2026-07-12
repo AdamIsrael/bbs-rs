@@ -146,8 +146,9 @@ users may post — and the seeded *Announcements* board is admin-only to post to
 `bbsctl set-board <name> --read <role> --write <role>` (or `--lock`/`--unlock`); `bbsctl boards` shows
 the current settings. In the BBS, `admin`-role users get extra keys on the board screens: `l` to
 lock/unlock the selected board, and on a board's message list `p` to pin/unpin and `d` to delete the
-selected post. Pinned posts sort to the top. A locked board rejects new posts from everyone (unlock to
-resume); boards a user can't read are hidden from their board list.
+selected post. Pinned posts sort to the top. A locked board rejects new posts from regular users
+(admins can still post, e.g. to add a closing note); boards a user can't read are hidden from their
+board list.
 
 ## Upgrading & migrations
 

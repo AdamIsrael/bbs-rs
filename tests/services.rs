@@ -165,16 +165,15 @@ async fn board_acls_lock_and_moderation() {
         .await
         .unwrap();
 
-    // Lock: a locked board rejects everyone, including admins.
+    // Lock: a locked board rejects non-admins, but admins can still post.
     boards::set_locked(&pool, general.id, true).await.unwrap();
     assert!(matches!(
         boards::post_message(&pool, general.id, &alice, "s", "b").await,
         Err(AppError::BoardLocked)
     ));
-    assert!(matches!(
-        boards::post_message(&pool, general.id, &admin, "s", "b").await,
-        Err(AppError::BoardLocked)
-    ));
+    boards::post_message(&pool, general.id, &admin, "admin note", "b")
+        .await
+        .unwrap();
     boards::set_locked(&pool, general.id, false).await.unwrap();
     boards::post_message(&pool, general.id, &alice, "first", "b")
         .await
@@ -192,11 +191,12 @@ async fn board_acls_lock_and_moderation() {
     assert_eq!(msgs[0].subject, "first", "pinned floats to the top");
     assert!(msgs[0].pinned);
 
-    // Delete: moderation removes a post.
+    // Delete: moderation removes a post (leaving "second" + the admin note).
     assert!(boards::delete_message(&pool, first.id).await.unwrap());
     assert!(!boards::delete_message(&pool, first.id).await.unwrap());
     let msgs = boards::list_messages(&pool, general.id).await.unwrap();
-    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs.len(), 2);
+    assert!(!msgs.iter().any(|m| m.subject == "first"));
 
     // Read ACL: making a board admin-read hides it from lower roles.
     boards::set_roles(&pool, "General", Some("admin"), None)

@@ -516,7 +516,7 @@ impl App {
             self.status = "Guests cannot post — register an account first.".into();
             return;
         }
-        if board.locked {
+        if board.locked && !self.user.is_admin() {
             self.status = "This board is locked.".into();
             return;
         }

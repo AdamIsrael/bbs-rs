@@ -68,8 +68,9 @@ pub async fn get_message(pool: &SqlitePool, id: i64) -> Result<Message> {
 }
 
 /// Post a new message, enforcing the board's write ACL and lock. Guests are
-/// always read-only; a locked board rejects everyone; otherwise the author's
-/// role must meet the board's `min_write_role`.
+/// always read-only; a locked board rejects non-admins (admins can still post,
+/// e.g. to add a closing note); otherwise the author's role must meet the
+/// board's `min_write_role`.
 pub async fn post_message(
     pool: &SqlitePool,
     board_id: i64,
@@ -81,7 +82,7 @@ pub async fn post_message(
         return Err(AppError::GuestNotAllowed);
     }
     let board = get_board(pool, board_id).await?;
-    if board.locked {
+    if board.locked && !author.is_admin() {
         return Err(AppError::BoardLocked);
     }
     if !board.can_write(&author.role) {
