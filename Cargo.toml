@@ -2,6 +2,13 @@
 name = "bbs-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A bulletin board system (BBS) served over SSH: message boards, private mail, bulletins, and a graffiti wall in a ratatui TUI."
+license = "MIT"
+repository = "https://github.com/AdamIsrael/bbs-rs"
+homepage = "https://github.com/AdamIsrael/bbs-rs"
+readme = "README.md"
+keywords = ["bbs", "ssh", "tui", "ratatui", "russh"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 anyhow = "1.0.103"
