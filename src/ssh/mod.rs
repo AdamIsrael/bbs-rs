@@ -2,6 +2,7 @@
 
 pub mod pubkey;
 pub mod server;
+pub mod sftp;
 pub mod terminal;
 
 pub use server::run;

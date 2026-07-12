@@ -376,7 +376,7 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
     };
     let body = format!(
         "Name:      {}\nSize:      {} ({} bytes)\nUploaded:  {} by {}\nDownloads: {}\n\n{}\n\n\
-         (Download over SFTP is coming soon.)",
+         (Download with: sftp -P <port> <you>@<host>, then `get {0}` from this area.)",
         file.filename,
         human_size(file.size),
         file.size,
@@ -501,7 +501,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
-  • File Areas     : browse downloadable files (SFTP transfer coming soon)
+  • File Areas     : browse files here; upload/download them over SFTP
   • SSH Keys       : register public keys to log in without a password
   • Register       : create an account, then reconnect over SSH with it
 

@@ -1,6 +1,7 @@
 //! russh server: one [`SessionHandler`] per connection, bridging SSH events to
 //! the transport-agnostic [`app`] loop.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use crate::input;
 use crate::services::presence::Presence;
 use crate::services::{admin, auth, keys};
 use crate::ssh::pubkey;
+use crate::ssh::sftp::SftpSession;
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
 use crate::transport::Event;
 
@@ -49,6 +51,7 @@ impl Server for BbsServer {
             terminal: None,
             events_tx: None,
             input_buf: Vec::new(),
+            channels: HashMap::new(),
         }
     }
 }
@@ -68,6 +71,10 @@ struct SessionHandler {
     events_tx: Option<mpsc::Sender<Event>>,
     /// Carries incomplete escape/UTF-8 sequences between `data` callbacks.
     input_buf: Vec<u8>,
+    /// Open channels held so an SFTP subsystem request can take the raw stream.
+    /// Dropped on `shell_request` (the TUI uses the `data`/handle callback path,
+    /// and holding a channel would fill its buffer and stall input).
+    channels: HashMap<ChannelId, Channel<Msg>>,
 }
 
 impl SessionHandler {
@@ -149,13 +156,17 @@ impl Handler for SessionHandler {
         reply: ChannelOpenHandle,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let handle = TerminalHandle::start(session.handle(), channel.id()).await;
+        let id = channel.id();
+        let handle = TerminalHandle::start(session.handle(), id).await;
         let backend = CrosstermBackend::new(handle);
         // Correct size is applied on the pty request.
         let options = TerminalOptions {
             viewport: Viewport::Fixed(Rect::default()),
         };
         self.terminal = Some(Terminal::with_options(backend, options)?);
+        // Keep the channel so an SFTP subsystem request can take its stream; a
+        // `shell_request` drops it and uses the callback path instead.
+        self.channels.insert(id, channel);
         reply.accept().await;
         Ok(())
     }
@@ -184,6 +195,9 @@ impl Handler for SessionHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // The TUI uses the `data`/handle callback path; drop the stored channel
+        // so russh doesn't also buffer input into it (which would stall).
+        self.channels.remove(&channel);
         match (self.terminal.take(), self.user.clone()) {
             (Some(terminal), Some(user)) => {
                 let (tx, rx) = mpsc::channel::<Event>(64);
@@ -212,6 +226,29 @@ impl Handler for SessionHandler {
                     let _ = handle.close(channel).await;
                 });
                 session.channel_success(channel)?;
+            }
+            _ => {
+                session.channel_failure(channel)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Serve the `sftp` subsystem over the channel's raw stream, mapping file
+    /// areas to a small virtual filesystem (see [`SftpSession`]). Other
+    /// subsystems, or sftp when file areas are disabled, are refused.
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let is_sftp = name == "sftp" && self.config.features.file_areas;
+        match (is_sftp, self.channels.remove(&channel), self.user.clone()) {
+            (true, Some(chan), Some(user)) => {
+                let sftp = SftpSession::new(self.pool.clone(), self.config.clone(), user);
+                session.channel_success(channel)?;
+                russh_sftp::server::run(chan.into_stream(), sftp).await;
             }
             _ => {
                 session.channel_failure(channel)?;

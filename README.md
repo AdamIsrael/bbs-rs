@@ -17,7 +17,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
 - **File areas** — browsable download areas with role ACLs, per-user storage quotas, and file-type
-  limits (catalog + operator management now; live SFTP transfer is a follow-up).
+  limits; browse in the TUI and **transfer over SFTP** (`sftp user@host`).
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
@@ -186,8 +186,23 @@ storage**: sysops create areas with `bbsctl add-area` and add files from a serve
 `bbsctl add-file <area> <user> <path>`, which copies the blob into `[files].storage_dir` and records it.
 Uploads are checked against the **allowed extensions**, the **per-file size cap**, and the uploader's
 **storage quota** (`[files]`); admins are exempt from the quota (an operator seeding an area is
-effectively an admin). Live user-initiated upload/download over SFTP is the next phase
-([#38](https://github.com/AdamIsrael/bbs-rs/issues/38)).
+effectively an admin).
+
+Users **transfer files over SFTP** — the server answers the `sftp` subsystem with a small virtual
+filesystem: `/` lists the areas you can read as directories, `/<area>/` lists its files, and
+`/<area>/<file>` is a file. So:
+
+```sh
+sftp -P 2222 you@localhost
+sftp> ls                       # your readable areas
+sftp> cd Uploads
+sftp> get somefile.zip         # download (honors the area's read role)
+sftp> put local.txt            # upload (honors write role + extension/size/quota)
+```
+
+Reads honor each area's `min_read_role`; uploads honor `min_write_role` plus the `[files]` limits and
+count against your quota. SFTP auth is the same as the BBS (password or a registered public key), and
+the whole feature follows `[features].file_areas`.
 
 **Board moderation & ACLs.** Each board has a minimum **read** and **write** role (`guest` < `user` <
 `admin`) and a **locked** flag. Defaults preserve the classic behavior — anyone may read, registered
