@@ -50,8 +50,7 @@ pub struct App {
     // Boards
     pub boards: Vec<Board>,
     pub board_sel: usize,
-    current_board_id: Option<i64>,
-    pub current_board_name: String,
+    pub current_board: Option<Board>,
 
     // Messages
     pub messages: Vec<Message>,
@@ -121,8 +120,7 @@ impl App {
             oneliners: Vec::new(),
             boards: Vec::new(),
             board_sel: 0,
-            current_board_id: None,
-            current_board_name: String::new(),
+            current_board: None,
             messages: Vec::new(),
             msg_sel: 0,
             current_message: None,
@@ -401,13 +399,22 @@ impl App {
     // ---- Boards ----------------------------------------------------------
 
     async fn open_boards(&mut self) {
-        match boards::list_boards(&self.pool).await {
+        match boards::list_readable_boards(&self.pool, &self.user.role).await {
             Ok(b) => {
                 self.boards = b;
                 self.board_sel = 0;
                 self.screen = Screen::BoardList;
             }
             Err(e) => self.status = format!("Error loading boards: {e}"),
+        }
+    }
+
+    /// Reload the board list in place (after a moderation change), keeping the
+    /// selection in range.
+    async fn reload_boards(&mut self) {
+        if let Ok(b) = boards::list_readable_boards(&self.pool, &self.user.role).await {
+            self.board_sel = self.board_sel.min(b.len().saturating_sub(1));
+            self.boards = b;
         }
     }
 
@@ -422,8 +429,28 @@ impl App {
                     self.open_board(board).await;
                 }
             }
+            // Admins can lock/unlock the selected board in place.
+            KeyCode::Char('l') if self.user.is_admin() => self.toggle_board_lock().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
+        }
+    }
+
+    async fn toggle_board_lock(&mut self) {
+        let Some(board) = self.boards.get(self.board_sel).cloned() else {
+            return;
+        };
+        let now_locked = !board.locked;
+        match boards::set_locked(&self.pool, board.id, now_locked).await {
+            Ok(()) => {
+                self.reload_boards().await;
+                self.status = format!(
+                    "{} {}.",
+                    if now_locked { "Locked" } else { "Unlocked" },
+                    board.name
+                );
+            }
+            Err(e) => self.status = format!("Could not update board: {e}"),
         }
     }
 
@@ -432,11 +459,22 @@ impl App {
             Ok(m) => {
                 self.messages = m;
                 self.msg_sel = 0;
-                self.current_board_id = Some(board.id);
-                self.current_board_name = board.name;
+                self.current_board = Some(board);
                 self.screen = Screen::MessageList;
             }
             Err(e) => self.status = format!("Error loading messages: {e}"),
+        }
+    }
+
+    /// Reload the current board's messages in place (after posting or a
+    /// moderation change), keeping the selection in range.
+    async fn reload_messages(&mut self) {
+        let Some(board_id) = self.current_board.as_ref().map(|b| b.id) else {
+            return;
+        };
+        if let Ok(m) = boards::list_messages(&self.pool, board_id).await {
+            self.msg_sel = self.msg_sel.min(m.len().saturating_sub(1));
+            self.messages = m;
         }
     }
 
@@ -459,19 +497,65 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('n') => {
-                if self.user.is_guest() {
-                    self.status = "Guests cannot post — register an account first.".into();
-                } else {
-                    self.form = Form::new(vec![
-                        Field::new("Subject", false),
-                        Field::new("Body", false),
-                    ]);
-                    self.screen = Screen::ComposePost;
-                }
-            }
+            KeyCode::Char('n') => self.begin_compose_post(),
+            // Admin moderation on the selected post.
+            KeyCode::Char('d') if self.user.is_admin() => self.delete_selected_message().await,
+            KeyCode::Char('p') if self.user.is_admin() => self.toggle_pin_selected().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::BoardList,
             _ => {}
+        }
+    }
+
+    /// Start composing a post, explaining up front why it's not allowed rather
+    /// than failing only at submit.
+    fn begin_compose_post(&mut self) {
+        let Some(board) = self.current_board.as_ref() else {
+            return;
+        };
+        if self.user.is_guest() {
+            self.status = "Guests cannot post — register an account first.".into();
+            return;
+        }
+        if board.locked && !self.user.is_admin() {
+            self.status = "This board is locked.".into();
+            return;
+        }
+        if !board.can_write(&self.user.role) {
+            self.status = "You don't have permission to post to this board.".into();
+            return;
+        }
+        self.form = Form::new(vec![
+            Field::new("Subject", false),
+            Field::new("Body", false),
+        ]);
+        self.screen = Screen::ComposePost;
+    }
+
+    async fn delete_selected_message(&mut self) {
+        let Some(msg) = self.messages.get(self.msg_sel).cloned() else {
+            return;
+        };
+        match boards::delete_message(&self.pool, msg.id).await {
+            Ok(true) => {
+                self.reload_messages().await;
+                self.status = format!("Deleted post '{}'.", truncate_status(&msg.subject));
+            }
+            Ok(false) => self.status = "Post already gone.".into(),
+            Err(e) => self.status = format!("Could not delete: {e}"),
+        }
+    }
+
+    async fn toggle_pin_selected(&mut self) {
+        let Some(msg) = self.messages.get(self.msg_sel).cloned() else {
+            return;
+        };
+        let pin = !msg.pinned;
+        match boards::set_pinned(&self.pool, msg.id, pin).await {
+            Ok(()) => {
+                self.reload_messages().await;
+                self.status = if pin { "Pinned." } else { "Unpinned." }.into();
+            }
+            Err(e) => self.status = format!("Could not update post: {e}"),
         }
     }
 
@@ -494,18 +578,20 @@ impl App {
             self.status = "Subject cannot be empty.".into();
             return;
         }
-        let Some(board_id) = self.current_board_id else {
+        let Some(board_id) = self.current_board.as_ref().map(|b| b.id) else {
             self.status = "No board selected.".into();
             return;
         };
         match boards::post_message(&self.pool, board_id, &self.user, &subject, &body).await {
             Ok(()) => {
-                if let Ok(m) = boards::list_messages(&self.pool, board_id).await {
-                    self.messages = m;
-                    self.msg_sel = 0;
-                }
+                self.reload_messages().await;
+                self.msg_sel = 0;
                 self.screen = Screen::MessageList;
                 self.status = "Message posted.".into();
+            }
+            Err(AppError::BoardLocked) => self.status = "This board is locked.".into(),
+            Err(AppError::BoardWriteDenied) => {
+                self.status = "You don't have permission to post to this board.".into()
             }
             Err(e) => self.status = format!("Could not post: {e}"),
         }
@@ -654,6 +740,18 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+/// Trim a subject/title for inclusion in the one-line status bar.
+fn truncate_status(s: &str) -> String {
+    const MAX: usize = 40;
+    if s.chars().count() <= MAX {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(MAX - 1).collect();
+        out.push('…');
+        out
     }
 }
 

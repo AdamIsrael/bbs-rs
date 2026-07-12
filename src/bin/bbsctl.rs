@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::{admin, bulletins, oneliners};
+use bbs_rs::services::{admin, boards, bulletins, oneliners};
 use bbs_rs::util::fmt_time;
 
 #[derive(Parser)]
@@ -72,6 +72,25 @@ enum Cmd {
     IpBans,
     /// Set a user's role (guest | user | admin).
     Role { username: String, role: String },
+    /// List boards with their read/write ACLs and lock state.
+    Boards,
+    /// Configure a board's ACLs and/or lock state.
+    SetBoard {
+        /// Board name (as shown by `boards`).
+        name: String,
+        /// Minimum role to read (guest | user | admin).
+        #[arg(long)]
+        read: Option<String>,
+        /// Minimum role to post (guest | user | admin).
+        #[arg(long)]
+        write: Option<String>,
+        /// Lock the board (reject new posts).
+        #[arg(long)]
+        lock: bool,
+        /// Unlock the board.
+        #[arg(long)]
+        unlock: bool,
+    },
     /// List sysop bulletins.
     Bulletins,
     /// Post a new sysop bulletin (shown to users after login).
@@ -185,6 +204,41 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Role { username, role } => {
             admin::set_role(&pool, &username, &role).await?;
             println!("set role of '{username}' to '{role}'");
+        }
+        Cmd::Boards => {
+            let list = boards::list_boards(&pool).await?;
+            println!(
+                "{:<18} {:<8} {:<8} {:<8} DESCRIPTION",
+                "NAME", "READ", "WRITE", "LOCKED"
+            );
+            for b in list {
+                println!(
+                    "{:<18} {:<8} {:<8} {:<8} {}",
+                    b.name,
+                    b.min_read_role,
+                    b.min_write_role,
+                    if b.locked { "yes" } else { "no" },
+                    b.description
+                );
+            }
+        }
+        Cmd::SetBoard {
+            name,
+            read,
+            write,
+            lock,
+            unlock,
+        } => {
+            if lock && unlock {
+                anyhow::bail!("--lock and --unlock are mutually exclusive");
+            }
+            if read.is_some() || write.is_some() {
+                boards::set_roles(&pool, &name, read.as_deref(), write.as_deref()).await?;
+            }
+            if lock || unlock {
+                boards::set_locked_by_name(&pool, &name, lock).await?;
+            }
+            println!("updated board '{name}'");
         }
         Cmd::Bulletins => {
             let list = bulletins::list(&pool).await?;
