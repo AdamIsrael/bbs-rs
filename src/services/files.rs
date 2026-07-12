@@ -138,6 +138,25 @@ pub async fn get_file(pool: &SqlitePool, id: i64) -> Result<FileEntry> {
     .ok_or(AppError::NotFound)
 }
 
+/// Resolve a file within an area by name (newest match wins if names collide).
+pub async fn get_file_by_name(
+    pool: &SqlitePool,
+    area_id: i64,
+    filename: &str,
+) -> Result<Option<FileEntry>> {
+    let file = sqlx::query_as::<_, FileEntry>(
+        "SELECT f.id, f.area_id, f.uploader_id, u.username AS uploader_name, \
+         f.filename, f.description, f.size, f.storage_path, f.downloads, f.created_at \
+         FROM files f JOIN users u ON u.id = f.uploader_id \
+         WHERE f.area_id = ? AND f.filename = ? ORDER BY f.id DESC LIMIT 1",
+    )
+    .bind(area_id)
+    .bind(filename)
+    .fetch_optional(pool)
+    .await?;
+    Ok(file)
+}
+
 /// Total bytes a user currently stores across all areas.
 pub async fn user_usage(pool: &SqlitePool, user_id: i64) -> Result<i64> {
     let total: i64 =
@@ -229,6 +248,18 @@ pub async fn delete_file(pool: &SqlitePool, id: i64) -> Result<Option<String>> {
             .await?;
     }
     Ok(path)
+}
+
+/// Update a file's description. Ungated — callers (the uploader or an admin in
+/// the TUI, or `bbsctl`) enforce who may edit. Returns whether a row matched.
+pub async fn set_description(pool: &SqlitePool, id: i64, description: &str) -> Result<bool> {
+    let affected = sqlx::query("UPDATE files SET description = ? WHERE id = ?")
+        .bind(description)
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(affected > 0)
 }
 
 /// Increment a file's download counter.

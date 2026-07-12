@@ -506,6 +506,18 @@ async fn file_areas_upload_accounting_and_acl() {
         .expect("admins are not quota-limited");
     assert_eq!(files::user_usage(&pool, admin.id).await.unwrap(), 200);
 
+    // Descriptions can be set after the fact (e.g. an SFTP upload had none).
+    assert!(
+        files::set_description(&pool, entry.id, "now described")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        files::get_file(&pool, entry.id).await.unwrap().description,
+        "now described"
+    );
+    assert!(!files::set_description(&pool, 99999, "x").await.unwrap());
+
     // Deleting a file returns its storage path (for the caller to unlink) and
     // frees quota.
     let path = files::delete_file(&pool, entry.id).await.unwrap();

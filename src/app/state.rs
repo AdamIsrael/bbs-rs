@@ -20,6 +20,7 @@ pub enum Screen {
     FileAreas,
     FileList,
     FileDetail,
+    EditFileDesc,
     Keys,
     AddKey,
     Register,

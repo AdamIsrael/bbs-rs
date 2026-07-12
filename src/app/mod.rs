@@ -190,7 +190,8 @@ impl App {
             Screen::WhoOnline => self.on_who(key).await,
             Screen::FileAreas => self.on_file_areas(key).await,
             Screen::FileList => self.on_file_list(key).await,
-            Screen::FileDetail => self.on_reader(key, Screen::FileList),
+            Screen::FileDetail => self.on_file_detail(key).await,
+            Screen::EditFileDesc => self.on_edit_file_desc(key).await,
             Screen::Keys => self.on_keys(key).await,
             Screen::AddKey => self.on_add_key(key).await,
             Screen::Register => self.on_register(key).await,
@@ -807,6 +808,71 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::FileAreas,
             _ => {}
+        }
+    }
+
+    /// Whether the current session may edit the current file's description
+    /// (its uploader, or any admin).
+    pub fn can_edit_current_file(&self) -> bool {
+        self.current_file
+            .as_ref()
+            .is_some_and(|f| f.uploader_id == self.user.id || self.user.is_admin())
+    }
+
+    async fn on_file_detail(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('e') if self.can_edit_current_file() => {
+                let current = self
+                    .current_file
+                    .as_ref()
+                    .map(|f| f.description.clone())
+                    .unwrap_or_default();
+                let mut field = Field::new("Description", false);
+                field.value = current;
+                self.form = Form::new(vec![field]);
+                self.screen = Screen::EditFileDesc;
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter => {
+                self.screen = Screen::FileList
+            }
+            _ => {}
+        }
+    }
+
+    async fn on_edit_file_desc(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::FileDetail,
+            KeyCode::Enter => self.submit_file_desc().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_file_desc(&mut self) {
+        let Some(file_id) = self.current_file.as_ref().map(|f| f.id) else {
+            self.screen = Screen::FileList;
+            return;
+        };
+        let description = self.form.value(0).to_string();
+        match files::set_description(&self.pool, file_id, &description).await {
+            Ok(_) => {
+                // Refresh the detail view and the underlying list.
+                if let Ok(updated) = files::get_file(&self.pool, file_id).await {
+                    self.current_file = Some(updated);
+                }
+                if let Some(area_id) = self.current_file_area.as_ref().map(|a| a.id)
+                    && let Ok(list) = files::list_files(&self.pool, area_id).await
+                {
+                    self.files = list;
+                }
+                self.screen = Screen::FileDetail;
+                self.status = "Description updated.".into();
+            }
+            Err(e) => {
+                self.status = format!("Could not update: {e}");
+                self.screen = Screen::FileDetail;
+            }
         }
     }
 

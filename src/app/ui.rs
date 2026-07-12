@@ -38,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FileAreas => render_file_areas(f, body, app),
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
+        Screen::EditFileDesc => render_form(f, body, " Edit Description ", app),
         Screen::Keys => render_keys(f, body, app),
         Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
         Screen::Register => render_form(f, body, " Register ", app),
@@ -69,7 +70,7 @@ fn render_title(f: &mut Frame, area: Rect, app: &App) {
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if app.status.is_empty() {
         (
-            hints(app.screen, app.user.is_admin()),
+            hints(app.screen, app.user.is_admin(), app.can_edit_current_file()),
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -374,9 +375,15 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
     let Some(file) = &app.current_file else {
         return placeholder(f, area, " File ", "Nothing to show.");
     };
+    let area_name = app
+        .current_file_area
+        .as_ref()
+        .map(|a| a.name.as_str())
+        .unwrap_or("");
+    let net = &app.config.network;
     let body = format!(
         "Name:      {}\nSize:      {} ({} bytes)\nUploaded:  {} by {}\nDownloads: {}\n\n{}\n\n\
-         (Download over SFTP is coming soon.)",
+         Download over SFTP:\n  sftp -P {} {}@{}\n  sftp> get {}/{}",
         file.filename,
         human_size(file.size),
         file.size,
@@ -384,10 +391,15 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
         file.uploader_name,
         file.downloads,
         if file.description.is_empty() {
-            "(no description)"
+            "(no description — press 'e' to add one, if it's yours)"
         } else {
             &file.description
         },
+        net.port,
+        app.user.username,
+        net.connect_host(),
+        area_name,
+        file.filename,
     );
     let p = Paragraph::new(body)
         .block(Block::bordered().title(format!(" {} ", truncate(&file.filename, 50))))
@@ -501,7 +513,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
-  • File Areas     : browse downloadable files (SFTP transfer coming soon)
+  • File Areas     : browse files here; upload/download them over SFTP
   • SSH Keys       : register public keys to log in without a password
   • Register       : create an account, then reconnect over SSH with it
 
@@ -546,6 +558,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::FileAreas => "File Areas",
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
+        Screen::EditFileDesc => "Edit Description",
         Screen::Keys => "SSH Keys",
         Screen::AddKey => "Add SSH Key",
         Screen::Register => "Register",
@@ -555,7 +568,7 @@ fn screen_name(screen: Screen) -> &'static str {
     }
 }
 
-fn hints(screen: Screen, is_admin: bool) -> String {
+fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
     let base = match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
@@ -585,7 +598,14 @@ fn hints(screen: Screen, is_admin: bool) -> String {
         Screen::WhoOnline => " r refresh · Esc back ",
         Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
-        Screen::FileDetail => " Esc back ",
+        Screen::FileDetail => {
+            if can_edit_file {
+                " e edit description · Esc back "
+            } else {
+                " Esc back "
+            }
+        }
+        Screen::EditFileDesc => " type · Enter save · Esc cancel ",
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",

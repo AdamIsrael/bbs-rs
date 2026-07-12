@@ -73,6 +73,10 @@ pub struct Bbs {
 pub struct Network {
     pub host: String,
     pub port: u16,
+    /// Public hostname clients use to reach the BBS, shown in connect
+    /// instructions (e.g. the SFTP download hint). Blank falls back to `host`,
+    /// or `localhost` when `host` is a wildcard bind address.
+    pub hostname: String,
     pub database_url: String,
     pub host_key: PathBuf,
     /// Disconnect idle sessions after this many seconds.
@@ -248,6 +252,7 @@ impl Default for Network {
         Self {
             host: "0.0.0.0".into(),
             port: 2222,
+            hostname: String::new(),
             database_url: "sqlite://bbs.db?mode=rwc".into(),
             host_key: PathBuf::from("host_key"),
             inactivity_timeout_secs: 3600,
@@ -294,6 +299,21 @@ impl Network {
     }
     pub fn ban_sweep_interval(&self) -> Duration {
         Duration::from_secs(self.ban_sweep_interval_secs)
+    }
+
+    /// The hostname to show clients in connect instructions: the configured
+    /// public `hostname` if set, otherwise `host` — mapping a wildcard bind
+    /// address (`0.0.0.0` / `::` / empty) to `localhost`, which is at least
+    /// connectable.
+    pub fn connect_host(&self) -> String {
+        let h = self.hostname.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+        match self.host.trim() {
+            "" | "0.0.0.0" | "::" | "[::]" => "localhost".to_string(),
+            other => other.to_string(),
+        }
     }
 }
 
@@ -349,6 +369,10 @@ welcome = \"Welcome to the board.\"
 [network]
 host = \"0.0.0.0\"
 port = 2222
+# Public hostname clients use to reach the BBS, shown in connect instructions
+# (e.g. the SFTP download hint). Blank falls back to host, or localhost when
+# host is a wildcard address.
+hostname = \"\"
 database_url = \"sqlite://bbs.db?mode=rwc\"
 host_key = \"host_key\"
 # Disconnect idle sessions after this many seconds.
@@ -450,6 +474,21 @@ mod tests {
         assert!(s.features.guest);
         // The reserved-username list defaults to root + admin.
         assert_eq!(s.accounts.reserved_usernames, vec!["root", "admin"]);
+    }
+
+    #[test]
+    fn connect_host_prefers_hostname_then_maps_wildcards() {
+        let mut net = Network::default(); // host 0.0.0.0, no hostname
+        assert_eq!(net.connect_host(), "localhost");
+
+        net.host = "bbs.example.com".into();
+        assert_eq!(net.connect_host(), "bbs.example.com");
+
+        net.hostname = "public.example.net".into();
+        assert_eq!(net.connect_host(), "public.example.net");
+
+        net.hostname = "  ".into(); // blank falls back to host
+        assert_eq!(net.connect_host(), "bbs.example.com");
     }
 
     #[test]

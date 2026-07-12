@@ -18,6 +18,7 @@ crossterm = "0.29.0"
 getrandom = "0.4"
 ratatui = "0.30.2"
 russh = "0.62.2"
+russh-sftp = { version = "2.3.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 thiserror = "2.0.18"

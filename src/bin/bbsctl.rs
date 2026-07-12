@@ -141,6 +141,8 @@ enum Cmd {
     },
     /// Remove a file by id (deletes the stored blob too).
     RmFile { id: i64 },
+    /// Set a file's description by id (SFTP uploads start with none).
+    SetFileDesc { id: i64, description: String },
     /// List sysop bulletins.
     Bulletins,
     /// Post a new sysop bulletin (shown to users after login).
@@ -427,6 +429,13 @@ async fn main() -> anyhow::Result<()> {
             }
             None => println!("no file #{id}"),
         },
+        Cmd::SetFileDesc { id, description } => {
+            if files::set_description(&pool, id, &description).await? {
+                println!("updated description of file #{id}");
+            } else {
+                println!("no file #{id}");
+            }
+        }
         Cmd::Bulletins => {
             let list = bulletins::list(&pool).await?;
             println!("{:<5} {:<20} TITLE", "ID", "WHEN");
