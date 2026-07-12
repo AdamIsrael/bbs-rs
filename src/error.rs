@@ -16,6 +16,9 @@ pub enum AppError {
     #[error("username already taken")]
     UsernameTaken,
 
+    #[error("that username is reserved")]
+    UsernameReserved,
+
     #[error("that action is not available to the guest account")]
     GuestNotAllowed,
 

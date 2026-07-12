@@ -46,7 +46,7 @@ Settings live in **`bbs.toml`** (created with documented defaults on first run).
 --host-key <PATH>      override network.host_key
 ```
 
-The file has three sections:
+The file has these sections:
 
 ```toml
 [bbs]        # branding
@@ -72,6 +72,11 @@ who_online = true
 max_failures = 10      # failures within the window to trigger a ban (0 disables)
 window_secs = 600      # sliding window for counting failures
 ban_secs = 3600        # how long an auto-ban lasts (0 = permanent)
+
+[accounts]   # registration policy
+# Usernames that may not be registered (case-insensitive, whitespace-trimmed).
+# "guest" is always reserved regardless of this list.
+reserved_usernames = ["root", "admin"]
 ```
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
@@ -105,7 +110,8 @@ bbsctl rm-bulletin <id>          # remove a bulletin
 ```
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
-normal account, then run `bbsctl role <that-user> admin`.
+normal account, then run `bbsctl role <that-user> admin`. Registration refuses reserved usernames —
+`root` and `admin` by default (plus `guest` always), configurable via `[accounts].reserved_usernames`.
 
 A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get

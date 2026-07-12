@@ -566,13 +566,16 @@ impl App {
             self.status = "Passwords do not match.".into();
             return;
         }
-        match auth::register_user(&self.pool, &username, &password).await {
+        match auth::register_user(&self.pool, &username, &password, &self.config.accounts).await {
             Ok(_) => {
                 self.screen = Screen::MainMenu;
                 self.status =
                     format!("Account '{username}' created — reconnect over SSH as that user.");
             }
             Err(AppError::UsernameTaken) => self.status = "That username is taken.".into(),
+            Err(AppError::UsernameReserved) => {
+                self.status = "That username is reserved — please choose another.".into()
+            }
             Err(e) => self.status = format!("Could not register: {e}"),
         }
     }

@@ -40,15 +40,16 @@ async fn guest_seeded_and_login_works() {
 async fn register_then_login() {
     let pool = setup().await;
 
-    let user = bbs_rs::services::auth::register_user(&pool, "alice", "hunter2")
-        .await
-        .unwrap();
+    let user =
+        bbs_rs::services::auth::register_user(&pool, "alice", "hunter2", &Default::default())
+            .await
+            .unwrap();
     assert_eq!(user.role, "user");
     assert!(!user.is_guest());
 
     // Duplicate registration fails.
     assert!(matches!(
-        bbs_rs::services::auth::register_user(&pool, "alice", "other").await,
+        bbs_rs::services::auth::register_user(&pool, "alice", "other", &Default::default()).await,
         Err(bbs_rs::error::AppError::UsernameTaken)
     ));
 
@@ -58,6 +59,39 @@ async fn register_then_login() {
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn reserved_usernames_are_rejected() {
+    let pool = setup().await;
+    let accounts = bbs_rs::config::Accounts::default(); // reserves root + admin
+
+    // Default-reserved names are refused, case-insensitively and trimmed.
+    for name in ["root", "admin", "ADMIN", "  Root  "] {
+        assert!(
+            matches!(
+                bbs_rs::services::auth::register_user(&pool, name, "pw", &accounts).await,
+                Err(bbs_rs::error::AppError::UsernameReserved)
+            ),
+            "{name:?} should be reserved"
+        );
+    }
+
+    // guest is always reserved, even with an empty configured list.
+    let empty = bbs_rs::config::Accounts {
+        reserved_usernames: vec![],
+    };
+    assert!(matches!(
+        bbs_rs::services::auth::register_user(&pool, "guest", "pw", &empty).await,
+        Err(bbs_rs::error::AppError::UsernameReserved)
+    ));
+
+    // A non-reserved name still registers.
+    assert!(
+        bbs_rs::services::auth::register_user(&pool, "alice", "pw", &accounts)
+            .await
+            .is_ok()
     );
 }
 
@@ -77,7 +111,7 @@ async fn guest_cannot_post_but_users_can() {
         Err(bbs_rs::error::AppError::GuestNotAllowed)
     ));
 
-    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw")
+    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())
         .await
         .unwrap();
     bbs_rs::services::boards::post_message(&pool, board_id, &alice, "Hello", "world")
@@ -95,10 +129,10 @@ async fn guest_cannot_post_but_users_can() {
 #[tokio::test]
 async fn mail_send_read_and_guardrails() {
     let pool = setup().await;
-    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw")
+    let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())
         .await
         .unwrap();
-    let bob = bbs_rs::services::auth::register_user(&pool, "bob", "pw")
+    let bob = bbs_rs::services::auth::register_user(&pool, "bob", "pw", &Default::default())
         .await
         .unwrap();
 

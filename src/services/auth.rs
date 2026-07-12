@@ -4,6 +4,7 @@ use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use sqlx::sqlite::SqlitePool;
 
+use crate::config::Accounts;
 use crate::db::models::User;
 use crate::error::{AppError, Result};
 use crate::services::admin;
@@ -87,7 +88,18 @@ pub async fn attempt_login(
 
 /// Create a new `user`-role account. Registration is reachable from the guest
 /// session so newcomers can bootstrap an account, then reconnect over SSH.
-pub async fn register_user(pool: &SqlitePool, username: &str, password: &str) -> Result<User> {
+///
+/// Rejects reserved usernames (see [`Accounts::is_reserved`]) so bots can't
+/// grab `root`/`admin` and so `guest` stays the shared account.
+pub async fn register_user(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+    accounts: &Accounts,
+) -> Result<User> {
+    if accounts.is_reserved(username) {
+        return Err(AppError::UsernameReserved);
+    }
     if find_user(pool, username).await?.is_some() {
         return Err(AppError::UsernameTaken);
     }

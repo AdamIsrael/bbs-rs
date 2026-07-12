@@ -43,7 +43,9 @@ async fn guest_sees_register() {
 #[tokio::test]
 async fn registered_user_does_not_see_register() {
     let pool = setup().await;
-    let user = auth::register_user(&pool, "alice", "pw").await.unwrap();
+    let user = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
     let app = App::new(pool, Presence::new(), config(), user, 1);
     assert!(
         !app.menu.contains(&MenuItem::Register),
