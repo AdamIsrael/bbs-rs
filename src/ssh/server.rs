@@ -376,16 +376,21 @@ async fn auto_ban(pool: &SqlitePool, abuse: &crate::config::Abuse) {
     }
 }
 
-/// The SSH auth methods to advertise. We only implement password auth, so we
-/// advertise *only* password — never russh's default `MethodSet::all()`.
+/// The SSH auth methods to advertise — only the ones we actually accept, never
+/// russh's default `MethodSet::all()`.
 ///
-/// Advertising publickey/hostbased/keyboard-interactive (which we don't accept)
-/// makes clients offer every key in their ssh-agent; russh delays each
-/// rejection by `auth_rejection_time`, so a full agent means 30–60s of dead air
-/// before the password prompt appears — a login that looks hung but isn't.
-fn advertised_methods() -> russh::MethodSet {
+/// Advertising methods we don't implement (hostbased, keyboard-interactive, or
+/// publickey when it's disabled) makes clients offer credentials we'd reject;
+/// russh delays each rejection by `auth_rejection_time`, so a full ssh-agent
+/// means 30–60s of dead air before the password prompt — a login that looks
+/// hung but isn't. Publickey is advertised only when `features.pubkey_auth` is
+/// on (and even then a client only offers its own keys).
+fn advertised_methods(config: &Settings) -> russh::MethodSet {
     let mut methods = russh::MethodSet::empty();
     methods.push(russh::MethodKind::Password);
+    if config.features.pubkey_auth {
+        methods.push(russh::MethodKind::PublicKey);
+    }
     methods
 }
 
@@ -398,7 +403,7 @@ pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> 
     tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
 
     let ssh_config = Config {
-        methods: advertised_methods(),
+        methods: advertised_methods(&config),
         inactivity_timeout: Some(net.inactivity_timeout()),
         auth_rejection_time: net.auth_rejection_time(),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
@@ -423,14 +428,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advertises_only_password() {
+    fn never_advertises_methods_we_dont_implement() {
         // Regression guard for the "hung login" bug: we must not advertise auth
-        // methods we don't implement, or clients waste 30–60s offering keys.
-        let m = advertised_methods();
-        assert!(m.contains(&russh::MethodKind::Password));
-        assert!(!m.contains(&russh::MethodKind::PublicKey));
-        assert!(!m.contains(&russh::MethodKind::KeyboardInteractive));
-        assert!(!m.contains(&russh::MethodKind::HostBased));
-        assert!(!m.contains(&russh::MethodKind::None));
+        // methods we don't accept, or clients waste 30–60s offering keys.
+        for pubkey in [true, false] {
+            let mut cfg = Settings::default();
+            cfg.features.pubkey_auth = pubkey;
+            let m = advertised_methods(&cfg);
+            assert!(m.contains(&russh::MethodKind::Password));
+            assert!(!m.contains(&russh::MethodKind::KeyboardInteractive));
+            assert!(!m.contains(&russh::MethodKind::HostBased));
+            assert!(!m.contains(&russh::MethodKind::None));
+            // Publickey is advertised iff the feature is enabled.
+            assert_eq!(m.contains(&russh::MethodKind::PublicKey), pubkey);
+        }
     }
 }
