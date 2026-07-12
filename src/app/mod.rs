@@ -15,10 +15,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::Settings;
-use crate::db::models::{Board, Bulletin, Login, Mail, Message, User};
+use crate::db::models::{Board, Bulletin, Login, Mail, Message, Oneliner, User};
 use crate::error::AppError;
 use crate::services::presence::{OnlineUser, Presence};
-use crate::services::{admin, auth, boards, bulletins, mail};
+use crate::services::{admin, auth, boards, bulletins, mail, oneliners};
 use crate::transport::Event;
 
 use state::{Field, Form, MenuItem, Screen};
@@ -43,6 +43,9 @@ pub struct App {
     pub bulletins: Vec<Bulletin>,
     pub bulletin_sel: usize,
     pub current_bulletin: Option<Bulletin>,
+
+    // Oneliners (graffiti wall)
+    pub oneliners: Vec<Oneliner>,
 
     // Boards
     pub boards: Vec<Board>,
@@ -84,6 +87,9 @@ impl App {
         // bootstrap path, so it's only offered to the guest account.
         let f = &config.features;
         let mut menu = vec![MenuItem::Bulletins, MenuItem::Boards];
+        if f.oneliners {
+            menu.push(MenuItem::Oneliners);
+        }
         if f.private_mail {
             menu.push(MenuItem::Mail);
         }
@@ -112,6 +118,7 @@ impl App {
             bulletins: Vec::new(),
             bulletin_sel: 0,
             current_bulletin: None,
+            oneliners: Vec::new(),
             boards: Vec::new(),
             board_sel: 0,
             current_board_id: None,
@@ -143,6 +150,8 @@ impl App {
             Screen::MainMenu => self.on_main_menu(key).await,
             Screen::Bulletins => self.on_bulletins(key).await,
             Screen::ReadBulletin => self.on_reader(key, Screen::Bulletins),
+            Screen::Oneliners => self.on_oneliners(key).await,
+            Screen::ComposeOneliner => self.on_compose_oneliner(key).await,
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
             Screen::ReadMessage => self.on_reader(key, Screen::MessageList),
@@ -176,6 +185,7 @@ impl App {
         match self.menu[self.menu_sel] {
             MenuItem::Bulletins => self.open_bulletins().await,
             MenuItem::Boards => self.open_boards().await,
+            MenuItem::Oneliners => self.open_oneliners().await,
             MenuItem::Mail => {
                 if self.user.is_guest() {
                     self.status =
@@ -239,6 +249,61 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
+        }
+    }
+
+    // ---- Oneliners (graffiti wall) ---------------------------------------
+
+    async fn open_oneliners(&mut self) {
+        match oneliners::recent(&self.pool, 100).await {
+            Ok(list) => {
+                self.oneliners = list;
+                self.screen = Screen::Oneliners;
+            }
+            Err(e) => self.status = format!("Error loading oneliners: {e}"),
+        }
+    }
+
+    async fn on_oneliners(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('n') => {
+                if self.user.is_guest() {
+                    self.status = "Guests cannot post — register an account first.".into();
+                } else {
+                    self.form = Form::new(vec![Field::new("Oneliner", false)]);
+                    self.screen = Screen::ComposeOneliner;
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    async fn on_compose_oneliner(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Oneliners,
+            KeyCode::Enter => self.submit_oneliner().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_oneliner(&mut self) {
+        let body = self.form.value(0).to_string();
+        if body.is_empty() {
+            self.status = "Say something first.".into();
+            return;
+        }
+        match oneliners::add(&self.pool, &self.user, &body).await {
+            Ok(()) => {
+                self.open_oneliners().await;
+                self.status = "Posted to the wall.".into();
+            }
+            Err(AppError::OnelinerLength(max)) => {
+                self.status = format!("Oneliner must be 1–{max} characters.");
+            }
+            Err(e) => self.status = format!("Could not post: {e}"),
         }
     }
 

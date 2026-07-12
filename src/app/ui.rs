@@ -25,6 +25,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::MainMenu => render_main_menu(f, body, app),
         Screen::Bulletins => render_bulletins(f, body, app),
         Screen::ReadBulletin => render_read_bulletin(f, body, app),
+        Screen::Oneliners => render_oneliners(f, body, app),
+        Screen::ComposeOneliner => render_form(f, body, " New Oneliner ", app),
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
         Screen::ReadMessage => render_read_message(f, body, app),
@@ -157,6 +159,32 @@ fn render_read_bulletin(f: &mut Frame, area: Rect, app: &App) {
         .block(Block::bordered().title(format!(" {} ", truncate(&b.title, 60))))
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
+}
+
+fn render_oneliners(f: &mut Frame, area: Rect, app: &App) {
+    if app.oneliners.is_empty() {
+        return placeholder(
+            f,
+            area,
+            " Oneliners ",
+            "The wall is empty. Press 'n' to add one.",
+        );
+    }
+    let lines: Vec<Line> = app
+        .oneliners
+        .iter()
+        .map(|o| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>12}: ", truncate(&o.author_name, 12)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(truncate(&o.body, 80)),
+            ])
+        })
+        .collect();
+    // A read-only wall: reuse the list renderer with no selection highlight.
+    render_selectable(f, area, " Oneliners ", lines, usize::MAX);
 }
 
 fn render_boards(f: &mut Frame, area: Rect, app: &App) {
@@ -340,6 +368,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
     text.push_str(
         "\
   • Message Boards : browse boards, read and (registered users) post messages
+  • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
   • Register       : create an account, then reconnect over SSH with it
@@ -372,6 +401,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::MainMenu => "Main Menu",
         Screen::Bulletins => "Bulletins",
         Screen::ReadBulletin => "Bulletin",
+        Screen::Oneliners => "Oneliners",
+        Screen::ComposeOneliner => "New Oneliner",
         Screen::BoardList => "Boards",
         Screen::MessageList => "Messages",
         Screen::ReadMessage => "Reading",
@@ -391,6 +422,8 @@ fn hints(screen: Screen) -> &'static str {
     match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
+        Screen::Oneliners => " n new · Esc back ",
+        Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
         Screen::BoardList => " ↑/↓ move · Enter open · Esc back ",
         Screen::MessageList => " ↑/↓ move · Enter read · n new post · Esc back ",
         Screen::ReadMessage | Screen::ReadMail | Screen::ReadBulletin | Screen::Help => {

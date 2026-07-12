@@ -7,6 +7,8 @@ pub enum Screen {
     MainMenu,
     Bulletins,
     ReadBulletin,
+    Oneliners,
+    ComposeOneliner,
     BoardList,
     MessageList,
     ReadMessage,
@@ -26,6 +28,7 @@ pub enum Screen {
 pub enum MenuItem {
     Bulletins,
     Boards,
+    Oneliners,
     Mail,
     Who,
     Register,
@@ -39,6 +42,7 @@ impl MenuItem {
         match self {
             MenuItem::Bulletins => "Bulletins",
             MenuItem::Boards => "Message Boards",
+            MenuItem::Oneliners => "Oneliners",
             MenuItem::Mail => "Private Mail",
             MenuItem::Who => "Who's Online",
             MenuItem::Register => "Register New Account",

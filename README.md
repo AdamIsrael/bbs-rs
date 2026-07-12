@@ -12,6 +12,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Accounts** — a shared limited `guest/guest` account plus in-TUI registration of real users
   (passwords hashed with argon2, stored in SQLite).
 - **Message boards** — browse boards, read messages, and (registered users) post.
+- **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
@@ -67,6 +68,7 @@ registration = true    # in-TUI account creation (from the guest session)
 guest = true           # allow the shared guest account to log in
 private_mail = true
 who_online = true
+oneliners = true       # the graffiti wall
 
 [abuse]      # auto-ban IPs with repeated failed logins
 max_failures = 10      # failures within the window to trigger a ban (0 disables)
@@ -107,6 +109,8 @@ bbsctl logins [--user U] [--failures] [--limit N]   # login audit trail
 bbsctl bulletins                 # list sysop bulletins
 bbsctl post-bulletin <title> --body <text>          # post a bulletin
 bbsctl rm-bulletin <id>          # remove a bulletin
+bbsctl oneliners [--limit N]     # list recent oneliners (graffiti wall)
+bbsctl rm-oneliner <id>          # remove a oneliner (moderation)
 ```
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
@@ -126,6 +130,11 @@ brute-force / bot traffic). Auto-bans expire after `ban_secs` and are purged aut
 **Bulletins** are short sysop announcements posted with `bbsctl post-bulletin`. When any exist, a
 session lands on the **Bulletins** screen right after login (in addition to the `bbs.welcome` MOTD);
 they're also reachable any time from the main menu.
+
+**Oneliners** are a shared "graffiti wall" of short public one-liners (up to 120 chars). Any registered
+user can append one from the **Oneliners** menu (press `n`); guests are read-only, like on the boards.
+Sysops can prune the wall with `bbsctl rm-oneliner <id>`, and the whole feature can be turned off with
+`[features].oneliners = false`.
 
 ## Upgrading & migrations
 

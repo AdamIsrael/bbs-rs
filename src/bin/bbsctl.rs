@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::{admin, bulletins};
+use bbs_rs::services::{admin, bulletins, oneliners};
 use bbs_rs::util::fmt_time;
 
 #[derive(Parser)]
@@ -82,6 +82,14 @@ enum Cmd {
     },
     /// Remove a bulletin by id.
     RmBulletin { id: i64 },
+    /// List recent oneliners (graffiti wall).
+    Oneliners {
+        /// Maximum rows to show.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Remove a oneliner by id (moderation).
+    RmOneliner { id: i64 },
     /// Show recent login attempts.
     Logins {
         /// Filter to a single username.
@@ -194,6 +202,26 @@ async fn main() -> anyhow::Result<()> {
                 println!("removed bulletin #{id}");
             } else {
                 println!("no bulletin #{id}");
+            }
+        }
+        Cmd::Oneliners { limit } => {
+            let list = oneliners::recent(&pool, limit).await?;
+            println!("{:<5} {:<20} {:<14} TEXT", "ID", "WHEN", "AUTHOR");
+            for o in list {
+                println!(
+                    "{:<5} {:<20} {:<14} {}",
+                    o.id,
+                    fmt_time(o.created_at),
+                    o.author_name,
+                    o.body
+                );
+            }
+        }
+        Cmd::RmOneliner { id } => {
+            if oneliners::delete(&pool, id).await? {
+                println!("removed oneliner #{id}");
+            } else {
+                println!("no oneliner #{id}");
             }
         }
         Cmd::Logins {

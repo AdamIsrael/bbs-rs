@@ -56,3 +56,19 @@ async fn registered_user_does_not_see_register() {
     assert!(app.menu.contains(&MenuItem::Mail));
     assert!(app.menu.contains(&MenuItem::Quit));
 }
+
+#[tokio::test]
+async fn oneliners_menu_follows_feature_toggle() {
+    let pool = setup().await;
+    let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+
+    // On by default.
+    let app = App::new(pool.clone(), Presence::new(), config(), guest.clone(), 1);
+    assert!(app.menu.contains(&MenuItem::Oneliners));
+
+    // Disabling the feature removes the menu item.
+    let mut settings = Settings::default();
+    settings.features.oneliners = false;
+    let app = App::new(pool, Presence::new(), Arc::new(settings), guest, 2);
+    assert!(!app.menu.contains(&MenuItem::Oneliners));
+}
