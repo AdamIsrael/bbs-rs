@@ -48,6 +48,7 @@ pub struct Settings {
     pub network: Network,
     pub features: Features,
     pub abuse: Abuse,
+    pub accounts: Accounts,
 }
 
 /// Branding shown to connected users.
@@ -109,6 +110,38 @@ impl Abuse {
     /// Whether auto-ban is active.
     pub fn enabled(&self) -> bool {
         self.max_failures > 0
+    }
+}
+
+/// Account-registration policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Accounts {
+    /// Usernames that may not be registered. Matching is case-insensitive and
+    /// ignores surrounding whitespace. `guest` is always reserved regardless of
+    /// this list (it is the shared limited account).
+    pub reserved_usernames: Vec<String>,
+}
+
+impl Default for Accounts {
+    fn default() -> Self {
+        Self {
+            reserved_usernames: vec!["root".into(), "admin".into()],
+        }
+    }
+}
+
+impl Accounts {
+    /// Whether `name` may not be used for a new account. Comparison is
+    /// case-insensitive and trims surrounding whitespace; `guest` is always
+    /// reserved.
+    pub fn is_reserved(&self, name: &str) -> bool {
+        let name = name.trim();
+        name.eq_ignore_ascii_case("guest")
+            || self
+                .reserved_usernames
+                .iter()
+                .any(|r| r.trim().eq_ignore_ascii_case(name))
     }
 }
 
@@ -255,6 +288,11 @@ max_failures = 10
 window_secs = 600
 # How long an auto-ban lasts, in seconds. 0 = permanent.
 ban_secs = 3600
+
+[accounts]
+# Usernames that may not be registered (case-insensitive; whitespace-trimmed).
+# \"guest\" is always reserved regardless of this list.
+reserved_usernames = [\"root\", \"admin\"]
 ";
 
 #[cfg(test)]
@@ -272,6 +310,10 @@ mod tests {
             def.network.ban_sweep_interval_secs
         );
         assert_eq!(parsed.features.registration, def.features.registration);
+        assert_eq!(
+            parsed.accounts.reserved_usernames,
+            def.accounts.reserved_usernames
+        );
     }
 
     #[test]
@@ -282,5 +324,28 @@ mod tests {
         // Unspecified fields fall back to defaults.
         assert_eq!(s.network.port, 2222);
         assert!(s.features.guest);
+        // The reserved-username list defaults to root + admin.
+        assert_eq!(s.accounts.reserved_usernames, vec!["root", "admin"]);
+    }
+
+    #[test]
+    fn reserved_usernames_are_matched_case_insensitively() {
+        let a = Accounts::default();
+        assert!(a.is_reserved("root"));
+        assert!(a.is_reserved("Admin"));
+        assert!(a.is_reserved("  ROOT  "));
+        // guest is always reserved even when absent from the list.
+        assert!(a.is_reserved("guest"));
+        assert!(a.is_reserved("GUEST"));
+        assert!(!a.is_reserved("alice"));
+    }
+
+    #[test]
+    fn empty_list_still_reserves_guest() {
+        let a = Accounts {
+            reserved_usernames: vec![],
+        };
+        assert!(a.is_reserved("guest"));
+        assert!(!a.is_reserved("root"));
     }
 }

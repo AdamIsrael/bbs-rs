@@ -24,7 +24,9 @@ async fn setup() -> SqlitePool {
 #[tokio::test]
 async fn attempt_login_accepts_records_and_enforces_bans() {
     let pool = setup().await;
-    auth::register_user(&pool, "alice", "pw").await.unwrap();
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
 
     // Good credentials → Some, and a success row is logged.
     let ok = auth::attempt_login(&pool, "alice", "pw", Some("1.2.3.4"))
@@ -65,7 +67,9 @@ async fn attempt_login_accepts_records_and_enforces_bans() {
 #[tokio::test]
 async fn ban_unban_user_toggles_state() {
     let pool = setup().await;
-    auth::register_user(&pool, "bob", "pw").await.unwrap();
+    auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
 
     assert!(
         !auth::find_user(&pool, "bob")
@@ -180,7 +184,9 @@ async fn failure_threshold_detects_offenders() {
 #[tokio::test]
 async fn set_role_validates_and_promotes() {
     let pool = setup().await;
-    auth::register_user(&pool, "carol", "pw").await.unwrap();
+    auth::register_user(&pool, "carol", "pw", &Default::default())
+        .await
+        .unwrap();
 
     admin::set_role(&pool, "carol", "admin").await.unwrap();
     let carol = auth::find_user(&pool, "carol").await.unwrap().unwrap();
@@ -224,7 +230,9 @@ async fn recent_logins_filters_and_limits() {
     // banned_usernames reflects a ban.
     admin::ban_user(&pool, "dave").await.ok();
     // (dave isn't a real user here, so ban_user is a no-op; register + ban:)
-    auth::register_user(&pool, "frank", "pw").await.unwrap();
+    auth::register_user(&pool, "frank", "pw", &Default::default())
+        .await
+        .unwrap();
     admin::ban_user(&pool, "frank").await.unwrap();
     assert!(
         admin::banned_usernames(&pool)
