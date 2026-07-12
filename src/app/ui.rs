@@ -253,7 +253,11 @@ fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
             }
         })
         .collect();
-    let p = Paragraph::new(Text::from(lines)).block(Block::bordered().title(title.to_string()));
+    // Wrap so long field input (subject/body/username) stays visible instead of
+    // running off the right edge while typing.
+    let p = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title(title.to_string()))
+        .wrap(Wrap { trim: false });
     f.render_widget(p, area);
 }
 
