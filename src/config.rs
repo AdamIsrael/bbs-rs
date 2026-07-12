@@ -47,6 +47,7 @@ pub struct Settings {
     pub bbs: Bbs,
     pub network: Network,
     pub features: Features,
+    pub abuse: Abuse,
 }
 
 /// Branding shown to connected users.
@@ -92,6 +93,25 @@ pub struct Features {
     pub who_online: bool,
 }
 
+/// Abuse protection: auto-ban IPs with repeated failed logins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Abuse {
+    /// Auto-ban an IP after this many failed logins within the window. 0 disables.
+    pub max_failures: u32,
+    /// Sliding window for counting failures, in seconds.
+    pub window_secs: i64,
+    /// How long an auto-ban lasts, in seconds. 0 = permanent.
+    pub ban_secs: i64,
+}
+
+impl Abuse {
+    /// Whether auto-ban is active.
+    pub fn enabled(&self) -> bool {
+        self.max_failures > 0
+    }
+}
+
 impl Default for Bbs {
     fn default() -> Self {
         Self {
@@ -126,6 +146,18 @@ impl Default for Features {
             guest: true,
             private_mail: true,
             who_online: true,
+        }
+    }
+}
+
+impl Default for Abuse {
+    fn default() -> Self {
+        // Enabled by default with a conservative policy: 10 failures in 10
+        // minutes → a 1-hour ban.
+        Self {
+            max_failures: 10,
+            window_secs: 600,
+            ban_secs: 3600,
         }
     }
 }
@@ -215,6 +247,14 @@ guest = true
 private_mail = true
 # Enable the who's-online view.
 who_online = true
+
+[abuse]
+# Auto-ban an IP after this many failed logins within the window. 0 disables.
+max_failures = 10
+# Sliding window for counting failures, in seconds.
+window_secs = 600
+# How long an auto-ban lasts, in seconds. 0 = permanent.
+ban_secs = 3600
 ";
 
 #[cfg(test)]

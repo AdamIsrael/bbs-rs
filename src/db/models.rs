@@ -43,12 +43,13 @@ pub struct Bulletin {
     pub created_at: i64,
 }
 
-/// A banned IP address.
+/// A banned IP address. `expires_at` is `None` for a permanent ban.
 #[derive(Debug, Clone, FromRow)]
 pub struct IpBan {
     pub ip: String,
     pub reason: String,
     pub created_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 /// A recorded login attempt (successful or not).

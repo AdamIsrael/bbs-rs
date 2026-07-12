@@ -278,15 +278,20 @@ fn load_or_generate_host_key(path: &Path) -> anyhow::Result<russh::keys::Private
     }
 }
 
-/// Periodically drop live sessions belonging to banned users or IPs. This is
-/// how bans applied out-of-process (by `bbsctl`) reach active sessions; in-BBS
-/// admin bans also kick immediately.
-async fn ban_sweeper(pool: SqlitePool, presence: Presence, interval: Duration) {
-    let mut ticker = tokio::time::interval(interval);
+/// Periodic maintenance loop: expire old IP bans, auto-ban IPs with repeated
+/// failed logins, then drop live sessions belonging to banned users or IPs.
+/// This is also how bans applied out-of-process (by `bbsctl`) reach active
+/// sessions; in-BBS admin bans also kick immediately.
+async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<Settings>) {
+    let mut ticker = tokio::time::interval(config.network.ban_sweep_interval());
     loop {
         ticker.tick().await;
+
+        let _ = admin::purge_expired_ip_bans(&pool).await;
+        auto_ban(&pool, &config.abuse).await;
+
         let (users, ips) =
-            match tokio::try_join!(admin::banned_usernames(&pool), admin::banned_ips(&pool),) {
+            match tokio::try_join!(admin::banned_usernames(&pool), admin::banned_ips(&pool)) {
                 Ok(pair) => pair,
                 Err(e) => {
                     tracing::warn!("ban sweeper query failed: {e}");
@@ -303,17 +308,45 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence, interval: Duration) {
     }
 }
 
+/// Ban IPs that crossed the failed-login threshold within the window.
+async fn auto_ban(pool: &SqlitePool, abuse: &crate::config::Abuse) {
+    if !abuse.enabled() {
+        return;
+    }
+    let now = crate::util::now_unix();
+    let since = now - abuse.window_secs;
+    let offenders =
+        match admin::ips_over_failure_threshold(pool, abuse.max_failures as i64, since).await {
+            Ok(ips) => ips,
+            Err(e) => {
+                tracing::warn!("auto-ban query failed: {e}");
+                return;
+            }
+        };
+    for ip in offenders {
+        let expires = (abuse.ban_secs > 0).then_some(now + abuse.ban_secs);
+        let reason = format!(
+            "auto: {}+ failed logins in {}s",
+            abuse.max_failures, abuse.window_secs
+        );
+        match admin::ban_ip(pool, &ip, &reason, expires).await {
+            Ok(()) => tracing::warn!(
+                "auto-banned {ip} ({}+ failed logins in {}s)",
+                abuse.max_failures,
+                abuse.window_secs
+            ),
+            Err(e) => tracing::warn!("auto-ban of {ip} failed: {e}"),
+        }
+    }
+}
+
 /// Bind and serve the SSH BBS until the process is stopped.
 pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> {
     let net = &config.network;
     let presence = Presence::new();
     let key = load_or_generate_host_key(&net.host_key)?;
 
-    tokio::spawn(ban_sweeper(
-        pool.clone(),
-        presence.clone(),
-        net.ban_sweep_interval(),
-    ));
+    tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
 
     let ssh_config = Config {
         inactivity_timeout: Some(net.inactivity_timeout()),

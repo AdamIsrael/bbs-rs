@@ -47,7 +47,9 @@ async fn attempt_login_accepts_records_and_enforces_bans() {
     admin::unban_user(&pool, "alice").await.unwrap();
 
     // Banned IP → rejected before password is even checked.
-    admin::ban_ip(&pool, "9.9.9.9", "abuse").await.unwrap();
+    admin::ban_ip(&pool, "9.9.9.9", "abuse", None)
+        .await
+        .unwrap();
     let ip_blocked = auth::attempt_login(&pool, "alice", "pw", Some("9.9.9.9"))
         .await
         .unwrap();
@@ -94,13 +96,85 @@ async fn ban_unban_user_toggles_state() {
 async fn ip_ban_lifecycle() {
     let pool = setup().await;
     assert!(!admin::is_ip_banned(&pool, "5.6.7.8").await.unwrap());
-    admin::ban_ip(&pool, "5.6.7.8", "spam").await.unwrap();
+    admin::ban_ip(&pool, "5.6.7.8", "spam", None).await.unwrap();
     assert!(admin::is_ip_banned(&pool, "5.6.7.8").await.unwrap());
     assert_eq!(admin::list_ip_bans(&pool).await.unwrap().len(), 1);
     let banned = admin::banned_ips(&pool).await.unwrap();
     assert!(banned.contains("5.6.7.8"));
     admin::unban_ip(&pool, "5.6.7.8").await.unwrap();
     assert!(!admin::is_ip_banned(&pool, "5.6.7.8").await.unwrap());
+}
+
+#[tokio::test]
+async fn expired_ip_ban_is_inactive_and_purgeable() {
+    let pool = setup().await;
+    let now = bbs_rs::util::now_unix();
+
+    // Permanent ban is active; already-expired ban is not.
+    admin::ban_ip(&pool, "1.1.1.1", "manual", None)
+        .await
+        .unwrap();
+    admin::ban_ip(&pool, "2.2.2.2", "auto", Some(now - 1))
+        .await
+        .unwrap();
+    // Future expiry is still active.
+    admin::ban_ip(&pool, "3.3.3.3", "auto", Some(now + 3600))
+        .await
+        .unwrap();
+
+    assert!(admin::is_ip_banned(&pool, "1.1.1.1").await.unwrap());
+    assert!(!admin::is_ip_banned(&pool, "2.2.2.2").await.unwrap());
+    assert!(admin::is_ip_banned(&pool, "3.3.3.3").await.unwrap());
+
+    // list/banned_ips exclude the expired one.
+    let active = admin::banned_ips(&pool).await.unwrap();
+    assert!(active.contains("1.1.1.1") && active.contains("3.3.3.3"));
+    assert!(!active.contains("2.2.2.2"));
+
+    // Purge removes the expired ban only.
+    let removed = admin::purge_expired_ip_bans(&pool).await.unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(admin::list_ip_bans(&pool).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failure_threshold_detects_offenders() {
+    let pool = setup().await;
+    let now = bbs_rs::util::now_unix();
+
+    // 3 failures from a bot IP, 1 from another, plus a success (shouldn't count).
+    for _ in 0..3 {
+        admin::record_login(&pool, "root", Some("6.6.6.6"), false)
+            .await
+            .unwrap();
+    }
+    admin::record_login(&pool, "alice", Some("7.7.7.7"), false)
+        .await
+        .unwrap();
+    admin::record_login(&pool, "carol", Some("6.6.6.6"), true)
+        .await
+        .unwrap();
+
+    // Threshold 3 within the window catches only 6.6.6.6.
+    let offenders = admin::ips_over_failure_threshold(&pool, 3, now - 600)
+        .await
+        .unwrap();
+    assert_eq!(offenders, vec!["6.6.6.6".to_string()]);
+
+    // Already-banned IPs are excluded from future detection.
+    admin::ban_ip(&pool, "6.6.6.6", "auto", Some(now + 3600))
+        .await
+        .unwrap();
+    let again = admin::ips_over_failure_threshold(&pool, 3, now - 600)
+        .await
+        .unwrap();
+    assert!(again.is_empty(), "banned IP is not re-detected");
+
+    // Old failures outside the window don't count.
+    let none = admin::ips_over_failure_threshold(&pool, 3, now + 1)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
 }
 
 #[tokio::test]

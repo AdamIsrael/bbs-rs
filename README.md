@@ -67,6 +67,11 @@ registration = true    # in-TUI account creation (from the guest session)
 guest = true           # allow the shared guest account to log in
 private_mail = true
 who_online = true
+
+[abuse]      # auto-ban IPs with repeated failed logins
+max_failures = 10      # failures within the window to trigger a ban (0 disables)
+window_secs = 600      # sliding window for counting failures
+ban_secs = 3600        # how long an auto-ban lasts (0 = permanent)
 ```
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
@@ -106,6 +111,11 @@ A ban rejects future logins *and* drops any live session for that user/IP (immed
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
 an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every login attempt
 (success or failure) is recorded with username, IP, and timestamp.
+
+**Auto-ban.** The ban sweeper also watches the login audit trail and temporarily bans any IP that
+exceeds `[abuse].max_failures` failed logins within `window_secs` (a fail2ban-style guard against
+brute-force / bot traffic). Auto-bans expire after `ban_secs` and are purged automatically; manual
+`bbsctl ban-ip` bans stay permanent. Set `max_failures = 0` to disable.
 
 **Bulletins** are short sysop announcements posted with `bbsctl post-bulletin`. When any exist, a
 session lands on the **Bulletins** screen right after login (in addition to the `bbs.welcome` MOTD);
