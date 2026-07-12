@@ -16,6 +16,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
+- **File areas** — browsable download areas with role ACLs, per-user storage quotas, and file-type
+  limits (catalog + operator management now; live SFTP transfer is a follow-up).
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
@@ -73,6 +75,7 @@ private_mail = true
 who_online = true
 oneliners = true       # the graffiti wall
 pubkey_auth = true     # allow SSH public-key login (users register keys in the BBS)
+file_areas = true      # browse downloadable file areas
 
 [abuse]      # auto-ban IPs with repeated failed logins
 max_failures = 10      # failures within the window to trigger a ban (0 disables)
@@ -89,6 +92,12 @@ window_secs = 60       # sliding window for counting a user's recent actions
 max_posts = 5          # board posts per user per window
 max_mail = 10          # mail sent per user per window
 max_oneliners = 8      # oneliners per user per window
+
+[files]      # file-area storage policy
+storage_dir = "files"          # where uploaded file blobs live
+max_file_bytes = 10485760      # per-file cap (0 = unlimited), default 10 MiB
+user_quota_bytes = 104857600   # per-user total (0 = unlimited), default 100 MiB
+allowed_extensions = []        # lowercase, no dot; empty allows any, e.g. ["txt","zip"]
 ```
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
@@ -126,6 +135,12 @@ bbsctl oneliners [--limit N]     # list recent oneliners (graffiti wall)
 bbsctl rm-oneliner <id>          # remove a oneliner (moderation)
 bbsctl boards                    # list boards with read/write ACLs and lock state
 bbsctl set-board <name> [--read ROLE] [--write ROLE] [--lock|--unlock]   # configure a board
+bbsctl file-areas                # list file areas with ACLs
+bbsctl add-area <name> [--desc D] [--read ROLE] [--write ROLE]   # create a file area
+bbsctl rm-area <name>            # remove an empty file area
+bbsctl files <area>              # list files in an area
+bbsctl add-file <area> <user> <path> [--desc D]   # add a file (copied into storage_dir)
+bbsctl rm-file <id>              # remove a file (and its stored blob)
 ```
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
@@ -163,6 +178,15 @@ they're also reachable any time from the main menu.
 user can append one from the **Oneliners** menu (press `n`); guests are read-only, like on the boards.
 Sysops can prune the wall with `bbsctl rm-oneliner <id>`, and the whole feature can be turned off with
 `[features].oneliners = false`.
+
+**File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
+board. Registered users browse areas and files from the **File Areas** menu and view per-file details
+(size, uploader, description, download count). This first phase is a **catalog with operator-managed
+storage**: sysops create areas with `bbsctl add-area` and add files from a server path with
+`bbsctl add-file <area> <user> <path>`, which copies the blob into `[files].storage_dir` and records it.
+Uploads are checked against the **allowed extensions**, the **per-file size cap**, and the uploader's
+**storage quota** (`[files]`). Live user-initiated upload/download over SFTP is the next phase
+([#38](https://github.com/AdamIsrael/bbs-rs/issues/38)).
 
 **Board moderation & ACLs.** Each board has a minimum **read** and **write** role (`guest` < `user` <
 `admin`) and a **locked** flag. Defaults preserve the classic behavior — anyone may read, registered

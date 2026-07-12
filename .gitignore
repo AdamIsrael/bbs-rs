@@ -8,3 +8,5 @@
 /bbs.db-shm
 /host_key
 /host_key.pub
+# File-area storage (default [files].storage_dir)
+/files/

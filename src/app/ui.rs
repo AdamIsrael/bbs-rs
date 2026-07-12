@@ -35,6 +35,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ReadMail => render_read_mail(f, body, app),
         Screen::ComposeMail => render_form(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
+        Screen::FileAreas => render_file_areas(f, body, app),
+        Screen::FileList => render_files(f, body, app),
+        Screen::FileDetail => render_file_detail(f, body, app),
         Screen::Keys => render_keys(f, body, app),
         Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
         Screen::Register => render_form(f, body, " Register ", app),
@@ -320,6 +323,78 @@ fn render_who(f: &mut Frame, area: Rect, app: &App) {
     render_selectable(f, area, " Who's Online ", lines, usize::MAX);
 }
 
+fn render_file_areas(f: &mut Frame, area: Rect, app: &App) {
+    if app.file_areas.is_empty() {
+        return placeholder(f, area, " File Areas ", "No file areas.");
+    }
+    let lines: Vec<Line> = app
+        .file_areas
+        .iter()
+        .map(|a| {
+            let mut flags = String::new();
+            if a.min_read_role != "guest" {
+                flags.push_str(&format!(" [{}+ to view]", a.min_read_role));
+            }
+            Line::from(vec![
+                Span::raw(format!("{:<16} {}", a.name, a.description)),
+                Span::styled(flags, Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+    render_selectable(f, area, " File Areas ", lines, app.file_area_sel);
+}
+
+fn render_files(f: &mut Frame, area: Rect, app: &App) {
+    let name = app
+        .current_file_area
+        .as_ref()
+        .map(|a| a.name.as_str())
+        .unwrap_or("");
+    let title = format!(" {name} ");
+    if app.files.is_empty() {
+        return placeholder(f, area, &title, "No files in this area yet.");
+    }
+    let lines: Vec<Line> = app
+        .files
+        .iter()
+        .map(|file| {
+            Line::from(format!(
+                "{:<28} {:>10} {:<12} {}",
+                truncate(&file.filename, 28),
+                human_size(file.size),
+                truncate(&file.uploader_name, 12),
+                truncate(&file.description, 24)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, &title, lines, app.file_sel);
+}
+
+fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
+    let Some(file) = &app.current_file else {
+        return placeholder(f, area, " File ", "Nothing to show.");
+    };
+    let body = format!(
+        "Name:      {}\nSize:      {} ({} bytes)\nUploaded:  {} by {}\nDownloads: {}\n\n{}\n\n\
+         (Download over SFTP is coming soon.)",
+        file.filename,
+        human_size(file.size),
+        file.size,
+        fmt_time(file.created_at),
+        file.uploader_name,
+        file.downloads,
+        if file.description.is_empty() {
+            "(no description)"
+        } else {
+            &file.description
+        },
+    );
+    let p = Paragraph::new(body)
+        .block(Block::bordered().title(format!(" {} ", truncate(&file.filename, 50))))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
 fn render_keys(f: &mut Frame, area: Rect, app: &App) {
     if app.user_keys.is_empty() {
         return placeholder(
@@ -426,6 +501,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
+  • File Areas     : browse downloadable files (SFTP transfer coming soon)
   • SSH Keys       : register public keys to log in without a password
   • Register       : create an account, then reconnect over SSH with it
 
@@ -467,6 +543,9 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadMail => "Reading Mail",
         Screen::ComposeMail => "Compose Mail",
         Screen::WhoOnline => "Who's Online",
+        Screen::FileAreas => "File Areas",
+        Screen::FileList => "Files",
+        Screen::FileDetail => "File",
         Screen::Keys => "SSH Keys",
         Screen::AddKey => "Add SSH Key",
         Screen::Register => "Register",
@@ -504,12 +583,31 @@ fn hints(screen: Screen, is_admin: bool) -> String {
         }
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · Esc back ",
         Screen::WhoOnline => " r refresh · Esc back ",
+        Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
+        Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
+        Screen::FileDetail => " Esc back ",
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
         Screen::AdminLogins => " Esc back ",
     };
     base.to_string()
+}
+
+/// Human-readable byte size, e.g. `1.5 MiB`.
+fn human_size(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes.max(0) as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes.max(0), UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

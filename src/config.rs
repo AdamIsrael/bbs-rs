@@ -50,6 +50,7 @@ pub struct Settings {
     pub abuse: Abuse,
     pub accounts: Accounts,
     pub limits: Limits,
+    pub files: Files,
 }
 
 /// Branding shown to connected users.
@@ -95,6 +96,7 @@ pub struct Features {
     pub who_online: bool,
     pub oneliners: bool,
     pub pubkey_auth: bool,
+    pub file_areas: bool,
 }
 
 /// Abuse protection: auto-ban IPs with repeated failed logins.
@@ -185,6 +187,51 @@ impl Limits {
     }
 }
 
+/// File-area storage policy: where uploaded files live, plus per-file and
+/// per-user limits and an optional extension allowlist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Files {
+    /// Directory (relative to the working dir, or absolute) holding file blobs.
+    pub storage_dir: PathBuf,
+    /// Maximum size of a single file, in bytes. 0 = unlimited.
+    pub max_file_bytes: u64,
+    /// Maximum total bytes one user may store across all areas. 0 = unlimited.
+    pub user_quota_bytes: u64,
+    /// Allowed file extensions (lowercase, no dot), e.g. ["txt", "zip"]. An
+    /// empty list allows any extension.
+    pub allowed_extensions: Vec<String>,
+}
+
+impl Default for Files {
+    fn default() -> Self {
+        Self {
+            storage_dir: PathBuf::from("files"),
+            max_file_bytes: 10 * 1024 * 1024,    // 10 MiB
+            user_quota_bytes: 100 * 1024 * 1024, // 100 MiB
+            allowed_extensions: Vec::new(),
+        }
+    }
+}
+
+impl Files {
+    /// Whether `filename`'s extension is permitted. An empty allowlist permits
+    /// everything; the check is case-insensitive.
+    pub fn extension_allowed(&self, filename: &str) -> bool {
+        if self.allowed_extensions.is_empty() {
+            return true;
+        }
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        self.allowed_extensions
+            .iter()
+            .any(|allowed| allowed.trim_start_matches('.').eq_ignore_ascii_case(&ext))
+    }
+}
+
 impl Default for Bbs {
     fn default() -> Self {
         Self {
@@ -221,6 +268,7 @@ impl Default for Features {
             who_online: true,
             oneliners: true,
             pubkey_auth: true,
+            file_areas: true,
         }
     }
 }
@@ -326,6 +374,8 @@ who_online = true
 oneliners = true
 # Allow SSH public-key authentication (users register keys in the BBS).
 pubkey_auth = true
+# Enable file areas (browse downloadable files).
+file_areas = true
 
 [abuse]
 # Auto-ban an IP after this many failed logins within the window. 0 disables.
@@ -350,6 +400,17 @@ max_posts = 5
 max_mail = 10
 # Max oneliners per user per window.
 max_oneliners = 8
+
+[files]
+# Where uploaded file blobs are stored (relative to the working dir).
+storage_dir = \"files\"
+# Maximum size of a single file, in bytes (0 = unlimited). Default 10 MiB.
+max_file_bytes = 10485760
+# Maximum total bytes one user may store (0 = unlimited). Default 100 MiB.
+user_quota_bytes = 104857600
+# Allowed file extensions (lowercase, no dot); empty allows any, e.g.
+# allowed_extensions = [\"txt\", \"zip\", \"png\"]
+allowed_extensions = []
 ";
 
 #[cfg(test)]
@@ -370,6 +431,8 @@ mod tests {
         assert_eq!(parsed.features.oneliners, def.features.oneliners);
         assert_eq!(parsed.features.pubkey_auth, def.features.pubkey_auth);
         assert_eq!(parsed.limits.max_posts, def.limits.max_posts);
+        assert_eq!(parsed.files.storage_dir, def.files.storage_dir);
+        assert_eq!(parsed.files.max_file_bytes, def.files.max_file_bytes);
         assert_eq!(parsed.limits.window_secs, def.limits.window_secs);
         assert_eq!(
             parsed.accounts.reserved_usernames,

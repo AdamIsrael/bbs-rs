@@ -5,6 +5,7 @@ pub mod admin;
 pub mod auth;
 pub mod boards;
 pub mod bulletins;
+pub mod files;
 pub mod keys;
 pub mod mail;
 pub mod oneliners;
@@ -30,9 +31,11 @@ pub fn role_rank(role: &str) -> usize {
     admin::ROLES.iter().position(|r| *r == role).unwrap_or(0)
 }
 
-/// One-time startup seeding: the guest account and default boards.
+/// One-time startup seeding: the guest account, default boards, and a default
+/// file area.
 pub async fn seed(pool: &SqlitePool) -> Result<()> {
     auth::ensure_guest(pool).await?;
     boards::ensure_default_boards(pool).await?;
+    files::ensure_default_areas(pool).await?;
     Ok(())
 }

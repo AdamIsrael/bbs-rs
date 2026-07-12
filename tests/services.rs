@@ -439,6 +439,84 @@ async fn pubkey_register_authorize_and_delete() {
 }
 
 #[tokio::test]
+async fn file_areas_upload_accounting_and_acl() {
+    use bbs_rs::config::Files;
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, files};
+    use std::path::PathBuf;
+
+    let pool = setup().await;
+    // seed() creates a default "Uploads" area.
+    let uploads = files::get_area_by_name(&pool, "Uploads").await.unwrap();
+
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // Small limits: 100-byte files, 150-byte quota, only .txt allowed.
+    let cfg = Files {
+        storage_dir: PathBuf::from("unused-in-tests"),
+        max_file_bytes: 100,
+        user_quota_bytes: 150,
+        allowed_extensions: vec!["txt".into()],
+    };
+
+    // A permitted upload records metadata and assigns a storage path.
+    let entry = files::add_file(&pool, uploads.id, &alice, "notes.txt", "my notes", 50, &cfg)
+        .await
+        .unwrap();
+    assert_eq!(entry.storage_path, format!("{}-notes.txt", entry.id));
+    assert_eq!(files::user_usage(&pool, alice.id).await.unwrap(), 50);
+
+    // Extension allowlist and per-file size cap are enforced.
+    assert!(matches!(
+        files::add_file(&pool, uploads.id, &alice, "pic.png", "", 10, &cfg).await,
+        Err(AppError::ExtensionNotAllowed)
+    ));
+    assert!(matches!(
+        files::add_file(&pool, uploads.id, &alice, "big.txt", "", 101, &cfg).await,
+        Err(AppError::FileTooLarge(_))
+    ));
+
+    // Quota is enforced across the running total (50 used + 50 = 100 ok; +60 over).
+    files::add_file(&pool, uploads.id, &alice, "more.txt", "", 50, &cfg)
+        .await
+        .unwrap();
+    assert!(matches!(
+        files::add_file(&pool, uploads.id, &alice, "third.txt", "", 60, &cfg).await,
+        Err(AppError::QuotaExceeded(_))
+    ));
+    assert_eq!(files::user_usage(&pool, alice.id).await.unwrap(), 100);
+
+    // Deleting a file returns its storage path (for the caller to unlink) and
+    // frees quota.
+    let path = files::delete_file(&pool, entry.id).await.unwrap();
+    assert_eq!(path, Some(format!("{}-notes.txt", entry.id)));
+    assert_eq!(files::user_usage(&pool, alice.id).await.unwrap(), 50);
+
+    // Read ACL: an admin-only area is hidden from lower roles.
+    files::add_area(&pool, "Staff", "internal", Some("admin"), Some("admin"))
+        .await
+        .unwrap();
+    let user_view = files::list_readable_areas(&pool, "user").await.unwrap();
+    assert!(!user_view.iter().any(|a| a.name == "Staff"));
+    assert!(user_view.iter().any(|a| a.name == "Uploads"));
+    let admin_view = files::list_readable_areas(&pool, "admin").await.unwrap();
+    assert!(admin_view.iter().any(|a| a.name == "Staff"));
+
+    // An area with files can't be deleted until it's empty.
+    assert!(files::delete_area(&pool, "Uploads").await.is_err());
+    assert!(files::delete_area(&pool, "Staff").await.unwrap());
+    assert!(!files::delete_area(&pool, "Staff").await.unwrap());
+
+    // Invalid roles are rejected when creating areas.
+    assert!(matches!(
+        files::add_area(&pool, "Bad", "", Some("wizard"), None).await,
+        Err(AppError::BadRole(_))
+    ));
+}
+
+#[tokio::test]
 async fn mail_send_read_and_guardrails() {
     let pool = setup().await;
     let alice = bbs_rs::services::auth::register_user(&pool, "alice", "pw", &Default::default())

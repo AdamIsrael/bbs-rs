@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::{admin, auth, boards, bulletins, keys, oneliners};
+use bbs_rs::services::{admin, auth, boards, bulletins, files, keys, oneliners};
 use bbs_rs::ssh::pubkey;
 use bbs_rs::util::fmt_time;
 
@@ -33,17 +33,22 @@ struct Cli {
 }
 
 impl Cli {
+    /// Load the full settings from the config file (defaults if missing/invalid).
+    /// Used for file-area commands that need `[files]` (storage dir + limits).
+    fn load_settings(&self) -> Settings {
+        std::fs::read_to_string(&self.config)
+            .ok()
+            .and_then(|text| toml::from_str::<Settings>(&text).ok())
+            .unwrap_or_default()
+    }
+
     /// Resolve the database URL: `--database-url` wins, else the config file's
     /// value, else the built-in default.
     fn resolve_database_url(&self) -> String {
         if let Some(url) = &self.database_url {
             return url.clone();
         }
-        std::fs::read_to_string(&self.config)
-            .ok()
-            .and_then(|text| toml::from_str::<Settings>(&text).ok())
-            .map(|s| s.network.database_url)
-            .unwrap_or_else(|| Settings::default().network.database_url)
+        self.load_settings().network.database_url
     }
 }
 
@@ -108,6 +113,34 @@ enum Cmd {
         #[arg(long)]
         unlock: bool,
     },
+    /// List file areas with their ACLs.
+    FileAreas,
+    /// Create a file area.
+    AddArea {
+        name: String,
+        #[arg(long, default_value = "")]
+        desc: String,
+        /// Minimum role to view/download (guest | user | admin).
+        #[arg(long)]
+        read: Option<String>,
+        /// Minimum role to upload (guest | user | admin).
+        #[arg(long)]
+        write: Option<String>,
+    },
+    /// Remove an empty file area by name.
+    RmArea { name: String },
+    /// List files in an area.
+    Files { area: String },
+    /// Add a file to an area from a server path, attributed to a user.
+    AddFile {
+        area: String,
+        user: String,
+        path: PathBuf,
+        #[arg(long, default_value = "")]
+        desc: String,
+    },
+    /// Remove a file by id (deletes the stored blob too).
+    RmFile { id: i64 },
     /// List sysop bulletins.
     Bulletins,
     /// Post a new sysop bulletin (shown to users after login).
@@ -143,6 +176,7 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let settings = cli.load_settings();
     let pool = db::connect(&cli.resolve_database_url()).await?;
 
     // Operational commands need a current schema, so auto-apply migrations for
@@ -301,6 +335,98 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("updated board '{name}'");
         }
+        Cmd::FileAreas => {
+            let areas = files::list_areas(&pool).await?;
+            println!("{:<18} {:<8} {:<8} DESCRIPTION", "NAME", "READ", "WRITE");
+            for a in areas {
+                println!(
+                    "{:<18} {:<8} {:<8} {}",
+                    a.name, a.min_read_role, a.min_write_role, a.description
+                );
+            }
+        }
+        Cmd::AddArea {
+            name,
+            desc,
+            read,
+            write,
+        } => {
+            files::add_area(&pool, &name, &desc, read.as_deref(), write.as_deref()).await?;
+            println!("created file area '{name}'");
+        }
+        Cmd::RmArea { name } => {
+            if files::delete_area(&pool, &name).await? {
+                println!("removed file area '{name}'");
+            } else {
+                println!("no file area '{name}'");
+            }
+        }
+        Cmd::Files { area } => {
+            let a = files::get_area_by_name(&pool, &area).await?;
+            let list = files::list_files(&pool, a.id).await?;
+            println!(
+                "{:<5} {:<26} {:>10} {:<12} {:>5} DESCRIPTION",
+                "ID", "FILENAME", "SIZE", "UPLOADER", "DL"
+            );
+            for file in list {
+                println!(
+                    "{:<5} {:<26} {:>10} {:<12} {:>5} {}",
+                    file.id,
+                    file.filename,
+                    file.size,
+                    file.uploader_name,
+                    file.downloads,
+                    file.description
+                );
+            }
+        }
+        Cmd::AddFile {
+            area,
+            user,
+            path,
+            desc,
+        } => {
+            let a = files::get_area_by_name(&pool, &area).await?;
+            let u = auth::find_user(&pool, &user)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no such user: {user}"))?;
+            let bytes = std::fs::read(&path)?;
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow::anyhow!("bad file path: {}", path.display()))?;
+            // Record metadata (validates extension / size / quota), then write
+            // the blob; roll the row back if the write fails.
+            let entry = files::add_file(
+                &pool,
+                a.id,
+                &u,
+                filename,
+                &desc,
+                bytes.len() as i64,
+                &settings.files,
+            )
+            .await?;
+            let dest = settings.files.storage_dir.join(&entry.storage_path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if let Err(e) = std::fs::write(&dest, &bytes) {
+                let _ = files::delete_file(&pool, entry.id).await;
+                return Err(e.into());
+            }
+            println!(
+                "added '{}' ({} bytes) to '{area}' as #{} for '{user}'",
+                entry.filename, entry.size, entry.id
+            );
+        }
+        Cmd::RmFile { id } => match files::delete_file(&pool, id).await? {
+            Some(storage_path) => {
+                let _ = std::fs::remove_file(settings.files.storage_dir.join(&storage_path));
+                println!("removed file #{id}");
+            }
+            None => println!("no file #{id}"),
+        },
         Cmd::Bulletins => {
             let list = bulletins::list(&pool).await?;
             println!("{:<5} {:<20} TITLE", "ID", "WHEN");

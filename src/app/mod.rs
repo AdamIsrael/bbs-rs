@@ -15,10 +15,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::Settings;
-use crate::db::models::{Board, Bulletin, Login, Mail, Message, Oneliner, User, UserKey};
+use crate::db::models::{
+    Board, Bulletin, FileArea, FileEntry, Login, Mail, Message, Oneliner, User, UserKey,
+};
 use crate::error::AppError;
 use crate::services::presence::{OnlineUser, Presence};
-use crate::services::{admin, auth, boards, bulletins, keys, mail, oneliners};
+use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
 use crate::transport::Event;
 
@@ -70,6 +72,14 @@ pub struct App {
     pub user_keys: Vec<UserKey>,
     pub key_sel: usize,
 
+    // File areas
+    pub file_areas: Vec<FileArea>,
+    pub file_area_sel: usize,
+    pub current_file_area: Option<FileArea>,
+    pub files: Vec<FileEntry>,
+    pub file_sel: usize,
+    pub current_file: Option<FileEntry>,
+
     // Admin
     pub admin_users: Vec<User>,
     pub admin_user_sel: usize,
@@ -99,6 +109,9 @@ impl App {
         }
         if f.who_online {
             menu.push(MenuItem::Who);
+        }
+        if f.file_areas {
+            menu.push(MenuItem::Files);
         }
         // Key management is for real accounts (guests can't own keys).
         if f.pubkey_auth && !user.is_guest() {
@@ -139,6 +152,12 @@ impl App {
             online: Vec::new(),
             user_keys: Vec::new(),
             key_sel: 0,
+            file_areas: Vec::new(),
+            file_area_sel: 0,
+            current_file_area: None,
+            files: Vec::new(),
+            file_sel: 0,
+            current_file: None,
             admin_users: Vec::new(),
             admin_user_sel: 0,
             admin_logins: Vec::new(),
@@ -169,6 +188,9 @@ impl App {
             Screen::ReadMail => self.on_reader(key, Screen::Mailbox),
             Screen::ComposeMail => self.on_compose_mail(key).await,
             Screen::WhoOnline => self.on_who(key).await,
+            Screen::FileAreas => self.on_file_areas(key).await,
+            Screen::FileList => self.on_file_list(key).await,
+            Screen::FileDetail => self.on_reader(key, Screen::FileList),
             Screen::Keys => self.on_keys(key).await,
             Screen::AddKey => self.on_add_key(key).await,
             Screen::Register => self.on_register(key).await,
@@ -206,6 +228,7 @@ impl App {
                 }
             }
             MenuItem::Who => self.open_who().await,
+            MenuItem::Files => self.open_file_areas().await,
             MenuItem::Keys => self.open_keys().await,
             MenuItem::Register => {
                 self.form = Form::new(vec![
@@ -724,6 +747,65 @@ impl App {
         match key.code {
             KeyCode::Char('r') => self.online = self.presence.list().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    // ---- File areas ------------------------------------------------------
+
+    async fn open_file_areas(&mut self) {
+        match files::list_readable_areas(&self.pool, &self.user.role).await {
+            Ok(list) => {
+                self.file_areas = list;
+                self.file_area_sel = 0;
+                self.screen = Screen::FileAreas;
+            }
+            Err(e) => self.status = format!("Error loading file areas: {e}"),
+        }
+    }
+
+    async fn on_file_areas(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.file_area_sel = self.file_area_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.file_area_sel =
+                    (self.file_area_sel + 1).min(self.file_areas.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(area) = self.file_areas.get(self.file_area_sel).cloned() {
+                    self.open_file_area(area).await;
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    async fn open_file_area(&mut self, area: FileArea) {
+        match files::list_files(&self.pool, area.id).await {
+            Ok(list) => {
+                self.files = list;
+                self.file_sel = 0;
+                self.current_file_area = Some(area);
+                self.screen = Screen::FileList;
+            }
+            Err(e) => self.status = format!("Error loading files: {e}"),
+        }
+    }
+
+    async fn on_file_list(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.file_sel = self.file_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.file_sel = (self.file_sel + 1).min(self.files.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(file) = self.files.get(self.file_sel).cloned() {
+                    self.current_file = Some(file);
+                    self.screen = Screen::FileDetail;
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::FileAreas,
             _ => {}
         }
     }
