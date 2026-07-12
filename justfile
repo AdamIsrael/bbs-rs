@@ -41,6 +41,10 @@ lint:
     cargo clippy --all-targets -- -D warnings
     cargo fmt --check
 
+# Apply pending database migrations via the bbsctl binary (append --status to inspect).
+migrate *ARGS:
+    cargo run --bin bbsctl -- migrate {{ARGS}}
+
 # Delete the SQLite database; it is recreated, migrated, and re-seeded on next run.
 reset-db:
     rm -f {{db}} {{db}}-journal {{db}}-wal {{db}}-shm

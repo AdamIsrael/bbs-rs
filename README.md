@@ -111,6 +111,18 @@ an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every
 session lands on the **Bulletins** screen right after login (in addition to the `bbs.welcome` MOTD);
 they're also reachable any time from the main menu.
 
+## Upgrading & migrations
+
+Migrations are compiled into the binary and run automatically when the server starts. To apply them
+explicitly — e.g. from a released binary during a maintenance window, without the source tree — use
+either binary:
+
+```sh
+bbs-rs --migrate         # apply pending migrations, then exit (does NOT start the server)
+bbsctl migrate           # apply pending migrations
+bbsctl migrate --status  # list applied/pending migrations without applying anything
+```
+
 ## Architecture
 
 The TUI is deliberately **transport-agnostic** so a future HTTP(S) frontend can reuse it:

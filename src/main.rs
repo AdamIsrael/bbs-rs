@@ -17,5 +17,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let settings = Settings::load(&cli)?;
-    bbs_rs::serve(settings).await
+    if cli.migrate {
+        bbs_rs::migrate(settings).await
+    } else {
+        bbs_rs::serve(settings).await
+    }
 }

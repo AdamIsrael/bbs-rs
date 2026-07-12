@@ -48,6 +48,12 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Apply pending database migrations (or show status with --status).
+    Migrate {
+        /// Show applied/pending migrations without applying anything.
+        #[arg(long)]
+        status: bool,
+    },
     /// List all registered users.
     Users,
     /// Ban a user by username.
@@ -94,9 +100,35 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let pool = db::connect(&cli.resolve_database_url()).await?;
-    db::run_migrations(&pool).await?;
+
+    // Operational commands need a current schema, so auto-apply migrations for
+    // them. `migrate` controls apply/report itself; `migrate --status` must not
+    // apply, so skip the auto-apply for it entirely.
+    if !matches!(cli.cmd, Cmd::Migrate { .. }) {
+        db::run_migrations(&pool).await?;
+    }
 
     match cli.cmd {
+        Cmd::Migrate { status } => {
+            if status {
+                let rows = db::migration_status(&pool).await?;
+                println!("{:<5} {:<8} DESCRIPTION", "VER", "STATUS");
+                for r in rows {
+                    let st = if r.applied { "applied" } else { "pending" };
+                    println!("{:<5} {:<8} {}", r.version, st, r.description);
+                }
+            } else {
+                let newly = db::run_migrations_reporting(&pool).await?;
+                if newly.is_empty() {
+                    println!("database is up to date");
+                } else {
+                    for v in &newly {
+                        println!("applied migration {v}");
+                    }
+                    println!("applied {} migration(s)", newly.len());
+                }
+            }
+        }
         Cmd::Users => {
             let users = admin::list_users(&pool).await?;
             println!("{:<20} {:<8} {:<8} CREATED", "USERNAME", "ROLE", "STATUS");
