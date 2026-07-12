@@ -77,6 +77,44 @@ pub struct IpBan {
     pub expires_at: Option<i64>,
 }
 
+/// A file area: a named download area with a read/write role ACL.
+#[derive(Debug, Clone, FromRow)]
+pub struct FileArea {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub min_read_role: String,
+    pub min_write_role: String,
+    pub created_at: i64,
+}
+
+impl FileArea {
+    /// Whether a viewer with `role` may list/download from this area.
+    pub fn can_read(&self, role: &str) -> bool {
+        crate::services::role_rank(role) >= crate::services::role_rank(&self.min_read_role)
+    }
+
+    /// Whether a viewer with `role` may upload to this area.
+    pub fn can_write(&self, role: &str) -> bool {
+        crate::services::role_rank(role) >= crate::services::role_rank(&self.min_write_role)
+    }
+}
+
+/// A file in an area, joined with its uploader's name (`uploader_name`).
+#[derive(Debug, Clone, FromRow)]
+pub struct FileEntry {
+    pub id: i64,
+    pub area_id: i64,
+    pub uploader_id: i64,
+    pub uploader_name: String,
+    pub filename: String,
+    pub description: String,
+    pub size: i64,
+    pub storage_path: String,
+    pub downloads: i64,
+    pub created_at: i64,
+}
+
 /// A recorded login attempt (successful or not).
 #[derive(Debug, Clone, FromRow)]
 pub struct Login {

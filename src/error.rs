@@ -40,6 +40,15 @@ pub enum AppError {
     #[error("you don't have permission to post to this board")]
     BoardWriteDenied,
 
+    #[error("file exceeds the maximum size ({0} bytes)")]
+    FileTooLarge(u64),
+
+    #[error("that would exceed your storage quota ({0} bytes)")]
+    QuotaExceeded(u64),
+
+    #[error("files of that type are not allowed")]
+    ExtensionNotAllowed,
+
     #[error("recipient not found")]
     RecipientNotFound,
 
