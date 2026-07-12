@@ -158,9 +158,9 @@ fn basename(filename: &str) -> String {
 }
 
 /// Validate and record a new file for `uploader`, enforcing the extension
-/// allowlist, per-file size cap, and the uploader's storage quota. Returns the
-/// recorded row (including the assigned `storage_path`); the caller then writes
-/// the bytes to `<storage_dir>/<storage_path>`.
+/// allowlist, per-file size cap, and (for non-admins) the uploader's storage
+/// quota. Returns the recorded row (including the assigned `storage_path`); the
+/// caller then writes the bytes to `<storage_dir>/<storage_path>`.
 pub async fn add_file(
     pool: &SqlitePool,
     area_id: i64,
@@ -181,7 +181,9 @@ pub async fn add_file(
     if cfg.max_file_bytes > 0 && size_u > cfg.max_file_bytes {
         return Err(AppError::FileTooLarge(cfg.max_file_bytes));
     }
-    if cfg.user_quota_bytes > 0 {
+    // Admins bypass the storage quota — an operator seeding an area (via
+    // `bbsctl`, attributed to an admin) shouldn't be capped like a normal user.
+    if cfg.user_quota_bytes > 0 && !uploader.is_admin() {
         let used = user_usage(pool, uploader.id).await?.max(0) as u64;
         if used + size_u > cfg.user_quota_bytes {
             return Err(AppError::QuotaExceeded(cfg.user_quota_bytes));

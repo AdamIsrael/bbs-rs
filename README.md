@@ -185,7 +185,8 @@ board. Registered users browse areas and files from the **File Areas** menu and 
 storage**: sysops create areas with `bbsctl add-area` and add files from a server path with
 `bbsctl add-file <area> <user> <path>`, which copies the blob into `[files].storage_dir` and records it.
 Uploads are checked against the **allowed extensions**, the **per-file size cap**, and the uploader's
-**storage quota** (`[files]`). Live user-initiated upload/download over SFTP is the next phase
+**storage quota** (`[files]`); admins are exempt from the quota (an operator seeding an area is
+effectively an admin). Live user-initiated upload/download over SFTP is the next phase
 ([#38](https://github.com/AdamIsrael/bbs-rs/issues/38)).
 
 **Board moderation & ACLs.** Each board has a minimum **read** and **write** role (`guest` < `user` <

@@ -488,6 +488,24 @@ async fn file_areas_upload_accounting_and_acl() {
     ));
     assert_eq!(files::user_usage(&pool, alice.id).await.unwrap(), 100);
 
+    // Admins bypass the quota (operator seeding is effectively an admin).
+    auth::register_user(&pool, "adminuser", "pw", &Default::default())
+        .await
+        .unwrap();
+    bbs_rs::services::admin::set_role(&pool, "adminuser", "admin")
+        .await
+        .unwrap();
+    let admin = auth::find_user(&pool, "adminuser").await.unwrap().unwrap();
+    // Two 100-byte files total 200 bytes, past the 150-byte quota; both still
+    // succeed because the admin is exempt.
+    files::add_file(&pool, uploads.id, &admin, "a.txt", "", 100, &cfg)
+        .await
+        .unwrap();
+    files::add_file(&pool, uploads.id, &admin, "b.txt", "", 100, &cfg)
+        .await
+        .expect("admins are not quota-limited");
+    assert_eq!(files::user_usage(&pool, admin.id).await.unwrap(), 200);
+
     // Deleting a file returns its storage path (for the caller to unlink) and
     // frees quota.
     let path = files::delete_file(&pool, entry.id).await.unwrap();
