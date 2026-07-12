@@ -142,6 +142,7 @@ bbsctl rm-area <name>            # remove an empty file area
 bbsctl files <area>              # list files in an area
 bbsctl add-file <area> <user> <path> [--desc D]   # add a file (copied into storage_dir)
 bbsctl rm-file <id>              # remove a file (and its stored blob)
+bbsctl set-file-desc <id> <text> # set a file's description (SFTP uploads have none)
 ```
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
@@ -202,7 +203,9 @@ sftp> put local.txt            # upload (honors write role + extension/size/quot
 ```
 
 Reads honor each area's `min_read_role`; uploads honor `min_write_role` plus the `[files]` limits and
-count against your quota. SFTP auth is the same as the BBS (password or a registered public key), and
+count against your quota. SFTP `put` can't carry a **description**, so uploads start with none — the
+uploader (or an admin) adds one from the file's detail screen in the BBS (press `e`), or an operator
+runs `bbsctl set-file-desc <id> <text>`. SFTP auth is the same as the BBS (password or a registered public key), and
 the whole feature follows `[features].file_areas`.
 
 **Board moderation & ACLs.** Each board has a minimum **read** and **write** role (`guest` < `user` <

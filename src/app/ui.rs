@@ -38,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FileAreas => render_file_areas(f, body, app),
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
+        Screen::EditFileDesc => render_form(f, body, " Edit Description ", app),
         Screen::Keys => render_keys(f, body, app),
         Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
         Screen::Register => render_form(f, body, " Register ", app),
@@ -69,7 +70,7 @@ fn render_title(f: &mut Frame, area: Rect, app: &App) {
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if app.status.is_empty() {
         (
-            hints(app.screen, app.user.is_admin()),
+            hints(app.screen, app.user.is_admin(), app.can_edit_current_file()),
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -390,7 +391,7 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
         file.uploader_name,
         file.downloads,
         if file.description.is_empty() {
-            "(no description)"
+            "(no description — press 'e' to add one, if it's yours)"
         } else {
             &file.description
         },
@@ -557,6 +558,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::FileAreas => "File Areas",
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
+        Screen::EditFileDesc => "Edit Description",
         Screen::Keys => "SSH Keys",
         Screen::AddKey => "Add SSH Key",
         Screen::Register => "Register",
@@ -566,7 +568,7 @@ fn screen_name(screen: Screen) -> &'static str {
     }
 }
 
-fn hints(screen: Screen, is_admin: bool) -> String {
+fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
     let base = match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
@@ -596,7 +598,14 @@ fn hints(screen: Screen, is_admin: bool) -> String {
         Screen::WhoOnline => " r refresh · Esc back ",
         Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
-        Screen::FileDetail => " Esc back ",
+        Screen::FileDetail => {
+            if can_edit_file {
+                " e edit description · Esc back "
+            } else {
+                " Esc back "
+            }
+        }
+        Screen::EditFileDesc => " type · Enter save · Esc cancel ",
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
