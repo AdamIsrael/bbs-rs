@@ -374,9 +374,15 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
     let Some(file) = &app.current_file else {
         return placeholder(f, area, " File ", "Nothing to show.");
     };
+    let area_name = app
+        .current_file_area
+        .as_ref()
+        .map(|a| a.name.as_str())
+        .unwrap_or("");
+    let net = &app.config.network;
     let body = format!(
         "Name:      {}\nSize:      {} ({} bytes)\nUploaded:  {} by {}\nDownloads: {}\n\n{}\n\n\
-         (Download with: sftp -P <port> <you>@<host>, then `get {0}` from this area.)",
+         Download over SFTP:\n  sftp -P {} {}@{}\n  sftp> get {}/{}",
         file.filename,
         human_size(file.size),
         file.size,
@@ -388,6 +394,11 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
         } else {
             &file.description
         },
+        net.port,
+        app.user.username,
+        net.connect_host(),
+        area_name,
+        file.filename,
     );
     let p = Paragraph::new(body)
         .block(Block::bordered().title(format!(" {} ", truncate(&file.filename, 50))))

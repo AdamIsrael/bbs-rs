@@ -62,6 +62,7 @@ sysop = ""                       # shown in help footer (blank hides)
 welcome = "Welcome to the board."   # MOTD on the main menu (blank hides)
 
 [network]    # host, port, database_url, host_key, plus:
+hostname = ""                    # public hostname for connect hints (blank → host/localhost)
 inactivity_timeout_secs = 3600
 auth_rejection_time_secs = 2
 ban_sweep_interval_secs = 10
