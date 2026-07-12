@@ -16,6 +16,12 @@ pub enum AppError {
     #[error("username already taken")]
     UsernameTaken,
 
+    #[error("that SSH key is already registered")]
+    KeyExists,
+
+    #[error("invalid SSH public key: {0}")]
+    InvalidKey(String),
+
     #[error("that username is reserved")]
     UsernameReserved,
 

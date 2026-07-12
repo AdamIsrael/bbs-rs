@@ -35,6 +35,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ReadMail => render_read_mail(f, body, app),
         Screen::ComposeMail => render_form(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
+        Screen::Keys => render_keys(f, body, app),
+        Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
         Screen::Register => render_form(f, body, " Register ", app),
         Screen::Help => render_help(f, body, app),
         Screen::AdminUsers => render_admin_users(f, body, app),
@@ -318,6 +320,31 @@ fn render_who(f: &mut Frame, area: Rect, app: &App) {
     render_selectable(f, area, " Who's Online ", lines, usize::MAX);
 }
 
+fn render_keys(f: &mut Frame, area: Rect, app: &App) {
+    if app.user_keys.is_empty() {
+        return placeholder(
+            f,
+            area,
+            " SSH Keys ",
+            "No keys registered. Press 'n' to add one (paste your .pub line).",
+        );
+    }
+    let lines: Vec<Line> = app
+        .user_keys
+        .iter()
+        .map(|k| {
+            let label = if k.label.is_empty() { "-" } else { &k.label };
+            Line::from(format!(
+                "{:<12} {:<20} {}",
+                truncate(&k.algorithm, 12),
+                truncate(label, 20),
+                truncate(&k.fingerprint, 50)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " SSH Keys ", lines, app.key_sel);
+}
+
 fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
     let lines: Vec<Line> = app
         .form
@@ -399,6 +426,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
+  • SSH Keys       : register public keys to log in without a password
   • Register       : create an account, then reconnect over SSH with it
 
 Navigation
@@ -439,6 +467,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadMail => "Reading Mail",
         Screen::ComposeMail => "Compose Mail",
         Screen::WhoOnline => "Who's Online",
+        Screen::Keys => "SSH Keys",
+        Screen::AddKey => "Add SSH Key",
         Screen::Register => "Register",
         Screen::Help => "Help",
         Screen::AdminUsers => "Admin · Users",
@@ -474,6 +504,8 @@ fn hints(screen: Screen, is_admin: bool) -> String {
         }
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · Esc back ",
         Screen::WhoOnline => " r refresh · Esc back ",
+        Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
+        Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
         Screen::AdminLogins => " Esc back ",
     };

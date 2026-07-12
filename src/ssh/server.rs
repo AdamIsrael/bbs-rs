@@ -20,7 +20,8 @@ use crate::config::Settings;
 use crate::db::models::User;
 use crate::input;
 use crate::services::presence::Presence;
-use crate::services::{admin, auth};
+use crate::services::{admin, auth, keys};
+use crate::ssh::pubkey;
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
 use crate::transport::Event;
 
@@ -102,9 +103,44 @@ impl Handler for SessionHandler {
         }
     }
 
-    // Public-key auth is not offered yet; password only for now.
-    async fn auth_publickey(&mut self, _user: &str, _key: &PublicKey) -> Result<Auth, Self::Error> {
-        Ok(Auth::reject())
+    /// Pre-signature probe: accept only keys already registered to `user`, so a
+    /// client isn't prompted to sign with keys we'd reject anyway. Ownership is
+    /// still proven later in [`Self::auth_publickey`].
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if !self.config.features.pubkey_auth {
+            return Ok(Auth::reject());
+        }
+        let fpr = pubkey::fingerprint(key);
+        match keys::is_authorized(&self.pool, user, &fpr).await {
+            Ok(true) => Ok(Auth::Accept),
+            _ => Ok(Auth::reject()),
+        }
+    }
+
+    /// Called after russh has verified the client owns `key` (signature check).
+    /// Authenticate iff the key is registered to `user` and the account/IP is
+    /// not banned.
+    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+        if !self.config.features.pubkey_auth {
+            return Ok(Auth::reject());
+        }
+        let ip = self.ip();
+        let fpr = pubkey::fingerprint(key);
+        match auth::attempt_pubkey_login(&self.pool, user, &fpr, ip.as_deref()).await {
+            Ok(Some(u)) => {
+                self.user = Some(u);
+                Ok(Auth::Accept)
+            }
+            Ok(None) => Ok(Auth::reject()),
+            Err(e) => {
+                tracing::warn!("pubkey auth failed for {user:?}: {e}");
+                Ok(Auth::reject())
+            }
+        }
     }
 
     async fn channel_open_session(

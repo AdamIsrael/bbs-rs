@@ -11,6 +11,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Connect over SSH** — the TUI is rendered straight into the SSH channel; any `ssh` client works.
 - **Accounts** — a shared limited `guest/guest` account plus in-TUI registration of real users
   (passwords hashed with argon2, stored in SQLite).
+- **Public-key auth** — registered users can attach SSH keys and log in without a password.
 - **Message boards** — browse boards, read messages, and (registered users) post.
 - **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
   of individual posts by admins.
@@ -71,6 +72,7 @@ guest = true           # allow the shared guest account to log in
 private_mail = true
 who_online = true
 oneliners = true       # the graffiti wall
+pubkey_auth = true     # allow SSH public-key login (users register keys in the BBS)
 
 [abuse]      # auto-ban IPs with repeated failed logins
 max_failures = 10      # failures within the window to trigger a ban (0 disables)
@@ -113,6 +115,9 @@ bbsctl unban <user>
 bbsctl ban-ip <ip> [--reason R]  # ban / unban an IP
 bbsctl unban-ip <ip>
 bbsctl ip-bans                   # list IP bans
+bbsctl keys <user>               # list a user's SSH public keys
+bbsctl add-key <user> "<ssh-… key line>" [--label L]   # register a key (or --file <path>)
+bbsctl rm-key <id>               # remove a registered key
 bbsctl logins [--user U] [--failures] [--limit N]   # login audit trail
 bbsctl bulletins                 # list sysop bulletins
 bbsctl post-bulletin <title> --body <text>          # post a bulletin
@@ -131,6 +136,13 @@ A ban rejects future logins *and* drops any live session for that user/IP (immed
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
 an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every login attempt
 (success or failure) is recorded with username, IP, and timestamp.
+
+**Public-key auth.** Registered users can log in with an SSH key instead of a password. Register a key
+from the in-BBS **SSH Keys** menu (press `n`, then paste your `~/.ssh/id_ed25519.pub` line), or an
+operator can add one with `bbsctl add-key <user> "<key line>"`. Thereafter `ssh <user>@host -p 2222`
+authenticates with that key — russh verifies the signature, and the BBS accepts it iff the key's SHA256
+fingerprint is registered to that account (and the account/IP isn't banned). Guests can't own keys, and
+the whole mechanism can be turned off with `[features].pubkey_auth = false`.
 
 **Rate limiting.** Regular users are throttled per `[limits]`: at most `max_posts` board posts,
 `max_mail` mails, and `max_oneliners` oneliners within a rolling `window_secs` (counted from their own

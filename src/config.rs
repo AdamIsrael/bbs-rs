@@ -94,6 +94,7 @@ pub struct Features {
     pub private_mail: bool,
     pub who_online: bool,
     pub oneliners: bool,
+    pub pubkey_auth: bool,
 }
 
 /// Abuse protection: auto-ban IPs with repeated failed logins.
@@ -219,6 +220,7 @@ impl Default for Features {
             private_mail: true,
             who_online: true,
             oneliners: true,
+            pubkey_auth: true,
         }
     }
 }
@@ -322,6 +324,8 @@ private_mail = true
 who_online = true
 # Enable the oneliners / graffiti wall.
 oneliners = true
+# Allow SSH public-key authentication (users register keys in the BBS).
+pubkey_auth = true
 
 [abuse]
 # Auto-ban an IP after this many failed logins within the window. 0 disables.
@@ -364,6 +368,7 @@ mod tests {
         );
         assert_eq!(parsed.features.registration, def.features.registration);
         assert_eq!(parsed.features.oneliners, def.features.oneliners);
+        assert_eq!(parsed.features.pubkey_auth, def.features.pubkey_auth);
         assert_eq!(parsed.limits.max_posts, def.limits.max_posts);
         assert_eq!(parsed.limits.window_secs, def.limits.window_secs);
         assert_eq!(

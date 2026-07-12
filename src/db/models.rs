@@ -53,6 +53,21 @@ pub struct Oneliner {
     pub created_at: i64,
 }
 
+/// An SSH public key registered to a user for public-key authentication.
+#[derive(Debug, Clone, FromRow)]
+pub struct UserKey {
+    pub id: i64,
+    pub user_id: i64,
+    pub algorithm: String,
+    /// SHA256 fingerprint (`SHA256:…`), used for auth matching and display.
+    pub fingerprint: String,
+    /// Canonical OpenSSH encoding (algorithm + base64, no comment).
+    pub public_key: String,
+    /// Free-text label (defaults to the key's comment).
+    pub label: String,
+    pub created_at: i64,
+}
+
 /// A banned IP address. `expires_at` is `None` for a permanent ban.
 #[derive(Debug, Clone, FromRow)]
 pub struct IpBan {

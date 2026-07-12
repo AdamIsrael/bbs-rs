@@ -15,10 +15,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::Settings;
-use crate::db::models::{Board, Bulletin, Login, Mail, Message, Oneliner, User};
+use crate::db::models::{Board, Bulletin, Login, Mail, Message, Oneliner, User, UserKey};
 use crate::error::AppError;
 use crate::services::presence::{OnlineUser, Presence};
-use crate::services::{admin, auth, boards, bulletins, mail, oneliners};
+use crate::services::{admin, auth, boards, bulletins, keys, mail, oneliners};
+use crate::ssh::pubkey;
 use crate::transport::Event;
 
 use state::{Field, Form, MenuItem, Screen};
@@ -65,6 +66,10 @@ pub struct App {
     // Who's online
     pub online: Vec<OnlineUser>,
 
+    // SSH keys (the current user's own)
+    pub user_keys: Vec<UserKey>,
+    pub key_sel: usize,
+
     // Admin
     pub admin_users: Vec<User>,
     pub admin_user_sel: usize,
@@ -94,6 +99,10 @@ impl App {
         }
         if f.who_online {
             menu.push(MenuItem::Who);
+        }
+        // Key management is for real accounts (guests can't own keys).
+        if f.pubkey_auth && !user.is_guest() {
+            menu.push(MenuItem::Keys);
         }
         if user.is_guest() && f.registration {
             menu.push(MenuItem::Register);
@@ -128,6 +137,8 @@ impl App {
             mail_sel: 0,
             current_mail: None,
             online: Vec::new(),
+            user_keys: Vec::new(),
+            key_sel: 0,
             admin_users: Vec::new(),
             admin_user_sel: 0,
             admin_logins: Vec::new(),
@@ -158,6 +169,8 @@ impl App {
             Screen::ReadMail => self.on_reader(key, Screen::Mailbox),
             Screen::ComposeMail => self.on_compose_mail(key).await,
             Screen::WhoOnline => self.on_who(key).await,
+            Screen::Keys => self.on_keys(key).await,
+            Screen::AddKey => self.on_add_key(key).await,
             Screen::Register => self.on_register(key).await,
             Screen::Help => self.on_reader(key, Screen::MainMenu),
             Screen::AdminUsers => self.on_admin_users(key).await,
@@ -193,6 +206,7 @@ impl App {
                 }
             }
             MenuItem::Who => self.open_who().await,
+            MenuItem::Keys => self.open_keys().await,
             MenuItem::Register => {
                 self.form = Form::new(vec![
                     Field::new("Username", false),
@@ -711,6 +725,83 @@ impl App {
             KeyCode::Char('r') => self.online = self.presence.list().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
+        }
+    }
+
+    // ---- SSH keys --------------------------------------------------------
+
+    async fn open_keys(&mut self) {
+        match keys::list_keys(&self.pool, self.user.id).await {
+            Ok(list) => {
+                self.user_keys = list;
+                self.key_sel = 0;
+                self.screen = Screen::Keys;
+            }
+            Err(e) => self.status = format!("Error loading keys: {e}"),
+        }
+    }
+
+    async fn reload_keys(&mut self) {
+        if let Ok(list) = keys::list_keys(&self.pool, self.user.id).await {
+            self.key_sel = self.key_sel.min(list.len().saturating_sub(1));
+            self.user_keys = list;
+        }
+    }
+
+    async fn on_keys(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.key_sel = self.key_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.key_sel = (self.key_sel + 1).min(self.user_keys.len().saturating_sub(1))
+            }
+            KeyCode::Char('n') => {
+                self.form = Form::new(vec![Field::new("Public key (ssh-… AAAA… comment)", false)]);
+                self.screen = Screen::AddKey;
+            }
+            KeyCode::Char('d') => self.delete_selected_key().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    async fn delete_selected_key(&mut self) {
+        let Some(k) = self.user_keys.get(self.key_sel).cloned() else {
+            return;
+        };
+        match keys::delete_key(&self.pool, self.user.id, k.id).await {
+            Ok(true) => {
+                self.reload_keys().await;
+                self.status = "Key removed.".into();
+            }
+            Ok(false) => self.status = "Key already gone.".into(),
+            Err(e) => self.status = format!("Could not remove key: {e}"),
+        }
+    }
+
+    async fn on_add_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Keys,
+            KeyCode::Enter => self.submit_key().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_key(&mut self) {
+        let line = self.form.value(0).to_string();
+        if line.is_empty() {
+            self.status = "Paste a public key first.".into();
+            return;
+        }
+        match pubkey::register(&self.pool, self.user.id, &line, "").await {
+            Ok(parsed) => {
+                self.open_keys().await;
+                self.status = format!("Added {} key {}.", parsed.algorithm, parsed.fingerprint);
+            }
+            Err(AppError::KeyExists) => self.status = "You've already registered that key.".into(),
+            Err(AppError::InvalidKey(e)) => self.status = format!("Not a valid public key: {e}"),
+            Err(e) => self.status = format!("Could not add key: {e}"),
         }
     }
 
