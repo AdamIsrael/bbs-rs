@@ -7,8 +7,10 @@
 
 use sqlx::sqlite::SqlitePool;
 
+use crate::config::Limits;
 use crate::db::models::{Board, Message, User};
 use crate::error::{AppError, Result};
+use crate::services::enforce_rate;
 use crate::util::now_unix;
 
 /// All boards, in id order.
@@ -67,16 +69,29 @@ pub async fn get_message(pool: &SqlitePool, id: i64) -> Result<Message> {
     .ok_or(AppError::NotFound)
 }
 
-/// Post a new message, enforcing the board's write ACL and lock. Guests are
-/// always read-only; a locked board rejects non-admins (admins can still post,
-/// e.g. to add a closing note); otherwise the author's role must meet the
-/// board's `min_write_role`.
+/// Count a user's board posts created since `since` (Unix seconds).
+async fn recent_post_count(pool: &SqlitePool, author_id: i64, since: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE author_id = ? AND created_at >= ?")
+            .bind(author_id)
+            .bind(since)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// Post a new message, enforcing the board's write ACL and lock, then the
+/// per-user post rate limit. Guests are always read-only; a locked board
+/// rejects non-admins (admins can still post, e.g. to add a closing note);
+/// otherwise the author's role must meet the board's `min_write_role`. Admins
+/// are never rate-limited.
 pub async fn post_message(
     pool: &SqlitePool,
     board_id: i64,
     author: &User,
     subject: &str,
     body: &str,
+    limits: &Limits,
 ) -> Result<()> {
     if author.is_guest() {
         return Err(AppError::GuestNotAllowed);
@@ -87,6 +102,12 @@ pub async fn post_message(
     }
     if !board.can_write(&author.role) {
         return Err(AppError::BoardWriteDenied);
+    }
+    if !author.is_admin()
+        && let Some(since) = limits.window_start(now_unix())
+    {
+        let count = recent_post_count(pool, author.id, since).await?;
+        enforce_rate(count, limits.max_posts)?;
     }
     sqlx::query(
         "INSERT INTO messages (board_id, author_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",

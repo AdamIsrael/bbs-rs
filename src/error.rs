@@ -25,6 +25,9 @@ pub enum AppError {
     #[error("oneliner must be 1–{0} characters")]
     OnelinerLength(usize),
 
+    #[error("you're doing that too quickly — please slow down")]
+    RateLimited,
+
     #[error("this board is locked")]
     BoardLocked,
 

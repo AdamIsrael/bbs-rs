@@ -3,8 +3,10 @@
 
 use sqlx::sqlite::SqlitePool;
 
+use crate::config::Limits;
 use crate::db::models::{Oneliner, User};
 use crate::error::{AppError, Result};
+use crate::services::enforce_rate;
 use crate::util::now_unix;
 
 /// Maximum length of a oneliner body, in characters. Longer (or empty) input
@@ -32,15 +34,35 @@ pub async fn count(pool: &SqlitePool) -> Result<i64> {
     Ok(n)
 }
 
+/// Count a user's oneliners created since `since` (Unix seconds).
+async fn recent_count(pool: &SqlitePool, author_id: i64, since: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM oneliners WHERE author_id = ? AND created_at >= ?",
+        )
+        .bind(author_id)
+        .bind(since)
+        .fetch_one(pool)
+        .await?,
+    )
+}
+
 /// Append a oneliner to the wall. Guests are rejected; the (trimmed) body must
-/// be 1..=[`MAX_LEN`] characters.
-pub async fn add(pool: &SqlitePool, author: &User, body: &str) -> Result<()> {
+/// be 1..=[`MAX_LEN`] characters; non-admins are subject to the per-user
+/// oneliner rate limit.
+pub async fn add(pool: &SqlitePool, author: &User, body: &str, limits: &Limits) -> Result<()> {
     if author.is_guest() {
         return Err(AppError::GuestNotAllowed);
     }
     let body = body.trim();
     if body.is_empty() || body.chars().count() > MAX_LEN {
         return Err(AppError::OnelinerLength(MAX_LEN));
+    }
+    if !author.is_admin()
+        && let Some(since) = limits.window_start(now_unix())
+    {
+        let count = recent_count(pool, author.id, since).await?;
+        enforce_rate(count, limits.max_oneliners)?;
     }
     sqlx::query("INSERT INTO oneliners (author_id, body, created_at) VALUES (?, ?, ?)")
         .bind(author.id)
