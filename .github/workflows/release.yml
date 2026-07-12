@@ -20,10 +20,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          # Apple Silicon only. GitHub is retiring Intel (macos-13) runners, and
+          # they queue slowly; x86_64-apple-darwin is dropped as a build target.
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
 
