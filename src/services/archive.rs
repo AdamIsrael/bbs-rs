@@ -3,6 +3,7 @@
 //! `.gz` archives. Everything is streamed from the blob and capped by the
 //! `[files]` preview limits — nothing is extracted to disk.
 
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -98,10 +99,68 @@ fn classify(mut bytes: Vec<u8>, truncated: bool) -> Preview {
     }
 }
 
-/// Order entries with directories first, then case-insensitively by name so
-/// listings read alphanumerically within each group.
+/// Order entries with directories first, then by natural name order within each
+/// group (see [`natural_cmp`]).
 fn sort_entries(entries: &mut [ArchiveEntry]) {
-    entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| natural_cmp(&a.name, &b.name))
+    });
+}
+
+/// Consume a run of ASCII digits from the front of `it`.
+fn take_digits(it: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    let mut s = String::new();
+    while let Some(&c) = it.peek() {
+        if c.is_ascii_digit() {
+            s.push(c);
+            it.next();
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Compare two runs of digits by numeric value (ignoring leading zeros), so
+/// `2` precedes `10`. Ties break toward fewer leading zeros for determinism.
+fn cmp_numeric(a: &str, b: &str) -> Ordering {
+    let ta = a.trim_start_matches('0');
+    let tb = b.trim_start_matches('0');
+    ta.len()
+        .cmp(&tb.len())
+        .then_with(|| ta.cmp(tb))
+        .then_with(|| a.len().cmp(&b.len()))
+}
+
+/// Natural ("human") comparison: digit runs compare numerically so `2.txt`
+/// sorts before `10.txt`; other characters compare case-insensitively.
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ca), Some(cb)) if ca.is_ascii_digit() && cb.is_ascii_digit() => {
+                let da = take_digits(&mut ai);
+                let db = take_digits(&mut bi);
+                match cmp_numeric(&da, &db) {
+                    Ordering::Equal => {}
+                    ord => return ord,
+                }
+            }
+            (Some(ca), Some(cb)) => match ca.to_ascii_lowercase().cmp(&cb.to_ascii_lowercase()) {
+                Ordering::Equal => {
+                    ai.next();
+                    bi.next();
+                }
+                ord => return ord,
+            },
+        }
+    }
 }
 
 fn list_zip(path: &Path, cfg: &Files) -> Result<Preview> {
@@ -190,5 +249,43 @@ pub fn read_entry(path: &Path, filename: &str, entry: &str, cfg: &Files) -> Resu
             Err(AppError::NotFound)
         }
         Kind::Gz | Kind::Plain => Err(AppError::NotFound),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sorted(names: &[&str]) -> Vec<String> {
+        let mut v: Vec<ArchiveEntry> = names
+            .iter()
+            .map(|n| ArchiveEntry {
+                name: n.to_string(),
+                size: 0,
+                is_dir: n.ends_with('/'),
+            })
+            .collect();
+        sort_entries(&mut v);
+        v.into_iter().map(|e| e.name).collect()
+    }
+
+    #[test]
+    fn natural_order_puts_10_after_9() {
+        let out = sorted(&["10.txt", "1.txt", "2.txt", "9.txt"]);
+        assert_eq!(out, ["1.txt", "2.txt", "9.txt", "10.txt"]);
+    }
+
+    #[test]
+    fn dirs_group_first_then_natural() {
+        // "img10/" is a dir (sorts among dirs); files follow, numerically.
+        let out = sorted(&["img2/", "file10.log", "file2.log", "img10/", "a.txt"]);
+        assert_eq!(out, ["img2/", "img10/", "a.txt", "file2.log", "file10.log"]);
+    }
+
+    #[test]
+    fn case_insensitive_and_leading_zeros() {
+        assert_eq!(natural_cmp("Apple", "apple"), Ordering::Equal);
+        assert_eq!(natural_cmp("v1", "v01"), Ordering::Less); // fewer zeros first on tie
+        assert_eq!(natural_cmp("x2", "x10"), Ordering::Less);
     }
 }
