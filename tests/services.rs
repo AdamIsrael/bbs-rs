@@ -459,6 +459,7 @@ async fn file_areas_upload_accounting_and_acl() {
         max_file_bytes: 100,
         user_quota_bytes: 150,
         allowed_extensions: vec!["txt".into()],
+        ..Files::default()
     };
 
     // A permitted upload records metadata and assigns a storage path.
