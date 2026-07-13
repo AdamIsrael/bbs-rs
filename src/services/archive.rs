@@ -98,6 +98,11 @@ fn classify(mut bytes: Vec<u8>, truncated: bool) -> Preview {
     }
 }
 
+/// Order entries case-insensitively by name so listings read alphanumerically.
+fn sort_entries(entries: &mut [ArchiveEntry]) {
+    entries.sort_by_cached_key(|e| e.name.to_lowercase());
+}
+
 fn list_zip(path: &Path, cfg: &Files) -> Result<Preview> {
     let file = File::open(path).map_err(io_err)?;
     let mut zip = zip::ZipArchive::new(file).map_err(io_err)?;
@@ -115,6 +120,7 @@ fn list_zip(path: &Path, cfg: &Files) -> Result<Preview> {
             is_dir: f.is_dir(),
         });
     }
+    sort_entries(&mut entries);
     Ok(Preview::Archive { entries, truncated })
 }
 
@@ -134,6 +140,7 @@ fn list_tar_gz(path: &Path, cfg: &Files) -> Result<Preview> {
         let size = e.header().size().unwrap_or(0);
         entries.push(ArchiveEntry { name, size, is_dir });
     }
+    sort_entries(&mut entries);
     Ok(Preview::Archive { entries, truncated })
 }
 

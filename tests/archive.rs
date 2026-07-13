@@ -95,9 +95,9 @@ fn zip_lists_and_reads_entries() {
         }
         _ => panic!("expected archive listing"),
     };
+    // Entries are listed alphanumerically (added readme.txt then data.bin).
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    assert!(names.contains(&"readme.txt"));
-    assert!(names.contains(&"data.bin"));
+    assert_eq!(names, vec!["data.bin", "readme.txt"]);
 
     // A text entry decodes; a binary entry is flagged.
     match archive::read_entry(&path, "bundle.zip", "readme.txt", &cfg(1024)).unwrap() {
