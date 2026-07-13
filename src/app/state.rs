@@ -21,6 +21,8 @@ pub enum Screen {
     FileList,
     FileDetail,
     EditFileDesc,
+    ArchiveList,
+    FileView,
     Keys,
     AddKey,
     Register,

@@ -19,6 +19,7 @@ use crate::db::models::{
     Board, Bulletin, FileArea, FileEntry, Login, Mail, Message, Oneliner, User, UserKey,
 };
 use crate::error::AppError;
+use crate::services::archive::{self, ArchiveEntry, Preview};
 use crate::services::presence::{OnlineUser, Presence};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
@@ -79,6 +80,16 @@ pub struct App {
     pub files: Vec<FileEntry>,
     pub file_sel: usize,
     pub current_file: Option<FileEntry>,
+
+    // Archive entry listing + inline text viewer
+    pub archive_entries: Vec<ArchiveEntry>,
+    pub archive_sel: usize,
+    pub archive_truncated: bool,
+    pub file_view_title: String,
+    pub file_view_body: String,
+    pub file_view_scroll: u16,
+    pub file_view_truncated: bool,
+    file_view_back: Screen,
 
     // Admin
     pub admin_users: Vec<User>,
@@ -158,6 +169,14 @@ impl App {
             files: Vec::new(),
             file_sel: 0,
             current_file: None,
+            archive_entries: Vec::new(),
+            archive_sel: 0,
+            archive_truncated: false,
+            file_view_title: String::new(),
+            file_view_body: String::new(),
+            file_view_scroll: 0,
+            file_view_truncated: false,
+            file_view_back: Screen::FileDetail,
             admin_users: Vec::new(),
             admin_user_sel: 0,
             admin_logins: Vec::new(),
@@ -192,6 +211,8 @@ impl App {
             Screen::FileList => self.on_file_list(key).await,
             Screen::FileDetail => self.on_file_detail(key).await,
             Screen::EditFileDesc => self.on_edit_file_desc(key).await,
+            Screen::ArchiveList => self.on_archive_list(key).await,
+            Screen::FileView => self.on_file_view(key),
             Screen::Keys => self.on_keys(key).await,
             Screen::AddKey => self.on_add_key(key).await,
             Screen::Register => self.on_register(key).await,
@@ -832,9 +853,114 @@ impl App {
                 self.form = Form::new(vec![field]);
                 self.screen = Screen::EditFileDesc;
             }
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter => {
-                self.screen = Screen::FileList
+            KeyCode::Enter | KeyCode::Char('v') => self.open_current_file().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::FileList,
+            _ => {}
+        }
+    }
+
+    /// Open the current file for in-BBS viewing: archives (zip/tar.gz) show an
+    /// entry list, `.gz`/plain files preview as text, and binaries are refused.
+    /// The (bounded) decode runs on a blocking thread.
+    async fn open_current_file(&mut self) {
+        let Some(file) = self.current_file.clone() else {
+            return;
+        };
+        let path = self.config.files.storage_dir.join(&file.storage_path);
+        let filename = file.filename.clone();
+        let cfg = self.config.files.clone();
+        let result =
+            tokio::task::spawn_blocking(move || archive::inspect(&path, &filename, &cfg)).await;
+        match result {
+            Ok(Ok(Preview::Archive { entries, truncated })) => {
+                self.archive_entries = entries;
+                self.archive_sel = 0;
+                self.archive_truncated = truncated;
+                self.screen = Screen::ArchiveList;
             }
+            Ok(Ok(Preview::Text { content, truncated })) => {
+                self.show_text(
+                    file.filename.clone(),
+                    content,
+                    truncated,
+                    Screen::FileDetail,
+                );
+            }
+            Ok(Ok(Preview::Binary)) => {
+                self.status = "Binary file — download it over SFTP to open.".into();
+            }
+            Ok(Err(e)) => self.status = format!("Cannot open file: {e}"),
+            Err(_) => self.status = "Cannot open file.".into(),
+        }
+    }
+
+    fn show_text(&mut self, title: String, content: String, truncated: bool, back: Screen) {
+        self.file_view_title = title;
+        self.file_view_body = content;
+        self.file_view_truncated = truncated;
+        self.file_view_scroll = 0;
+        self.file_view_back = back;
+        self.screen = Screen::FileView;
+    }
+
+    async fn on_archive_list(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.archive_sel = self.archive_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.archive_sel =
+                    (self.archive_sel + 1).min(self.archive_entries.len().saturating_sub(1))
+            }
+            KeyCode::Enter => self.open_archive_entry().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::FileDetail,
+            _ => {}
+        }
+    }
+
+    async fn open_archive_entry(&mut self) {
+        let Some(entry) = self.archive_entries.get(self.archive_sel) else {
+            return;
+        };
+        if entry.is_dir {
+            self.status = "That's a directory.".into();
+            return;
+        }
+        let entry_name = entry.name.clone();
+        let Some(file) = self.current_file.clone() else {
+            return;
+        };
+        let path = self.config.files.storage_dir.join(&file.storage_path);
+        let filename = file.filename.clone();
+        let cfg = self.config.files.clone();
+        let lookup = entry_name.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            archive::read_entry(&path, &filename, &lookup, &cfg)
+        })
+        .await;
+        match result {
+            Ok(Ok(Preview::Text { content, truncated })) => {
+                self.show_text(entry_name, content, truncated, Screen::ArchiveList);
+            }
+            Ok(Ok(Preview::Binary)) => {
+                self.status = "Binary entry — download the archive over SFTP.".into();
+            }
+            Ok(Ok(Preview::Archive { .. })) => {
+                self.status = "Nested archives aren't supported.".into();
+            }
+            Ok(Err(_)) => self.status = "Could not read that entry.".into(),
+            Err(_) => self.status = "Could not read that entry.".into(),
+        }
+    }
+
+    fn on_file_view(&mut self, key: KeyEvent) {
+        // Cap scrolling near the end (line count is a lower bound with wrapping).
+        let max = self.file_view_body.lines().count().saturating_sub(1) as u16;
+        match key.code {
+            KeyCode::Up => self.file_view_scroll = self.file_view_scroll.saturating_sub(1),
+            KeyCode::Down => self.file_view_scroll = (self.file_view_scroll + 1).min(max),
+            KeyCode::PageUp => self.file_view_scroll = self.file_view_scroll.saturating_sub(20),
+            KeyCode::PageDown => self.file_view_scroll = (self.file_view_scroll + 20).min(max),
+            KeyCode::Home => self.file_view_scroll = 0,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.file_view_back,
             _ => {}
         }
     }

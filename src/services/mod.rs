@@ -2,6 +2,7 @@
 //! how the user connected (SSH today, WebSocket in the future).
 
 pub mod admin;
+pub mod archive;
 pub mod auth;
 pub mod boards;
 pub mod bulletins;

@@ -17,7 +17,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
 - **File areas** — browsable download areas with role ACLs, per-user storage quotas, and file-type
-  limits; browse in the TUI and **transfer over SFTP** (`sftp user@host`).
+  limits; **read text files and peek inside archives** (zip / tar.gz / gz) in the TUI, and
+  **transfer over SFTP** (`sftp user@host`).
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
@@ -99,6 +100,8 @@ storage_dir = "files"          # where uploaded file blobs live
 max_file_bytes = 10485760      # per-file cap (0 = unlimited), default 10 MiB
 user_quota_bytes = 104857600   # per-user total (0 = unlimited), default 100 MiB
 allowed_extensions = []        # lowercase, no dot; empty allows any, e.g. ["txt","zip"]
+max_preview_bytes = 262144     # cap when reading/decompressing a file preview in the BBS
+max_archive_entries = 1000     # cap when listing an archive's entries
 ```
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
@@ -189,6 +192,12 @@ storage**: sysops create areas with `bbsctl add-area` and add files from a serve
 Uploads are checked against the **allowed extensions**, the **per-file size cap**, and the uploader's
 **storage quota** (`[files]`); admins are exempt from the quota (an operator seeding an area is
 effectively an admin).
+
+From a file's detail screen, press `Enter` to **view it in the BBS**: text files open in a scrollable
+pager, and archives (`.zip`, `.tar.gz`/`.tgz`, `.gz`) show their entries — pick a text entry to read it
+inline. Binary files (and binary entries) say so rather than dumping garbage. Previews are bounded by
+`[files].max_preview_bytes` / `max_archive_entries` and stream from the stored blob (nothing is
+extracted to disk).
 
 Users **transfer files over SFTP** — the server answers the `sftp` subsystem with a small virtual
 filesystem: `/` lists the areas you can read as directories, `/<area>/` lists its files, and

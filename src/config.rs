@@ -205,6 +205,11 @@ pub struct Files {
     /// Allowed file extensions (lowercase, no dot), e.g. ["txt", "zip"]. An
     /// empty list allows any extension.
     pub allowed_extensions: Vec<String>,
+    /// Maximum bytes to read/decompress when previewing a file or archive entry
+    /// in the BBS (guards against huge files / zip bombs).
+    pub max_preview_bytes: u64,
+    /// Maximum number of entries to list from an archive.
+    pub max_archive_entries: usize,
 }
 
 impl Default for Files {
@@ -214,6 +219,8 @@ impl Default for Files {
             max_file_bytes: 10 * 1024 * 1024,    // 10 MiB
             user_quota_bytes: 100 * 1024 * 1024, // 100 MiB
             allowed_extensions: Vec::new(),
+            max_preview_bytes: 256 * 1024, // 256 KiB
+            max_archive_entries: 1000,
         }
     }
 }
@@ -435,6 +442,10 @@ user_quota_bytes = 104857600
 # Allowed file extensions (lowercase, no dot); empty allows any, e.g.
 # allowed_extensions = [\"txt\", \"zip\", \"png\"]
 allowed_extensions = []
+# Max bytes read/decompressed when previewing a file or archive entry in the BBS.
+max_preview_bytes = 262144
+# Max entries listed from an archive.
+max_archive_entries = 1000
 ";
 
 #[cfg(test)]

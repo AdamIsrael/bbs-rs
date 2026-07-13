@@ -39,6 +39,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
         Screen::EditFileDesc => render_form(f, body, " Edit Description ", app),
+        Screen::ArchiveList => render_archive_list(f, body, app),
+        Screen::FileView => render_file_view(f, body, app),
         Screen::Keys => render_keys(f, body, app),
         Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
         Screen::Register => render_form(f, body, " Register ", app),
@@ -407,6 +409,42 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(p, area);
 }
 
+fn render_archive_list(f: &mut Frame, area: Rect, app: &App) {
+    let title = app
+        .current_file
+        .as_ref()
+        .map(|file| format!(" {} ", truncate(&file.filename, 40)))
+        .unwrap_or_else(|| " Archive ".to_string());
+    if app.archive_entries.is_empty() {
+        return placeholder(f, area, &title, "Empty archive.");
+    }
+    let lines: Vec<Line> = app
+        .archive_entries
+        .iter()
+        .map(|e| {
+            let size = if e.is_dir {
+                "<dir>".to_string()
+            } else {
+                human_size(e.size as i64)
+            };
+            Line::from(format!("{:>10}  {}", size, truncate(&e.name, 60)))
+        })
+        .collect();
+    render_selectable(f, area, &title, lines, app.archive_sel);
+}
+
+fn render_file_view(f: &mut Frame, area: Rect, app: &App) {
+    let mut title = format!(" {} ", truncate(&app.file_view_title, 50));
+    if app.file_view_truncated {
+        title = format!(" {} [truncated] ", truncate(&app.file_view_title, 40));
+    }
+    let p = Paragraph::new(app.file_view_body.as_str())
+        .block(Block::bordered().title(title))
+        .wrap(Wrap { trim: false })
+        .scroll((app.file_view_scroll, 0));
+    f.render_widget(p, area);
+}
+
 fn render_keys(f: &mut Frame, area: Rect, app: &App) {
     if app.user_keys.is_empty() {
         return placeholder(
@@ -513,7 +551,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
-  • File Areas     : browse files here; upload/download them over SFTP
+  • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
   • SSH Keys       : register public keys to log in without a password
   • Register       : create an account, then reconnect over SSH with it
 
@@ -559,6 +597,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
         Screen::EditFileDesc => "Edit Description",
+        Screen::ArchiveList => "Archive",
+        Screen::FileView => "Viewing",
         Screen::Keys => "SSH Keys",
         Screen::AddKey => "Add SSH Key",
         Screen::Register => "Register",
@@ -600,12 +640,14 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
         Screen::FileDetail => {
             if can_edit_file {
-                " e edit description · Esc back "
+                " Enter view · e edit description · Esc back "
             } else {
-                " Esc back "
+                " Enter view · Esc back "
             }
         }
         Screen::EditFileDesc => " type · Enter save · Esc cancel ",
+        Screen::ArchiveList => " ↑/↓ move · Enter open entry · Esc back ",
+        Screen::FileView => " ↑/↓ scroll · PgUp/PgDn · Home top · Esc back ",
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
