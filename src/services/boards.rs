@@ -46,7 +46,7 @@ pub async fn get_board(pool: &SqlitePool, id: i64) -> Result<Board> {
 pub async fn list_messages(pool: &SqlitePool, board_id: i64) -> Result<Vec<Message>> {
     let messages = sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
-         m.subject, m.body, m.created_at, m.pinned \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
          FROM messages m JOIN users u ON u.id = m.author_id \
          WHERE m.board_id = ? ORDER BY m.pinned DESC, m.id DESC",
     )
@@ -56,10 +56,52 @@ pub async fn list_messages(pool: &SqlitePool, board_id: i64) -> Result<Vec<Messa
     Ok(messages)
 }
 
+/// A message plus its depth in the reply tree (0 = top-level thread root).
+#[derive(Debug, Clone)]
+pub struct ThreadItem {
+    pub message: Message,
+    pub depth: u16,
+}
+
+/// A board's messages arranged as reply threads: each root (top-level post),
+/// pinned first then newest, is followed depth-first by its replies (oldest
+/// first). Replies whose parent is missing (e.g. deleted) become roots so
+/// nothing disappears.
+pub async fn list_thread(pool: &SqlitePool, board_id: i64) -> Result<Vec<ThreadItem>> {
+    use std::collections::{HashMap, HashSet};
+
+    let all = list_messages(pool, board_id).await?;
+    let ids: HashSet<i64> = all.iter().map(|m| m.id).collect();
+
+    // Group children by their effective parent (None for roots / orphans).
+    let mut children: HashMap<Option<i64>, Vec<Message>> = HashMap::new();
+    for m in all {
+        let parent = m.parent_id.filter(|pid| ids.contains(pid));
+        children.entry(parent).or_default().push(m);
+    }
+
+    // Roots keep the flat order from `list_messages` (pinned first, newest
+    // first). Iterative depth-first walk; children go oldest-first.
+    let mut roots = children.remove(&None).unwrap_or_default();
+    let mut stack: Vec<(Message, u16)> = roots.drain(..).rev().map(|m| (m, 0)).collect();
+    let mut order = Vec::new();
+    while let Some((m, depth)) = stack.pop() {
+        let id = m.id;
+        order.push(ThreadItem { message: m, depth });
+        if let Some(mut kids) = children.remove(&Some(id)) {
+            kids.sort_by_key(|k| k.id);
+            for k in kids.into_iter().rev() {
+                stack.push((k, depth + 1));
+            }
+        }
+    }
+    Ok(order)
+}
+
 pub async fn get_message(pool: &SqlitePool, id: i64) -> Result<Message> {
     sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
-         m.subject, m.body, m.created_at, m.pinned \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
          FROM messages m JOIN users u ON u.id = m.author_id \
          WHERE m.id = ?",
     )
@@ -91,6 +133,7 @@ pub async fn post_message(
     author: &User,
     subject: &str,
     body: &str,
+    parent_id: Option<i64>,
     limits: &Limits,
 ) -> Result<()> {
     if author.is_guest() {
@@ -103,6 +146,13 @@ pub async fn post_message(
     if !board.can_write(&author.role) {
         return Err(AppError::BoardWriteDenied);
     }
+    // A reply must target a message on the same board.
+    if let Some(pid) = parent_id {
+        let parent = get_message(pool, pid).await?;
+        if parent.board_id != board_id {
+            return Err(AppError::NotFound);
+        }
+    }
     if !author.is_admin()
         && let Some(since) = limits.window_start(now_unix())
     {
@@ -110,13 +160,15 @@ pub async fn post_message(
         enforce_rate(count, limits.max_posts)?;
     }
     sqlx::query(
-        "INSERT INTO messages (board_id, author_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (board_id, author_id, subject, body, created_at, parent_id) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(board_id)
     .bind(author.id)
     .bind(subject)
     .bind(body)
     .bind(now_unix())
+    .bind(parent_id)
     .execute(pool)
     .await?;
     Ok(())

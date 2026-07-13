@@ -96,6 +96,128 @@ async fn reserved_usernames_are_rejected() {
 }
 
 #[tokio::test]
+async fn message_threads_nest_and_order() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // Two top-level threads.
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "A",
+        "root a",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "B",
+        "root b",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let roots = boards::list_thread(&pool, general.id).await.unwrap();
+    let a_id = roots
+        .iter()
+        .find(|t| t.message.subject == "A")
+        .unwrap()
+        .message
+        .id;
+
+    // Two replies to A, and a reply to the first reply (depth 2).
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Re: A",
+        "r1",
+        Some(a_id),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let after = boards::list_thread(&pool, general.id).await.unwrap();
+    let r1_id = after
+        .iter()
+        .find(|t| t.message.body == "r1")
+        .unwrap()
+        .message
+        .id;
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Re: A",
+        "r2",
+        Some(a_id),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Re: Re: A",
+        "r1a",
+        Some(r1_id),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // Depth-first order: newest root (B) first, then A and its replies (oldest
+    // first, with the nested reply under r1).
+    let thread = boards::list_thread(&pool, general.id).await.unwrap();
+    let shape: Vec<(u16, &str)> = thread
+        .iter()
+        .map(|t| (t.depth, t.message.body.as_str()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (0, "root b"),
+            (0, "root a"),
+            (1, "r1"),
+            (2, "r1a"),
+            (1, "r2"),
+        ]
+    );
+
+    // Replying to a nonexistent parent is rejected.
+    assert!(matches!(
+        boards::post_message(
+            &pool,
+            general.id,
+            &alice,
+            "x",
+            "y",
+            Some(999_999),
+            &Default::default()
+        )
+        .await,
+        Err(AppError::NotFound)
+    ));
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();
@@ -113,6 +235,7 @@ async fn guest_cannot_post_but_users_can() {
             &guest,
             "hi",
             "body",
+            None,
             &Default::default()
         )
         .await,
@@ -128,6 +251,7 @@ async fn guest_cannot_post_but_users_can() {
         &alice,
         "Hello",
         "world",
+        None,
         &Default::default(),
     )
     .await
@@ -173,7 +297,16 @@ async fn board_acls_lock_and_moderation() {
 
     // Write ACL: a regular user can't post to the admin-only board; an admin can.
     assert!(matches!(
-        boards::post_message(&pool, announce.id, &alice, "s", "b", &Default::default()).await,
+        boards::post_message(
+            &pool,
+            announce.id,
+            &alice,
+            "s",
+            "b",
+            None,
+            &Default::default()
+        )
+        .await,
         Err(AppError::BoardWriteDenied)
     ));
     boards::post_message(
@@ -182,6 +315,7 @@ async fn board_acls_lock_and_moderation() {
         &admin,
         "News",
         "hi",
+        None,
         &Default::default(),
     )
     .await
@@ -190,7 +324,16 @@ async fn board_acls_lock_and_moderation() {
     // Lock: a locked board rejects non-admins, but admins can still post.
     boards::set_locked(&pool, general.id, true).await.unwrap();
     assert!(matches!(
-        boards::post_message(&pool, general.id, &alice, "s", "b", &Default::default()).await,
+        boards::post_message(
+            &pool,
+            general.id,
+            &alice,
+            "s",
+            "b",
+            None,
+            &Default::default()
+        )
+        .await,
         Err(AppError::BoardLocked)
     ));
     boards::post_message(
@@ -199,20 +342,30 @@ async fn board_acls_lock_and_moderation() {
         &admin,
         "admin note",
         "b",
+        None,
         &Default::default(),
     )
     .await
     .unwrap();
     boards::set_locked(&pool, general.id, false).await.unwrap();
-    boards::post_message(&pool, general.id, &alice, "first", "b", &Default::default())
-        .await
-        .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "first",
+        "b",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     boards::post_message(
         &pool,
         general.id,
         &alice,
         "second",
         "b",
+        None,
         &Default::default(),
     )
     .await
@@ -283,14 +436,14 @@ async fn rate_limits_throttle_non_admins() {
     let bob = auth::find_user(&pool, "bob").await.unwrap().unwrap();
 
     // Posts: two allowed within the window, the third is throttled.
-    boards::post_message(&pool, general.id, &alice, "1", "b", &limits)
+    boards::post_message(&pool, general.id, &alice, "1", "b", None, &limits)
         .await
         .unwrap();
-    boards::post_message(&pool, general.id, &alice, "2", "b", &limits)
+    boards::post_message(&pool, general.id, &alice, "2", "b", None, &limits)
         .await
         .unwrap();
     assert!(matches!(
-        boards::post_message(&pool, general.id, &alice, "3", "b", &limits).await,
+        boards::post_message(&pool, general.id, &alice, "3", "b", None, &limits).await,
         Err(AppError::RateLimited)
     ));
 
@@ -321,9 +474,17 @@ async fn rate_limits_throttle_non_admins() {
         .unwrap();
     let admin = auth::find_user(&pool, "adminuser").await.unwrap().unwrap();
     for i in 0..5 {
-        boards::post_message(&pool, general.id, &admin, &format!("m{i}"), "b", &limits)
-            .await
-            .unwrap();
+        boards::post_message(
+            &pool,
+            general.id,
+            &admin,
+            &format!("m{i}"),
+            "b",
+            None,
+            &limits,
+        )
+        .await
+        .unwrap();
     }
 
     // A zero cap disables that limit; a zero window disables all of them.
@@ -334,9 +495,17 @@ async fn rate_limits_throttle_non_admins() {
         max_oneliners: 0,
     };
     for i in 0..5 {
-        boards::post_message(&pool, general.id, &bob, &format!("x{i}"), "b", &no_cap)
-            .await
-            .unwrap();
+        boards::post_message(
+            &pool,
+            general.id,
+            &bob,
+            &format!("x{i}"),
+            "b",
+            None,
+            &no_cap,
+        )
+        .await
+        .unwrap();
     }
     let no_window = Limits {
         window_secs: 0,

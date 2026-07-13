@@ -20,6 +20,7 @@ use crate::db::models::{
 };
 use crate::error::AppError;
 use crate::services::archive::{self, ArchiveEntry, Preview};
+use crate::services::boards::ThreadItem;
 use crate::services::presence::{OnlineUser, Presence};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
@@ -56,10 +57,12 @@ pub struct App {
     pub board_sel: usize,
     pub current_board: Option<Board>,
 
-    // Messages
-    pub messages: Vec<Message>,
+    // Messages (threaded: each item carries its reply depth)
+    pub messages: Vec<ThreadItem>,
     pub msg_sel: usize,
     pub current_message: Option<Message>,
+    /// When composing, the message being replied to (None = new thread).
+    reply_parent: Option<i64>,
 
     // Mail
     pub mails: Vec<Mail>,
@@ -157,6 +160,7 @@ impl App {
             messages: Vec::new(),
             msg_sel: 0,
             current_message: None,
+            reply_parent: None,
             mails: Vec::new(),
             mail_sel: 0,
             current_mail: None,
@@ -517,7 +521,7 @@ impl App {
     }
 
     async fn open_board(&mut self, board: Board) {
-        match boards::list_messages(&self.pool, board.id).await {
+        match boards::list_thread(&self.pool, board.id).await {
             Ok(m) => {
                 self.messages = m;
                 self.msg_sel = 0;
@@ -534,7 +538,7 @@ impl App {
         let Some(board_id) = self.current_board.as_ref().map(|b| b.id) else {
             return;
         };
-        if let Ok(m) = boards::list_messages(&self.pool, board_id).await {
+        if let Ok(m) = boards::list_thread(&self.pool, board_id).await {
             self.msg_sel = self.msg_sel.min(m.len().saturating_sub(1));
             self.messages = m;
         }
@@ -549,8 +553,8 @@ impl App {
                 self.msg_sel = (self.msg_sel + 1).min(self.messages.len().saturating_sub(1))
             }
             KeyCode::Enter => {
-                if let Some(msg) = self.messages.get(self.msg_sel) {
-                    match boards::get_message(&self.pool, msg.id).await {
+                if let Some(item) = self.messages.get(self.msg_sel) {
+                    match boards::get_message(&self.pool, item.message.id).await {
                         Ok(full) => {
                             self.current_message = Some(full);
                             self.screen = Screen::ReadMessage;
@@ -559,7 +563,8 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('n') => self.begin_compose_post(),
+            KeyCode::Char('n') => self.begin_compose_post(None),
+            KeyCode::Char('r') => self.begin_reply(),
             // Admin moderation on the selected post.
             KeyCode::Char('d') if self.user.is_admin() => self.delete_selected_message().await,
             KeyCode::Char('p') if self.user.is_admin() => self.toggle_pin_selected().await,
@@ -568,9 +573,25 @@ impl App {
         }
     }
 
-    /// Start composing a post, explaining up front why it's not allowed rather
-    /// than failing only at submit.
-    fn begin_compose_post(&mut self) {
+    /// Reply to the selected message: pre-fill an `Re:` subject and remember the
+    /// parent so `submit_post` files it under that message.
+    fn begin_reply(&mut self) {
+        let Some(item) = self.messages.get(self.msg_sel) else {
+            return;
+        };
+        let parent = &item.message;
+        let re = if parent.subject.to_ascii_lowercase().starts_with("re:") {
+            parent.subject.clone()
+        } else {
+            format!("Re: {}", parent.subject)
+        };
+        let parent_id = parent.id;
+        self.begin_compose_post(Some((parent_id, re)));
+    }
+
+    /// Start composing a post (or a reply when `reply` is set), explaining up
+    /// front why it's not allowed rather than failing only at submit.
+    fn begin_compose_post(&mut self, reply: Option<(i64, String)>) {
         let Some(board) = self.current_board.as_ref() else {
             return;
         };
@@ -586,17 +607,23 @@ impl App {
             self.status = "You don't have permission to post to this board.".into();
             return;
         }
-        self.form = Form::new(vec![
-            Field::new("Subject", false),
-            Field::new("Body", false),
-        ]);
+        let mut subject = Field::new("Subject", false);
+        self.reply_parent = match reply {
+            Some((pid, re_subject)) => {
+                subject.value = re_subject;
+                Some(pid)
+            }
+            None => None,
+        };
+        self.form = Form::new(vec![subject, Field::new("Body", false)]);
         self.screen = Screen::ComposePost;
     }
 
     async fn delete_selected_message(&mut self) {
-        let Some(msg) = self.messages.get(self.msg_sel).cloned() else {
+        let Some(item) = self.messages.get(self.msg_sel).cloned() else {
             return;
         };
+        let msg = item.message;
         match boards::delete_message(&self.pool, msg.id).await {
             Ok(true) => {
                 self.reload_messages().await;
@@ -608,9 +635,10 @@ impl App {
     }
 
     async fn toggle_pin_selected(&mut self) {
-        let Some(msg) = self.messages.get(self.msg_sel).cloned() else {
+        let Some(item) = self.messages.get(self.msg_sel).cloned() else {
             return;
         };
+        let msg = item.message;
         let pin = !msg.pinned;
         match boards::set_pinned(&self.pool, msg.id, pin).await {
             Ok(()) => {
@@ -644,21 +672,28 @@ impl App {
             self.status = "No board selected.".into();
             return;
         };
+        let parent_id = self.reply_parent;
         match boards::post_message(
             &self.pool,
             board_id,
             &self.user,
             &subject,
             &body,
+            parent_id,
             &self.config.limits,
         )
         .await
         {
             Ok(()) => {
+                self.reply_parent = None;
                 self.reload_messages().await;
                 self.msg_sel = 0;
                 self.screen = Screen::MessageList;
-                self.status = "Message posted.".into();
+                self.status = if parent_id.is_some() {
+                    "Reply posted.".into()
+                } else {
+                    "Message posted.".into()
+                };
             }
             Err(AppError::BoardLocked) => self.status = "This board is locked.".into(),
             Err(AppError::BoardWriteDenied) => {
