@@ -98,9 +98,10 @@ fn classify(mut bytes: Vec<u8>, truncated: bool) -> Preview {
     }
 }
 
-/// Order entries case-insensitively by name so listings read alphanumerically.
+/// Order entries with directories first, then case-insensitively by name so
+/// listings read alphanumerically within each group.
 fn sort_entries(entries: &mut [ArchiveEntry]) {
-    entries.sort_by_cached_key(|e| e.name.to_lowercase());
+    entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 }
 
 fn list_zip(path: &Path, cfg: &Files) -> Result<Preview> {

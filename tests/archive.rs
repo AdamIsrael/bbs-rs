@@ -84,6 +84,8 @@ fn zip_lists_and_reads_entries() {
         zw.write_all(b"inside the zip").unwrap();
         zw.start_file("data.bin", opts).unwrap();
         zw.write_all(&[0u8, 1, 2, 3]).unwrap();
+        // A directory whose name sorts last, to prove dirs group first.
+        zw.add_directory("zzz_dir/", opts).unwrap();
         zw.finish().unwrap();
     }
     assert!(archive::is_archive("bundle.zip"));
@@ -95,9 +97,9 @@ fn zip_lists_and_reads_entries() {
         }
         _ => panic!("expected archive listing"),
     };
-    // Entries are listed alphanumerically (added readme.txt then data.bin).
+    // Directories group first, then files, each alphanumerically.
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(names, vec!["data.bin", "readme.txt"]);
+    assert_eq!(names, vec!["zzz_dir/", "data.bin", "readme.txt"]);
 
     // A text entry decodes; a binary entry is flagged.
     match archive::read_entry(&path, "bundle.zip", "readme.txt", &cfg(1024)).unwrap() {
