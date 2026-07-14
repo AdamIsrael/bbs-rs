@@ -98,6 +98,7 @@ pub struct App {
     pub admin_users: Vec<User>,
     pub admin_user_sel: usize,
     pub admin_logins: Vec<Login>,
+    pub admin_login_sel: usize,
 
     // Shared form for compose/register screens
     pub form: Form,
@@ -184,6 +185,7 @@ impl App {
             admin_users: Vec::new(),
             admin_user_sel: 0,
             admin_logins: Vec::new(),
+            admin_login_sel: 0,
             form: Form::new(Vec::new()),
         }
     }
@@ -449,6 +451,7 @@ impl App {
         match admin::recent_logins(&self.pool, None, 100).await {
             Ok(logins) => {
                 self.admin_logins = logins;
+                self.admin_login_sel = 0;
                 self.screen = Screen::AdminLogins;
             }
             Err(e) => self.status = format!("Error loading logins: {e}"),
@@ -456,7 +459,17 @@ impl App {
     }
 
     async fn on_admin_logins(&mut self, key: KeyEvent) {
+        // Move by a screenful when paging; the stateful list auto-scrolls to
+        // keep the cursor visible.
+        const PAGE: usize = 10;
+        let last = self.admin_logins.len().saturating_sub(1);
         match key.code {
+            KeyCode::Up => self.admin_login_sel = self.admin_login_sel.saturating_sub(1),
+            KeyCode::Down => self.admin_login_sel = (self.admin_login_sel + 1).min(last),
+            KeyCode::PageUp => self.admin_login_sel = self.admin_login_sel.saturating_sub(PAGE),
+            KeyCode::PageDown => self.admin_login_sel = (self.admin_login_sel + PAGE).min(last),
+            KeyCode::Home => self.admin_login_sel = 0,
+            KeyCode::End => self.admin_login_sel = last,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::AdminUsers,
             _ => {}
         }

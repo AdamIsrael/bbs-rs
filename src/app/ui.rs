@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::App;
 use crate::app::state::{MenuItem, Screen};
@@ -84,21 +84,23 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(text).style(style), area);
 }
 
+/// Render a bordered list. When `selected` is a valid index the row is
+/// highlighted and a stateful `List` auto-scrolls to keep it visible; a
+/// sentinel `usize::MAX` means "no cursor" (read-only walls), leaving the list
+/// top-anchored.
 fn render_selectable(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, selected: usize) {
-    let items: Vec<ListItem> = lines
-        .into_iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let item = ListItem::new(line);
-            if i == selected {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else {
-                item
-            }
-        })
-        .collect();
-    let list = List::new(items).block(Block::bordered().title(title.to_string()));
-    f.render_widget(list, area);
+    let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
+    let len = items.len();
+    let list = List::new(items)
+        .block(Block::bordered().title(title.to_string()))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    if selected < len {
+        let mut state = ListState::default();
+        state.select(Some(selected));
+        f.render_stateful_widget(list, area, &mut state);
+    } else {
+        f.render_widget(list, area);
+    }
 }
 
 fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
@@ -558,7 +560,7 @@ fn render_admin_logins(f: &mut Frame, area: Rect, app: &App) {
             ))
         })
         .collect();
-    render_selectable(f, area, " Admin · Logins ", lines, usize::MAX);
+    render_selectable(f, area, " Admin · Logins ", lines, app.admin_login_sel);
 }
 
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
@@ -676,7 +678,7 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
-        Screen::AdminLogins => " Esc back ",
+        Screen::AdminLogins => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
     };
     base.to_string()
 }
