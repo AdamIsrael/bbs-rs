@@ -25,6 +25,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   a profile screen also shows member-since, last-on, and post count. View others' profiles from Who's Online.
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users; open a user's profile from here.
+- **Stats** — board totals, a top-posters leaderboard, and a recent-callers list.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
 - **Access control** — three roles (`guest` / `user` / `admin`); admins get an in-BBS admin view.
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.

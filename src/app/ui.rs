@@ -37,6 +37,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::WhoOnline => render_who(f, body, app),
         Screen::Profile => render_profile(f, body, app),
         Screen::EditProfile => render_form(f, body, " Edit Profile ", app),
+        Screen::Stats => render_stats(f, body, app),
         Screen::FileAreas => render_file_areas(f, body, app),
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
@@ -434,6 +435,58 @@ fn field_line(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
+fn render_stats(f: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = &app.stats else {
+        return placeholder(f, area, " Stats ", "No stats yet.");
+    };
+    let heading = |text: &str| {
+        Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let mut lines = vec![
+        field_line("Users", &s.total_users.to_string()),
+        field_line("Posts", &s.total_posts.to_string()),
+        field_line("Calls", &s.total_calls.to_string()),
+        Line::from(""),
+        heading("Top posters"),
+    ];
+    if s.top_posters.is_empty() {
+        lines.push(Line::from("  (none yet)"));
+    } else {
+        for (i, p) in s.top_posters.iter().enumerate() {
+            let posts = if p.posts == 1 { "post" } else { "posts" };
+            lines.push(Line::from(format!(
+                "  {:>2}. {:<20} {} {}",
+                i + 1,
+                truncate(&p.username, 20),
+                p.posts,
+                posts
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(heading("Recent callers"));
+    if s.recent_callers.is_empty() {
+        lines.push(Line::from("  (none yet)"));
+    } else {
+        for c in &s.recent_callers {
+            lines.push(Line::from(format!(
+                "  {:<20} {}",
+                truncate(&c.username, 20),
+                fmt_time(c.at)
+            )));
+        }
+    }
+    let para = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title(" Stats "))
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
 fn render_file_areas(f: &mut Frame, area: Rect, app: &App) {
     if app.file_areas.is_empty() {
         return placeholder(f, area, " File Areas ", "No file areas.");
@@ -703,6 +756,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::WhoOnline => "Who's Online",
         Screen::Profile => "Profile",
         Screen::EditProfile => "Edit Profile",
+        Screen::Stats => "Stats",
         Screen::FileAreas => "File Areas",
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
@@ -759,6 +813,7 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
             }
         }
         Screen::EditProfile => " type · Tab/↑/↓ fields · Enter next/save · Esc cancel ",
+        Screen::Stats => " r refresh · Esc back ",
         Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
         Screen::FileDetail => {

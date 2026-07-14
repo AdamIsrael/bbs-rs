@@ -23,6 +23,7 @@ use crate::services::archive::{self, ArchiveEntry, Preview};
 use crate::services::boards::ThreadItem;
 use crate::services::presence::{OnlineUser, Presence};
 use crate::services::profiles::{self, Profile};
+use crate::services::stats::{self, Stats};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
 use crate::transport::Event;
@@ -80,6 +81,9 @@ pub struct App {
     pub current_profile: Option<Profile>,
     /// Where the profile screen returns to (main menu, or who's-online).
     profile_back: Screen,
+
+    // Stats / leaderboards
+    pub stats: Option<Stats>,
 
     // Mail
     pub mails: Vec<Mail>,
@@ -147,6 +151,7 @@ impl App {
         if !user.is_guest() {
             menu.push(MenuItem::Profile);
         }
+        menu.push(MenuItem::Stats);
         if f.file_areas {
             menu.push(MenuItem::Files);
         }
@@ -189,6 +194,7 @@ impl App {
             reply_parent: None,
             current_profile: None,
             profile_back: Screen::MainMenu,
+            stats: None,
             mails: Vec::new(),
             mail_sel: 0,
             current_mail: None,
@@ -243,6 +249,7 @@ impl App {
             Screen::WhoOnline => self.on_who(key).await,
             Screen::Profile => self.on_profile(key).await,
             Screen::EditProfile => self.on_edit_profile(key).await,
+            Screen::Stats => self.on_stats(key).await,
             Screen::FileAreas => self.on_file_areas(key).await,
             Screen::FileList => self.on_file_list(key).await,
             Screen::FileDetail => self.on_file_detail(key).await,
@@ -287,6 +294,7 @@ impl App {
             }
             MenuItem::Who => self.open_who().await,
             MenuItem::Profile => self.open_profile(self.user.id, Screen::MainMenu).await,
+            MenuItem::Stats => self.open_stats().await,
             MenuItem::Files => self.open_file_areas().await,
             MenuItem::Keys => self.open_keys().await,
             MenuItem::Register => {
@@ -1035,6 +1043,31 @@ impl App {
                 self.status = format!("Could not update profile: {e}");
                 // Stay on the form so the user can fix an over-long field.
             }
+        }
+    }
+
+    // ---- Stats -----------------------------------------------------------
+
+    async fn open_stats(&mut self) {
+        match stats::gather(&self.pool, stats::LIST_LIMIT).await {
+            Ok(s) => {
+                self.stats = Some(s);
+                self.screen = Screen::Stats;
+            }
+            Err(e) => self.status = format!("Error loading stats: {e}"),
+        }
+    }
+
+    async fn on_stats(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('r') => {
+                // Refresh in place; keep the old snapshot on error.
+                if let Ok(s) = stats::gather(&self.pool, stats::LIST_LIMIT).await {
+                    self.stats = Some(s);
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
         }
     }
 
