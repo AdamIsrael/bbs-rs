@@ -23,6 +23,7 @@ use crate::services::archive::{self, ArchiveEntry, Preview};
 use crate::services::boards::ThreadItem;
 use crate::services::presence::{OnlineUser, Presence};
 use crate::services::profiles::{self, Profile};
+use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
@@ -84,6 +85,12 @@ pub struct App {
 
     // Stats / leaderboards
     pub stats: Option<Stats>,
+
+    // Message search
+    pub search_results: Vec<SearchHit>,
+    pub search_sel: usize,
+    /// The query that produced `search_results` (shown in the results title).
+    pub search_query: String,
 
     // Mail
     pub mails: Vec<Mail>,
@@ -152,6 +159,7 @@ impl App {
             menu.push(MenuItem::Profile);
         }
         menu.push(MenuItem::Stats);
+        menu.push(MenuItem::Search);
         if f.file_areas {
             menu.push(MenuItem::Files);
         }
@@ -195,6 +203,9 @@ impl App {
             current_profile: None,
             profile_back: Screen::MainMenu,
             stats: None,
+            search_results: Vec::new(),
+            search_sel: 0,
+            search_query: String::new(),
             mails: Vec::new(),
             mail_sel: 0,
             current_mail: None,
@@ -250,6 +261,8 @@ impl App {
             Screen::Profile => self.on_profile(key).await,
             Screen::EditProfile => self.on_edit_profile(key).await,
             Screen::Stats => self.on_stats(key).await,
+            Screen::SearchInput => self.on_search_input(key).await,
+            Screen::SearchResults => self.on_search_results(key).await,
             Screen::FileAreas => self.on_file_areas(key).await,
             Screen::FileList => self.on_file_list(key).await,
             Screen::FileDetail => self.on_file_detail(key).await,
@@ -295,6 +308,7 @@ impl App {
             MenuItem::Who => self.open_who().await,
             MenuItem::Profile => self.open_profile(self.user.id, Screen::MainMenu).await,
             MenuItem::Stats => self.open_stats().await,
+            MenuItem::Search => self.begin_search(),
             MenuItem::Files => self.open_file_areas().await,
             MenuItem::Keys => self.open_keys().await,
             MenuItem::Register => {
@@ -587,6 +601,16 @@ impl App {
     }
 
     async fn open_board(&mut self, board: Board) {
+        if self.load_board(board).await {
+            self.msg_sel = 0;
+            self.screen = Screen::MessageList;
+        }
+    }
+
+    /// Load a board's threaded messages into state and advance its unread
+    /// watermark, without changing the screen or selection. Returns whether the
+    /// load succeeded. Shared by [`Self::open_board`] and search-result jumps.
+    async fn load_board(&mut self, board: Board) -> bool {
         match boards::list_thread(&self.pool, board.id).await {
             Ok(m) => {
                 // Capture the pre-visit watermark so this session's render can
@@ -607,11 +631,13 @@ impl App {
                     self.board_unread.remove(&board.id);
                 }
                 self.messages = m;
-                self.msg_sel = 0;
                 self.current_board = Some(board);
-                self.screen = Screen::MessageList;
+                true
             }
-            Err(e) => self.status = format!("Error loading messages: {e}"),
+            Err(e) => {
+                self.status = format!("Error loading messages: {e}");
+                false
+            }
         }
     }
 
@@ -1068,6 +1094,109 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
+        }
+    }
+
+    // ---- Search ----------------------------------------------------------
+
+    fn begin_search(&mut self) {
+        self.form = Form::new(vec![Field::new("Search boards", false)]);
+        self.screen = Screen::SearchInput;
+    }
+
+    async fn on_search_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::MainMenu,
+            KeyCode::Enter => self.submit_search().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_search(&mut self) {
+        let query = self.form.value(0).to_string();
+        if query.is_empty() {
+            self.status = "Enter a search term.".into();
+            return;
+        }
+        match search::search_messages(&self.pool, &self.user.role, &query, search::SEARCH_LIMIT)
+            .await
+        {
+            Ok(hits) => {
+                if hits.is_empty() {
+                    self.status = format!("No messages match \"{query}\".");
+                }
+                self.search_results = hits;
+                self.search_sel = 0;
+                self.search_query = query;
+                self.screen = Screen::SearchResults;
+            }
+            Err(e) => self.status = format!("Search failed: {e}"),
+        }
+    }
+
+    async fn on_search_results(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.search_sel = self.search_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.search_sel =
+                    (self.search_sel + 1).min(self.search_results.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(hit) = self.search_results.get(self.search_sel) {
+                    let (board_id, message_id) = (hit.board_id, hit.id);
+                    self.open_message_in_board(board_id, message_id).await;
+                }
+            }
+            // Refine: go back to the input, prefilled with the last query.
+            KeyCode::Char('/') => {
+                self.form = Form::new(vec![Field::new("Search boards", false)]);
+                self.form.fields[0].value = self.search_query.clone();
+                self.screen = Screen::SearchInput;
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    /// Jump from a search hit to the message in its board: load the board (so
+    /// back-navigation lands on its message list) and open the message.
+    async fn open_message_in_board(&mut self, board_id: i64, message_id: i64) {
+        let board = match boards::get_board(&self.pool, board_id).await {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Cannot open board: {e}");
+                return;
+            }
+        };
+        // Defense in depth: the search already filtered by read ACL.
+        if !board.can_read(&self.user.role) {
+            self.status = "You can't read that board.".into();
+            return;
+        }
+        if !self.load_board(board).await {
+            return;
+        }
+        // Highlight the hit in the message list on return, if still present.
+        self.msg_sel = self
+            .messages
+            .iter()
+            .position(|t| t.message.id == message_id)
+            .unwrap_or(0);
+        match boards::get_message(&self.pool, message_id).await {
+            Ok(full) => {
+                self.current_msg_signature = profiles::signature_of(&self.pool, full.author_id)
+                    .await
+                    .unwrap_or_default();
+                self.current_message = Some(full);
+                self.screen = Screen::ReadMessage;
+            }
+            Err(e) => {
+                // The message vanished (deleted) between search and open.
+                self.status = format!("Message unavailable: {e}");
+                self.screen = Screen::MessageList;
+            }
         }
     }
 

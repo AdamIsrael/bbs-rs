@@ -478,6 +478,123 @@ async fn stats_totals_leaderboard_and_callers() {
 }
 
 #[tokio::test]
+async fn search_matches_ranks_and_respects_acl() {
+    use bbs_rs::services::{auth, boards, search};
+    let pool = setup().await;
+    let boards_list = boards::list_boards(&pool).await.unwrap();
+    let general = boards_list.iter().find(|b| b.name == "General").unwrap();
+    // Announcements is admin-only to post; make it admin-only to *read* too so
+    // we can prove the ACL filter hides it from a regular user.
+    let announce = boards_list
+        .iter()
+        .find(|b| b.name == "Announcements")
+        .unwrap();
+    boards::set_roles(&pool, "Announcements", Some("admin"), None)
+        .await
+        .unwrap();
+
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let admin = auth::register_user(&pool, "adminuser", "pw", &Default::default())
+        .await
+        .unwrap();
+    bbs_rs::services::admin::set_role(&pool, "adminuser", "admin")
+        .await
+        .unwrap();
+    let admin = bbs_rs::services::auth::find_user(&pool, &admin.username)
+        .await
+        .unwrap()
+        .unwrap();
+
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Rust tips",
+        "pattern matching is great",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Cooking",
+        "how to bake bread",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    // A secret post in the admin-only board that also mentions "bread".
+    boards::post_message(
+        &pool,
+        announce.id,
+        &admin,
+        "Secret recipe",
+        "the secret bread formula",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // Body term matches; punctuation/case-insensitive.
+    let hits = search::search_messages(&pool, "user", "MATCHING", 50)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].subject, "Rust tips");
+
+    // "bread" appears in General and the admin-only Announcements board.
+    let as_user = search::search_messages(&pool, "user", "bread", 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        as_user.len(),
+        1,
+        "regular user can't see the admin board hit"
+    );
+    assert_eq!(as_user[0].subject, "Cooking");
+    let as_admin = search::search_messages(&pool, "admin", "bread", 50)
+        .await
+        .unwrap();
+    assert_eq!(as_admin.len(), 2, "admin sees both boards");
+
+    // Blank query returns nothing; a non-matching term too.
+    assert!(
+        search::search_messages(&pool, "admin", "   ", 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        search::search_messages(&pool, "admin", "zzznope", 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Deleting a message drops it from the index (trigger keeps FTS in sync).
+    let cooking = boards::list_messages(&pool, general.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.subject == "Cooking")
+        .unwrap();
+    assert!(boards::delete_message(&pool, cooking.id).await.unwrap());
+    assert!(
+        search::search_messages(&pool, "user", "bread", 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();

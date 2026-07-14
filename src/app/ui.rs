@@ -38,6 +38,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Profile => render_profile(f, body, app),
         Screen::EditProfile => render_form(f, body, " Edit Profile ", app),
         Screen::Stats => render_stats(f, body, app),
+        Screen::SearchInput => render_form(f, body, " Search Messages ", app),
+        Screen::SearchResults => render_search_results(f, body, app),
         Screen::FileAreas => render_file_areas(f, body, app),
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
@@ -487,6 +489,35 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+fn render_search_results(f: &mut Frame, area: Rect, app: &App) {
+    let title = format!(" Search: {} ", truncate(&app.search_query, 40));
+    if app.search_results.is_empty() {
+        return placeholder(f, area, &title, "No matches. Press '/' to search again.");
+    }
+    let lines: Vec<Line> = app
+        .search_results
+        .iter()
+        .map(|h| {
+            Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", truncate(&h.board_name, 12)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(format!("{:<32} ", truncate(&h.subject, 32))),
+                Span::styled(
+                    format!(
+                        "{:<12} {}",
+                        truncate(&h.author_name, 12),
+                        fmt_time(h.created_at)
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        })
+        .collect();
+    render_selectable(f, area, &title, lines, app.search_sel);
+}
+
 fn render_file_areas(f: &mut Frame, area: Rect, app: &App) {
     if app.file_areas.is_empty() {
         return placeholder(f, area, " File Areas ", "No file areas.");
@@ -757,6 +788,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Profile => "Profile",
         Screen::EditProfile => "Edit Profile",
         Screen::Stats => "Stats",
+        Screen::SearchInput => "Search",
+        Screen::SearchResults => "Search Results",
         Screen::FileAreas => "File Areas",
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
@@ -814,6 +847,8 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         }
         Screen::EditProfile => " type · Tab/↑/↓ fields · Enter next/save · Esc cancel ",
         Screen::Stats => " r refresh · Esc back ",
+        Screen::SearchInput => " type a query · Enter search · Esc cancel ",
+        Screen::SearchResults => " ↑/↓ move · Enter open · / new search · Esc back ",
         Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
         Screen::FileDetail => {
