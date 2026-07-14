@@ -403,6 +403,81 @@ async fn profiles_update_and_stats() {
 }
 
 #[tokio::test]
+async fn stats_totals_leaderboard_and_callers() {
+    use bbs_rs::services::{admin, auth, boards, stats};
+    let pool = setup().await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // Alice posts twice, Bob once → Alice leads the board.
+    for body in ["a1", "a2"] {
+        boards::post_message(
+            &pool,
+            general.id,
+            &alice,
+            "s",
+            body,
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+    boards::post_message(
+        &pool,
+        general.id,
+        &bob,
+        "s",
+        "b1",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // Two successful calls (bob most recent) and one failure (not counted).
+    admin::record_login(&pool, "alice", None, true)
+        .await
+        .unwrap();
+    admin::record_login(&pool, "bob", None, true).await.unwrap();
+    admin::record_login(&pool, "mallory", None, false)
+        .await
+        .unwrap();
+
+    let s = stats::gather(&pool, stats::LIST_LIMIT).await.unwrap();
+    // guest is seeded alongside alice + bob.
+    assert_eq!(s.total_users, 3);
+    assert_eq!(s.total_posts, 3);
+    assert_eq!(s.total_calls, 2, "failed logins are excluded");
+
+    // Leaderboard: alice (2) ahead of bob (1); guest never posted.
+    assert_eq!(s.top_posters.len(), 2);
+    assert_eq!(s.top_posters[0].username, "alice");
+    assert_eq!(s.top_posters[0].posts, 2);
+    assert_eq!(s.top_posters[1].username, "bob");
+
+    // Recent callers: one row per successful user (the failed 'mallory' is
+    // excluded). Order between same-second calls isn't asserted.
+    let mut callers: Vec<&str> = s
+        .recent_callers
+        .iter()
+        .map(|c| c.username.as_str())
+        .collect();
+    callers.sort();
+    assert_eq!(callers, vec!["alice", "bob"]);
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();

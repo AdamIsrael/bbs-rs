@@ -45,7 +45,7 @@ These are done and are the substrate several roadmap items build on:
 | [**Unread / "new since last call"**](https://github.com/AdamIsrael/bbs-rs/issues/9) | M | Track last-seen per user/board and highlight new messages. | **Shipped**: `user_board_seen` watermark per user/board; the board list shows a green `(N new)` badge and unread posts are flagged (`•` + green) in the message list. Guests (shared account) are untracked. |
 | [**Full-text search**](https://github.com/AdamIsrael/bbs-rs/issues/10) | M | Search boards (and maybe mail) by keyword. | SQLite FTS5 virtual table over `messages`. |
 | [**User profiles & signatures**](https://github.com/AdamIsrael/bbs-rs/issues/11) | M | Real name, location, tagline, signature, last-seen; shown on posts and a profile screen. | **Shipped**: `users` gains real_name/location/tagline/signature; a **My Profile** screen (with editor) shows those plus member-since, last-on (from `logins`), and post count; other users' profiles open from **Who's Online** (Enter); signatures render beneath board posts. |
-| [**Stats / leaderboards / last callers**](https://github.com/AdamIsrael/bbs-rs/issues/12) | S | Top posters, call counter, recent callers list. | Aggregations over `logins`/`messages`. |
+| [**Stats / leaderboards / last callers**](https://github.com/AdamIsrael/bbs-rs/issues/12) | S | Top posters, call counter, recent callers list. | **Shipped**: a **Stats** screen shows totals (users/posts/calls), a top-posters leaderboard, and recent callers (most recent successful login per user), all aggregated over `users`/`messages`/`logins`. |
 
 ## Tier 3 — reach & extras
 

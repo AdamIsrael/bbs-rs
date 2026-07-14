@@ -12,6 +12,7 @@ pub mod mail;
 pub mod oneliners;
 pub mod presence;
 pub mod profiles;
+pub mod stats;
 
 use sqlx::sqlite::SqlitePool;
 
