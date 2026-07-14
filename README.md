@@ -26,6 +26,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users; open a user's profile from here.
 - **Stats** — board totals, a top-posters leaderboard, and a recent-callers list.
+- **Full-text search** — keyword search across board messages (SQLite FTS5), scoped to boards you can read;
+  jump straight from a hit to the message.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
 - **Access control** — three roles (`guest` / `user` / `admin`); admins get an in-BBS admin view.
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.
