@@ -218,6 +218,123 @@ async fn message_threads_nest_and_order() {
 }
 
 #[tokio::test]
+async fn unread_counts_and_watermark() {
+    use bbs_rs::services::{auth, boards};
+    use bbs_rs::util::now_unix;
+    let pool = setup().await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // No messages yet: nothing unread, no watermark recorded.
+    assert!(
+        boards::unread_counts(&pool, alice.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        boards::last_seen(&pool, alice.id, general.id)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // Bob posts two; both are unread for Alice but not for Bob (own posts).
+    for body in ["one", "two"] {
+        boards::post_message(
+            &pool,
+            general.id,
+            &bob,
+            "s",
+            body,
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        boards::unread_counts(&pool, alice.id)
+            .await
+            .unwrap()
+            .get(&general.id),
+        Some(&2)
+    );
+    assert!(
+        boards::unread_counts(&pool, bob.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Alice replies; now Bob has one unread, Alice still has Bob's two.
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "s",
+        "re",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        boards::unread_counts(&pool, bob.id)
+            .await
+            .unwrap()
+            .get(&general.id),
+        Some(&1)
+    );
+    assert_eq!(
+        boards::unread_counts(&pool, alice.id)
+            .await
+            .unwrap()
+            .get(&general.id),
+        Some(&2)
+    );
+
+    // Marking the board seen (watermark past every post) clears Alice's unread.
+    let future = now_unix() + 3600;
+    boards::mark_board_seen(&pool, alice.id, general.id, future)
+        .await
+        .unwrap();
+    assert!(
+        boards::unread_counts(&pool, alice.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // The watermark only moves forward: an earlier mark can't reveal old posts.
+    boards::mark_board_seen(&pool, alice.id, general.id, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        boards::last_seen(&pool, alice.id, general.id)
+            .await
+            .unwrap(),
+        future
+    );
+    assert!(
+        boards::unread_counts(&pool, alice.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();

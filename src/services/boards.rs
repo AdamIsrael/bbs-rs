@@ -98,6 +98,63 @@ pub async fn list_thread(pool: &SqlitePool, board_id: i64) -> Result<Vec<ThreadI
     Ok(order)
 }
 
+// ---- Unread tracking ("new since last call") ---------------------------
+
+/// The Unix timestamp up to which `user_id` has seen `board_id`, or `0` if the
+/// user has never opened that board.
+pub async fn last_seen(pool: &SqlitePool, user_id: i64, board_id: i64) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT last_seen_at FROM user_board_seen WHERE user_id = ? AND board_id = ?",
+    )
+    .bind(user_id)
+    .bind(board_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(0))
+}
+
+/// Record that `user_id` has seen `board_id` as of `at` (Unix seconds). The
+/// watermark only moves forward, so an out-of-order call can't hide messages.
+pub async fn mark_board_seen(
+    pool: &SqlitePool,
+    user_id: i64,
+    board_id: i64,
+    at: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO user_board_seen (user_id, board_id, last_seen_at) VALUES (?, ?, ?) \
+         ON CONFLICT(user_id, board_id) DO UPDATE SET last_seen_at = MAX(last_seen_at, excluded.last_seen_at)",
+    )
+    .bind(user_id)
+    .bind(board_id)
+    .bind(at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Unread message counts for `user_id`, keyed by board id. A message is unread
+/// if it is newer than the user's watermark for its board and was written by
+/// someone else (your own posts never count as unread). Boards with no unread
+/// messages are omitted from the map.
+pub async fn unread_counts(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<std::collections::HashMap<i64, i64>> {
+    let rows = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT m.board_id, COUNT(*) \
+         FROM messages m \
+         LEFT JOIN user_board_seen s ON s.user_id = ? AND s.board_id = m.board_id \
+         WHERE m.author_id != ? AND m.created_at > COALESCE(s.last_seen_at, 0) \
+         GROUP BY m.board_id",
+    )
+    .bind(user_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 pub async fn get_message(pool: &SqlitePool, id: i64) -> Result<Message> {
     sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
