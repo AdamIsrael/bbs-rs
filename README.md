@@ -12,7 +12,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Accounts** — a shared limited `guest/guest` account plus in-TUI registration of real users
   (passwords hashed with argon2, stored in SQLite).
 - **Public-key auth** — registered users can attach SSH keys and log in without a password.
-- **Message boards** — browse boards, read messages, and (registered users) post.
+- **Message boards** — browse boards, read messages, and (registered users) post; **reply threads**
+  render as an indented conversation tree.
 - **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.

@@ -41,7 +41,7 @@ These are done and are the substrate several roadmap items build on:
 
 | Feature | Size | What & why | Depends on / status |
 |---|---|---|---|
-| [**Message threading / replies**](https://github.com/AdamIsrael/bbs-rs/issues/8) | M | Reply-to chains so boards read as conversations. | `messages.parent_id`; reader/threaded-list UI. |
+| [**Message threading / replies**](https://github.com/AdamIsrael/bbs-rs/issues/8) | M | Reply-to chains so boards read as conversations. | **Shipped**: `messages.parent_id`; `r` to reply (auto `Re:`); the message list renders threads depth-first with indentation. |
 | [**Unread / "new since last call"**](https://github.com/AdamIsrael/bbs-rs/issues/9) | M | Track last-seen per user/board and highlight new messages. | `user_board_seen` table; the `logins` table already gives "last call". |
 | [**Full-text search**](https://github.com/AdamIsrael/bbs-rs/issues/10) | M | Search boards (and maybe mail) by keyword. | SQLite FTS5 virtual table over `messages`. |
 | [**User profiles & signatures**](https://github.com/AdamIsrael/bbs-rs/issues/11) | M | Real name, location, tagline, signature, last-seen; shown on posts and a profile screen. | Extend `users`; a profile screen + editor. |

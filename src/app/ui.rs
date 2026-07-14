@@ -240,14 +240,26 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     let lines: Vec<Line> = app
         .messages
         .iter()
-        .map(|m| {
-            let pin = if m.pinned { "📌 " } else { "   " };
+        .map(|item| {
+            let m = &item.message;
+            // Indent replies; a reply gets a "↳" marker in place of the pin.
+            let indent = "  ".repeat(item.depth as usize);
+            let lead = if item.depth > 0 {
+                "↳ "
+            } else if m.pinned {
+                "📌 "
+            } else {
+                "  "
+            };
+            let subj_width = 34usize.saturating_sub(indent.len() + lead.chars().count());
             Line::from(format!(
-                "{}{:<32} {:<12} {}",
-                pin,
-                truncate(&m.subject, 32),
+                "{}{}{:<width$} {:<12} {}",
+                indent,
+                lead,
+                truncate(&m.subject, subj_width.max(8)),
                 truncate(&m.author_name, 12),
-                fmt_time(m.created_at)
+                fmt_time(m.created_at),
+                width = subj_width.max(8),
             ))
         })
         .collect();
@@ -623,14 +635,19 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
         }
         Screen::MessageList => {
             if is_admin {
-                " ↑/↓ move · Enter read · n post · p pin · d delete · Esc back "
+                " ↑/↓ · Enter read · n post · r reply · p pin · d delete · Esc back "
             } else {
-                " ↑/↓ move · Enter read · n new post · Esc back "
+                " ↑/↓ · Enter read · n post · r reply · Esc back "
             }
         }
-        Screen::ReadMessage | Screen::ReadMail | Screen::ReadBulletin | Screen::Help => {
-            " Esc back "
+        Screen::ReadMessage => {
+            if is_admin {
+                " r reply · d delete · Esc back "
+            } else {
+                " r reply · Esc back "
+            }
         }
+        Screen::ReadMail | Screen::ReadBulletin | Screen::Help => " Esc back ",
         Screen::ComposePost | Screen::ComposeMail | Screen::Register => {
             " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel "
         }

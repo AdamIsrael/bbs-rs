@@ -163,6 +163,8 @@ pub struct Message {
     pub created_at: i64,
     /// Pinned messages sort to the top of a board (moderator highlight).
     pub pinned: bool,
+    /// The message this one replies to, or `None` for a top-level post.
+    pub parent_id: Option<i64>,
 }
 
 /// A private message joined with the sender's name (`from_name`).
