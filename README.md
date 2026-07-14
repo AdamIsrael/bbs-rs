@@ -21,8 +21,10 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **File areas** — browsable download areas with role ACLs, per-user storage quotas, and file-type
   limits; **read text files and peek inside archives** (zip / tar.gz / gz) in the TUI, and
   **transfer over SFTP** (`sftp user@host`).
+- **User profiles** — real name, location, tagline, and a **signature** shown beneath your posts;
+  a profile screen also shows member-since, last-on, and post count. View others' profiles from Who's Online.
 - **Private mail** — send and read user-to-user messages.
-- **Who's online** — a live view of currently-connected users.
+- **Who's online** — a live view of currently-connected users; open a user's profile from here.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
 - **Access control** — three roles (`guest` / `user` / `admin`); admins get an in-BBS admin view.
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.

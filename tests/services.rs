@@ -335,6 +335,74 @@ async fn unread_counts_and_watermark() {
 }
 
 #[tokio::test]
+async fn profiles_update_and_stats() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, boards, profiles};
+    let pool = setup().await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // A fresh profile is blank with zero posts and no recorded login.
+    let p = profiles::get_profile(&pool, alice.id).await.unwrap();
+    assert_eq!(p.username, "alice");
+    assert_eq!(p.real_name, "");
+    assert_eq!(p.post_count, 0);
+    assert_eq!(p.last_login, None);
+
+    // Update fields (trimmed) and read them back, including by username.
+    profiles::update_profile(&pool, alice.id, "  Alice A  ", "Toronto", "hi", "cheers")
+        .await
+        .unwrap();
+    let p = profiles::get_profile_by_name(&pool, "alice").await.unwrap();
+    assert_eq!(p.real_name, "Alice A");
+    assert_eq!(p.location, "Toronto");
+    assert_eq!(
+        profiles::signature_of(&pool, alice.id).await.unwrap(),
+        "cheers"
+    );
+
+    // Posting bumps the counted post total.
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "s",
+        "b",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        profiles::get_profile(&pool, alice.id)
+            .await
+            .unwrap()
+            .post_count,
+        1
+    );
+
+    // An over-long field is rejected (nothing is silently truncated).
+    let long = "x".repeat(profiles::MAX_TAGLINE + 1);
+    assert!(matches!(
+        profiles::update_profile(&pool, alice.id, "", "", &long, "").await,
+        Err(AppError::FieldTooLong("Tagline", _))
+    ));
+
+    // Unknown user id has no profile.
+    assert!(matches!(
+        profiles::get_profile(&pool, 999_999).await,
+        Err(AppError::NotFound)
+    ));
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();

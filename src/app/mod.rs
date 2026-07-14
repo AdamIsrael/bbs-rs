@@ -22,6 +22,7 @@ use crate::error::AppError;
 use crate::services::archive::{self, ArchiveEntry, Preview};
 use crate::services::boards::ThreadItem;
 use crate::services::presence::{OnlineUser, Presence};
+use crate::services::profiles::{self, Profile};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
 use crate::transport::Event;
@@ -69,8 +70,16 @@ pub struct App {
     /// than this (and not the viewer's own) is highlighted as new. `i64::MAX`
     /// suppresses highlighting (guests, or before a board is opened).
     msg_seen_threshold: i64,
+    /// The signature of the message currently being read (empty if none), shown
+    /// beneath its body.
+    pub current_msg_signature: String,
     /// When composing, the message being replied to (None = new thread).
     reply_parent: Option<i64>,
+
+    // Profiles
+    pub current_profile: Option<Profile>,
+    /// Where the profile screen returns to (main menu, or who's-online).
+    profile_back: Screen,
 
     // Mail
     pub mails: Vec<Mail>,
@@ -79,6 +88,7 @@ pub struct App {
 
     // Who's online
     pub online: Vec<OnlineUser>,
+    pub who_sel: usize,
 
     // SSH keys (the current user's own)
     pub user_keys: Vec<UserKey>,
@@ -133,6 +143,10 @@ impl App {
         if f.who_online {
             menu.push(MenuItem::Who);
         }
+        // Profiles are for real accounts; the shared guest account has none.
+        if !user.is_guest() {
+            menu.push(MenuItem::Profile);
+        }
         if f.file_areas {
             menu.push(MenuItem::Files);
         }
@@ -171,11 +185,15 @@ impl App {
             msg_sel: 0,
             current_message: None,
             msg_seen_threshold: i64::MAX,
+            current_msg_signature: String::new(),
             reply_parent: None,
+            current_profile: None,
+            profile_back: Screen::MainMenu,
             mails: Vec::new(),
             mail_sel: 0,
             current_mail: None,
             online: Vec::new(),
+            who_sel: 0,
             user_keys: Vec::new(),
             key_sel: 0,
             file_areas: Vec::new(),
@@ -223,6 +241,8 @@ impl App {
             Screen::ReadMail => self.on_reader(key, Screen::Mailbox),
             Screen::ComposeMail => self.on_compose_mail(key).await,
             Screen::WhoOnline => self.on_who(key).await,
+            Screen::Profile => self.on_profile(key).await,
+            Screen::EditProfile => self.on_edit_profile(key).await,
             Screen::FileAreas => self.on_file_areas(key).await,
             Screen::FileList => self.on_file_list(key).await,
             Screen::FileDetail => self.on_file_detail(key).await,
@@ -266,6 +286,7 @@ impl App {
                 }
             }
             MenuItem::Who => self.open_who().await,
+            MenuItem::Profile => self.open_profile(self.user.id, Screen::MainMenu).await,
             MenuItem::Files => self.open_file_areas().await,
             MenuItem::Keys => self.open_keys().await,
             MenuItem::Register => {
@@ -610,6 +631,10 @@ impl App {
                 if let Some(item) = self.messages.get(self.msg_sel) {
                     match boards::get_message(&self.pool, item.message.id).await {
                         Ok(full) => {
+                            self.current_msg_signature =
+                                profiles::signature_of(&self.pool, full.author_id)
+                                    .await
+                                    .unwrap_or_default();
                             self.current_message = Some(full);
                             self.screen = Screen::ReadMessage;
                         }
@@ -881,14 +906,135 @@ impl App {
 
     async fn open_who(&mut self) {
         self.online = self.presence.list().await;
+        self.who_sel = 0;
         self.screen = Screen::WhoOnline;
     }
 
     async fn on_who(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('r') => self.online = self.presence.list().await,
+            KeyCode::Up => self.who_sel = self.who_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.who_sel = (self.who_sel + 1).min(self.online.len().saturating_sub(1))
+            }
+            KeyCode::Char('r') => {
+                self.online = self.presence.list().await;
+                self.who_sel = self.who_sel.min(self.online.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                if let Some(u) = self.online.get(self.who_sel) {
+                    let name = u.username.clone();
+                    self.open_profile_by_name(&name, Screen::WhoOnline).await;
+                }
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
+        }
+    }
+
+    // ---- Profiles --------------------------------------------------------
+
+    /// Load and show a profile by user id, remembering where to return.
+    async fn open_profile(&mut self, user_id: i64, back: Screen) {
+        match profiles::get_profile(&self.pool, user_id).await {
+            Ok(p) => {
+                self.current_profile = Some(p);
+                self.profile_back = back;
+                self.screen = Screen::Profile;
+            }
+            Err(e) => self.status = format!("Error loading profile: {e}"),
+        }
+    }
+
+    /// Load and show a profile by username (e.g. from who's-online).
+    async fn open_profile_by_name(&mut self, username: &str, back: Screen) {
+        match profiles::get_profile_by_name(&self.pool, username).await {
+            Ok(p) => {
+                self.current_profile = Some(p);
+                self.profile_back = back;
+                self.screen = Screen::Profile;
+            }
+            Err(e) => self.status = format!("Error loading profile: {e}"),
+        }
+    }
+
+    /// True when the shown profile is the viewer's own (and thus editable).
+    fn viewing_own_profile(&self) -> bool {
+        self.current_profile
+            .as_ref()
+            .is_some_and(|p| p.user_id == self.user.id)
+    }
+
+    /// Whether the currently-shown profile can be edited (own, non-guest).
+    pub fn can_edit_current_profile(&self) -> bool {
+        self.viewing_own_profile() && !self.user.is_guest()
+    }
+
+    async fn on_profile(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('e') if self.viewing_own_profile() && !self.user.is_guest() => {
+                self.begin_edit_profile()
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.profile_back,
+            _ => {}
+        }
+    }
+
+    fn begin_edit_profile(&mut self) {
+        // Edit is gated on a shown, own profile, so this is always Some.
+        let Some(p) = self.current_profile.clone() else {
+            return;
+        };
+        let mut fields = vec![
+            Field::new("Real name", false),
+            Field::new("Location", false),
+            Field::new("Tagline", false),
+            Field::new("Signature", false),
+        ];
+        fields[0].value = p.real_name;
+        fields[1].value = p.location;
+        fields[2].value = p.tagline;
+        fields[3].value = p.signature;
+        self.form = Form::new(fields);
+        self.screen = Screen::EditProfile;
+    }
+
+    async fn on_edit_profile(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Profile,
+            KeyCode::Enter if self.form.on_last() => self.submit_profile().await,
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.form.next_field(),
+            KeyCode::BackTab | KeyCode::Up => self.form.prev_field(),
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_profile(&mut self) {
+        let (real_name, location, tagline, signature) = (
+            self.form.value(0).to_string(),
+            self.form.value(1).to_string(),
+            self.form.value(2).to_string(),
+            self.form.value(3).to_string(),
+        );
+        match profiles::update_profile(
+            &self.pool,
+            self.user.id,
+            &real_name,
+            &location,
+            &tagline,
+            &signature,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.open_profile(self.user.id, self.profile_back).await;
+                self.status = "Profile updated.".into();
+            }
+            Err(e) => {
+                self.status = format!("Could not update profile: {e}");
+                // Stay on the form so the user can fix an over-long field.
+            }
         }
     }
 

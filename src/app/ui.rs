@@ -35,6 +35,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ReadMail => render_read_mail(f, body, app),
         Screen::ComposeMail => render_form(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
+        Screen::Profile => render_profile(f, body, app),
+        Screen::EditProfile => render_form(f, body, " Edit Profile ", app),
         Screen::FileAreas => render_file_areas(f, body, app),
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
@@ -72,7 +74,12 @@ fn render_title(f: &mut Frame, area: Rect, app: &App) {
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if app.status.is_empty() {
         (
-            hints(app.screen, app.user.is_admin(), app.can_edit_current_file()),
+            hints(
+                app.screen,
+                app.user.is_admin(),
+                app.can_edit_current_file(),
+                app.can_edit_current_profile(),
+            ),
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -304,12 +311,16 @@ fn render_read_message(f: &mut Frame, area: Rect, app: &App) {
     let Some(m) = &app.current_message else {
         return placeholder(f, area, " Message ", "Nothing to show.");
     };
-    let body = format!(
+    let mut body = format!(
         "From: {}\nDate: {}\n\n{}",
         m.author_name,
         fmt_time(m.created_at),
         m.body
     );
+    // Append the author's signature (usenet-style), if they have one.
+    if !app.current_msg_signature.is_empty() {
+        body.push_str(&format!("\n\n-- \n{}", app.current_msg_signature));
+    }
     let p = Paragraph::new(body)
         .block(Block::bordered().title(format!(" {} ", truncate(&m.subject, 60))))
         .wrap(Wrap { trim: false });
@@ -368,8 +379,59 @@ fn render_who(f: &mut Frame, area: Rect, app: &App) {
             ))
         })
         .collect();
-    // Not a selection list, but reuse the renderer with an out-of-range index.
-    render_selectable(f, area, " Who's Online ", lines, usize::MAX);
+    // Selectable so Enter can open the highlighted user's profile.
+    render_selectable(f, area, " Who's Online ", lines, app.who_sel);
+}
+
+fn render_profile(f: &mut Frame, area: Rect, app: &App) {
+    let Some(p) = &app.current_profile else {
+        return placeholder(f, area, " Profile ", "Nothing to show.");
+    };
+    let dash = |s: &str| {
+        if s.is_empty() {
+            "—".to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let last_on = p
+        .last_login
+        .map(fmt_time)
+        .unwrap_or_else(|| "—".to_string());
+    let mut lines = vec![
+        field_line("User", &format!("{} ({})", p.username, p.role)),
+        field_line("Real name", &dash(&p.real_name)),
+        field_line("Location", &dash(&p.location)),
+        field_line("Tagline", &dash(&p.tagline)),
+        Line::from(""),
+        field_line("Member since", &fmt_time(p.created_at)),
+        field_line("Last on", &last_on),
+        field_line("Posts", &p.post_count.to_string()),
+    ];
+    if !p.signature.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Signature",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(format!("-- {}", p.signature)));
+    }
+    let title = format!(" Profile · {} ", truncate(&p.username, 24));
+    let para = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title(title))
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+/// A `label: value` line with a dim label, for the profile view.
+fn field_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:>13}: "),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(value.to_string()),
+    ])
 }
 
 fn render_file_areas(f: &mut Frame, area: Rect, app: &App) {
@@ -639,6 +701,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadMail => "Reading Mail",
         Screen::ComposeMail => "Compose Mail",
         Screen::WhoOnline => "Who's Online",
+        Screen::Profile => "Profile",
+        Screen::EditProfile => "Edit Profile",
         Screen::FileAreas => "File Areas",
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
@@ -654,7 +718,7 @@ fn screen_name(screen: Screen) -> &'static str {
     }
 }
 
-fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
+fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: bool) -> String {
     let base = match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
@@ -686,7 +750,15 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
             " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel "
         }
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · Esc back ",
-        Screen::WhoOnline => " r refresh · Esc back ",
+        Screen::WhoOnline => " ↑/↓ move · Enter profile · r refresh · Esc back ",
+        Screen::Profile => {
+            if can_edit_profile {
+                " e edit · Esc back "
+            } else {
+                " Esc back "
+            }
+        }
+        Screen::EditProfile => " type · Tab/↑/↓ fields · Enter next/save · Esc cancel ",
         Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
         Screen::FileDetail => {
