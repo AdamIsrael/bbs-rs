@@ -34,6 +34,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Login audit** — every attempt (success or failure) is recorded with username, IP, and time.
 - **`bbsctl`** — an operator CLI for user management that works even when the server is down.
 - **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles.
+- **Themes & ANSI art** — pick a built-in color preset (or override individual colors), and drop in a
+  custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work).
 
 ## Run it
 
@@ -109,7 +111,26 @@ user_quota_bytes = 104857600   # per-user total (0 = unlimited), default 100 MiB
 allowed_extensions = []        # lowercase, no dot; empty allows any, e.g. ["txt","zip"]
 max_preview_bytes = 262144     # cap when reading/decompressing a file preview in the BBS
 max_archive_entries = 1000     # cap when listing an archive's entries
+
+[theme]      # colors (fully operator-customizable)
+preset = "classic"     # base: classic (default), mono, amber, matrix
+# Override any single color (name / "#ff8800" / 256-index "208"):
+# accent = "cyan"      # headings, tags, author names
+# highlight = "green"  # "new"/unread markers
+# title_fg / title_bg / warning_fg / warning_bg / dim
+
+[art]        # operator ANSI/text art (UTF-8 or classic CP437 .ans)
+dir = "art"            # art files live here (relative to the working dir)
+welcome = ""           # file shown on the main menu (blank = none)
+# [art.screens]        # optional per-screen header art (file per screen key)
+# board_list = "boards.ans"
+# file_areas = "files.ans"
 ```
+
+**Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.
+**Art** lets you drop in a welcome screen and per-screen headers — real CP437 `.ans` files and modern
+UTF-8 text with ANSI color escapes both render. See [`art/welcome.example.txt`](art/welcome.example.txt)
+for a starting point (`welcome = "welcome.example.txt"` to use it).
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
 (registration is reached from the guest session). `bbsctl` reads the same `bbs.toml` for its database

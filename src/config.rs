@@ -51,6 +51,49 @@ pub struct Settings {
     pub accounts: Accounts,
     pub limits: Limits,
     pub files: Files,
+    pub theme: ThemeConfig,
+    pub art: Art,
+}
+
+/// Operator-customizable color theme. `preset` names a built-in base
+/// ("classic", "mono", "amber", "matrix"); any other field, when set, overrides
+/// that one color. Colors are strings: a named color (`cyan`, `darkgray`, …),
+/// a 256-palette index (`"200"`), or a hex triple (`"#ff8800"`). Resolution to
+/// concrete colors lives in [`crate::app::theme`]; this struct is just the
+/// raw (all-optional) config so omitted fields inherit from the preset.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    pub preset: Option<String>,
+    pub title_fg: Option<String>,
+    pub title_bg: Option<String>,
+    pub accent: Option<String>,
+    pub highlight: Option<String>,
+    pub warning_fg: Option<String>,
+    pub warning_bg: Option<String>,
+    pub dim: Option<String>,
+}
+
+/// Operator-supplied ANSI/text art. Files live under `dir`; `welcome` is shown
+/// on the main menu, and `screens` maps a screen key (e.g. `board_list`,
+/// `file_areas`) to a file rendered as a header band on that screen. Real
+/// CP437 `.ans` art and UTF-8 text with ANSI color escapes are both supported.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Art {
+    pub dir: PathBuf,
+    pub welcome: String,
+    pub screens: std::collections::HashMap<String, String>,
+}
+
+impl Default for Art {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from("art"),
+            welcome: String::new(),
+            screens: std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// Branding shown to connected users.
@@ -446,6 +489,34 @@ allowed_extensions = []
 max_preview_bytes = 262144
 # Max entries listed from an archive.
 max_archive_entries = 1000
+
+[theme]
+# Color theme. `preset` picks a built-in base: classic (default), mono, amber,
+# or matrix. Uncomment any field below to override just that color. Colors are
+# a name (black, red, green, yellow, blue, magenta, cyan, gray, darkgray, the
+# light* variants, white, reset), a 256-palette index (\"208\"), or hex
+# (\"#ff8800\").
+preset = \"classic\"
+# title_fg = \"black\"     # title-bar text
+# title_bg = \"cyan\"      # title-bar background
+# accent = \"cyan\"        # headings, tags, author names
+# highlight = \"green\"    # \"new\"/unread markers
+# warning_fg = \"black\"   # status/warning text
+# warning_bg = \"yellow\"  # status/warning background
+# dim = \"darkgray\"       # secondary text, hints, labels
+
+[art]
+# ANSI/text art. Files live under `dir` (relative to the working dir). Real
+# CP437 .ans art and UTF-8 text with ANSI color escapes both work.
+dir = \"art\"
+# Shown on the main menu (a file name under `dir`; blank = none).
+welcome = \"\"
+# Optional per-screen header art: map a screen key to a file under `dir`.
+# Keys: main_menu, bulletins, board_list, message_list, mailbox, who_online,
+# profile, stats, search, file_areas, file_list, keys, help, admin.
+# [art.screens]
+# board_list = \"boards.ans\"
+# file_areas = \"files.ans\"
 ";
 
 #[cfg(test)]
@@ -473,6 +544,11 @@ mod tests {
             parsed.accounts.reserved_usernames,
             def.accounts.reserved_usernames
         );
+        // Theme/art sections parse; the template names the classic preset and
+        // the default art dir.
+        assert_eq!(parsed.theme.preset.as_deref(), Some("classic"));
+        assert_eq!(parsed.art.dir, def.art.dir);
+        assert!(parsed.art.welcome.is_empty());
     }
 
     #[test]
