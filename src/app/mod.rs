@@ -205,7 +205,7 @@ impl App {
             Screen::ComposeOneliner => self.on_compose_oneliner(key).await,
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
-            Screen::ReadMessage => self.on_reader(key, Screen::MessageList),
+            Screen::ReadMessage => self.on_read_message(key).await,
             Screen::ComposePost => self.on_compose_post(key).await,
             Screen::Mailbox => self.on_mailbox(key).await,
             Screen::ReadMail => self.on_reader(key, Screen::Mailbox),
@@ -573,20 +573,45 @@ impl App {
         }
     }
 
-    /// Reply to the selected message: pre-fill an `Re:` subject and remember the
-    /// parent so `submit_post` files it under that message.
+    /// The read-a-message screen: reply, delete (admin), or go back.
+    async fn on_read_message(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('r') => {
+                if let Some(m) = self.current_message.clone() {
+                    self.begin_compose_post(Some((m.id, reply_subject(&m.subject))));
+                }
+            }
+            KeyCode::Char('d') if self.user.is_admin() => self.delete_current_message().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter => {
+                self.screen = Screen::MessageList
+            }
+            _ => {}
+        }
+    }
+
+    async fn delete_current_message(&mut self) {
+        let Some(m) = self.current_message.clone() else {
+            return;
+        };
+        match boards::delete_message(&self.pool, m.id).await {
+            Ok(true) => {
+                self.reload_messages().await;
+                self.screen = Screen::MessageList;
+                self.status = format!("Deleted post '{}'.", truncate_status(&m.subject));
+            }
+            Ok(false) => self.status = "Post already gone.".into(),
+            Err(e) => self.status = format!("Could not delete: {e}"),
+        }
+    }
+
+    /// Reply to the selected message (from the list): pre-fill an `Re:` subject
+    /// and remember the parent so `submit_post` files it under that message.
     fn begin_reply(&mut self) {
         let Some(item) = self.messages.get(self.msg_sel) else {
             return;
         };
-        let parent = &item.message;
-        let re = if parent.subject.to_ascii_lowercase().starts_with("re:") {
-            parent.subject.clone()
-        } else {
-            format!("Re: {}", parent.subject)
-        };
-        let parent_id = parent.id;
-        self.begin_compose_post(Some((parent_id, re)));
+        let (parent_id, subject) = (item.message.id, item.message.subject.clone());
+        self.begin_compose_post(Some((parent_id, reply_subject(&subject))));
     }
 
     /// Start composing a post (or a reply when `reply` is set), explaining up
@@ -1171,6 +1196,16 @@ impl App {
 }
 
 /// Trim a subject/title for inclusion in the one-line status bar.
+/// The subject for a reply: the parent's, prefixed with `Re: ` unless it
+/// already starts with one.
+fn reply_subject(subject: &str) -> String {
+    if subject.to_ascii_lowercase().starts_with("re:") {
+        subject.to_string()
+    } else {
+        format!("Re: {subject}")
+    }
+}
+
 fn truncate_status(s: &str) -> String {
     const MAX: usize = 40;
     if s.chars().count() <= MAX {

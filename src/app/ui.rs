@@ -640,9 +640,14 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool) -> String {
                 " ↑/↓ · Enter read · n post · r reply · Esc back "
             }
         }
-        Screen::ReadMessage | Screen::ReadMail | Screen::ReadBulletin | Screen::Help => {
-            " Esc back "
+        Screen::ReadMessage => {
+            if is_admin {
+                " r reply · d delete · Esc back "
+            } else {
+                " r reply · Esc back "
+            }
         }
+        Screen::ReadMail | Screen::ReadBulletin | Screen::Help => " Esc back ",
         Screen::ComposePost | Screen::ComposeMail | Screen::Register => {
             " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel "
         }
