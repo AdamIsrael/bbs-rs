@@ -31,6 +31,9 @@ pub enum AppError {
     #[error("oneliner must be 1–{0} characters")]
     OnelinerLength(usize),
 
+    #[error("{0} is too long (max {1} characters)")]
+    FieldTooLong(&'static str, usize),
+
     #[error("you're doing that too quickly — please slow down")]
     RateLimited,
 
