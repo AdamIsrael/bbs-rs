@@ -223,10 +223,19 @@ fn render_boards(f: &mut Frame, area: Rect, app: &App) {
             if b.min_read_role != "guest" {
                 flags.push_str(&format!(" [{}+ to read]", b.min_read_role));
             }
-            Line::from(vec![
+            let mut spans = vec![
                 Span::raw(format!("{:<16} {}", b.name, b.description)),
                 Span::styled(flags, Style::default().fg(Color::DarkGray)),
-            ])
+            ];
+            if let Some(&n) = app.board_unread.get(&b.id).filter(|&&n| n > 0) {
+                spans.push(Span::styled(
+                    format!("  ({n} new)"),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     render_selectable(f, area, " Boards ", lines, app.board_sel);
@@ -262,15 +271,30 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                 "  "
             };
             let subj_width = 34usize.saturating_sub(indent.len() + lead.chars().count());
-            Line::from(format!(
-                "{}{}{:<width$} {:<12} {}",
+            // "New since last call": posted after the watermark and not by the
+            // viewer. Flagged with a leading dot and a green subject.
+            let is_new = m.created_at > app.msg_seen_threshold && m.author_id != app.user.id;
+            let marker = if is_new { "•" } else { " " };
+            let row = format!(
+                "{}{}{}{:<width$} {:<12} {}",
+                marker,
                 indent,
                 lead,
                 truncate(&m.subject, subj_width.max(8)),
                 truncate(&m.author_name, 12),
                 fmt_time(m.created_at),
                 width = subj_width.max(8),
-            ))
+            );
+            if is_new {
+                Line::from(Span::styled(
+                    row,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(row)
+            }
         })
         .collect();
     render_selectable(f, area, &title, lines, app.msg_sel);

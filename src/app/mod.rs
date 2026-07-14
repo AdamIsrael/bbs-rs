@@ -25,6 +25,7 @@ use crate::services::presence::{OnlineUser, Presence};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
 use crate::transport::Event;
+use crate::util::now_unix;
 
 use state::{Field, Form, MenuItem, Screen};
 
@@ -56,11 +57,18 @@ pub struct App {
     pub boards: Vec<Board>,
     pub board_sel: usize,
     pub current_board: Option<Board>,
+    /// Unread message counts per board id ("new since last call"), empty for
+    /// guests (whose shared account has no meaningful watermark).
+    pub board_unread: std::collections::HashMap<i64, i64>,
 
     // Messages (threaded: each item carries its reply depth)
     pub messages: Vec<ThreadItem>,
     pub msg_sel: usize,
     pub current_message: Option<Message>,
+    /// The current board's seen-watermark captured on open: a message newer
+    /// than this (and not the viewer's own) is highlighted as new. `i64::MAX`
+    /// suppresses highlighting (guests, or before a board is opened).
+    msg_seen_threshold: i64,
     /// When composing, the message being replied to (None = new thread).
     reply_parent: Option<i64>,
 
@@ -158,9 +166,11 @@ impl App {
             boards: Vec::new(),
             board_sel: 0,
             current_board: None,
+            board_unread: std::collections::HashMap::new(),
             messages: Vec::new(),
             msg_sel: 0,
             current_message: None,
+            msg_seen_threshold: i64::MAX,
             reply_parent: None,
             mails: Vec::new(),
             mail_sel: 0,
@@ -482,6 +492,7 @@ impl App {
             Ok(b) => {
                 self.boards = b;
                 self.board_sel = 0;
+                self.refresh_unread().await;
                 self.screen = Screen::BoardList;
             }
             Err(e) => self.status = format!("Error loading boards: {e}"),
@@ -494,6 +505,19 @@ impl App {
         if let Ok(b) = boards::list_readable_boards(&self.pool, &self.user.role).await {
             self.board_sel = self.board_sel.min(b.len().saturating_sub(1));
             self.boards = b;
+        }
+    }
+
+    /// Refresh per-board unread counts ("new since last call"). Guests share a
+    /// single account with no meaningful watermark, so they get no counts.
+    async fn refresh_unread(&mut self) {
+        if self.user.is_guest() {
+            self.board_unread.clear();
+            return;
+        }
+        match boards::unread_counts(&self.pool, self.user.id).await {
+            Ok(counts) => self.board_unread = counts,
+            Err(e) => self.status = format!("Error loading unread: {e}"),
         }
     }
 
@@ -536,6 +560,23 @@ impl App {
     async fn open_board(&mut self, board: Board) {
         match boards::list_thread(&self.pool, board.id).await {
             Ok(m) => {
+                // Capture the pre-visit watermark so this session's render can
+                // highlight what's new, then advance it so the board list's
+                // unread count clears on return. Guests don't track state.
+                if self.user.is_guest() {
+                    self.msg_seen_threshold = i64::MAX;
+                } else {
+                    self.msg_seen_threshold = boards::last_seen(&self.pool, self.user.id, board.id)
+                        .await
+                        .unwrap_or(0);
+                    if let Err(e) =
+                        boards::mark_board_seen(&self.pool, self.user.id, board.id, now_unix())
+                            .await
+                    {
+                        self.status = format!("Error marking board seen: {e}");
+                    }
+                    self.board_unread.remove(&board.id);
+                }
                 self.messages = m;
                 self.msg_sel = 0;
                 self.current_board = Some(board);
@@ -581,7 +622,12 @@ impl App {
             // Admin moderation on the selected post.
             KeyCode::Char('d') if self.user.is_admin() => self.delete_selected_message().await,
             KeyCode::Char('p') if self.user.is_admin() => self.toggle_pin_selected().await,
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::BoardList,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
+                // Recompute unread so this board's count clears (and any posts
+                // that arrived while reading are reflected) on the board list.
+                self.refresh_unread().await;
+                self.screen = Screen::BoardList;
+            }
             _ => {}
         }
     }
