@@ -178,19 +178,27 @@ fn render_oneliners(f: &mut Frame, area: Rect, app: &App) {
             "The wall is empty. Press 'n' to add one.",
         );
     }
-    let lines: Vec<Line> = app
-        .oneliners
-        .iter()
-        .map(|o| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{:>12}: ", truncate(&o.author_name, 12)),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(truncate(&o.body, 80)),
-            ])
-        })
-        .collect();
+    // `author:` prefix is a fixed 14-column gutter (`{:>12}: `); wrap the body
+    // to the remaining width and hang-indent continuation lines under it so a
+    // long oneliner flows onto the next row instead of running off screen.
+    const GUTTER: usize = 14;
+    let inner = area.width.saturating_sub(2) as usize; // minus borders
+    let body_width = inner.saturating_sub(GUTTER).max(1);
+    let mut lines: Vec<Line> = Vec::new();
+    for o in &app.oneliners {
+        let wrapped = wrap_text(&o.body, body_width);
+        let prefix = Span::styled(
+            format!("{:>12}: ", truncate(&o.author_name, 12)),
+            Style::default().fg(Color::Cyan),
+        );
+        lines.push(Line::from(vec![
+            prefix,
+            Span::raw(wrapped.first().cloned().unwrap_or_default()),
+        ]));
+        for cont in wrapped.into_iter().skip(1) {
+            lines.push(Line::from(format!("{:GUTTER$}{cont}", "")));
+        }
+    }
     // A read-only wall: reuse the list renderer with no selection highlight.
     render_selectable(f, area, " Oneliners ", lines, usize::MAX);
 }
@@ -689,6 +697,54 @@ fn human_size(bytes: i64) -> String {
     }
 }
 
+/// Word-wrap `s` to `width` columns (char-counted), breaking on whitespace and
+/// hard-splitting any single word longer than `width`. Returns at least one
+/// line (empty input yields `[""]`). Used for the read-only oneliners wall.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    for word in s.split_whitespace() {
+        let wlen = word.chars().count();
+        // A word wider than the line: flush, then hard-split it.
+        if wlen > width {
+            if cur_len > 0 {
+                lines.push(std::mem::take(&mut cur));
+                cur_len = 0;
+            }
+            let mut chunk = String::new();
+            for c in word.chars() {
+                chunk.push(c);
+                if chunk.chars().count() == width {
+                    lines.push(std::mem::take(&mut chunk));
+                }
+            }
+            if !chunk.is_empty() {
+                cur = chunk;
+                cur_len = cur.chars().count();
+            }
+            continue;
+        }
+        let sep = if cur_len == 0 { 0 } else { 1 };
+        if cur_len + sep + wlen > width {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_len = wlen;
+        } else {
+            if sep == 1 {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+            cur_len += sep + wlen;
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -696,5 +752,47 @@ fn truncate(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text;
+
+    #[test]
+    fn wraps_on_word_boundaries() {
+        assert_eq!(
+            wrap_text("the quick brown fox", 9),
+            vec!["the quick", "brown fox"]
+        );
+    }
+
+    #[test]
+    fn short_input_is_single_line() {
+        assert_eq!(wrap_text("hello", 80), vec!["hello"]);
+    }
+
+    #[test]
+    fn empty_input_yields_one_empty_line() {
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn hard_splits_overlong_word() {
+        // A 10-char word with width 4 splits into 4 + 4 + 2.
+        assert_eq!(wrap_text("aaaabbbbcc", 4), vec!["aaaa", "bbbb", "cc"]);
+    }
+
+    #[test]
+    fn overlong_word_after_text_flushes_first() {
+        assert_eq!(wrap_text("hi aaaabbbb", 4), vec!["hi", "aaaa", "bbbb"]);
+    }
+
+    #[test]
+    fn never_exceeds_width() {
+        let s = "supercalifragilistic expialidocious and some more words here";
+        for line in wrap_text(s, 12) {
+            assert!(line.chars().count() <= 12, "line too wide: {line:?}");
+        }
     }
 }
