@@ -2,7 +2,7 @@
 //! the compose/register screens.
 
 /// Which screen the session is currently showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Screen {
     MainMenu,
     Bulletins,

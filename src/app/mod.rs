@@ -1,18 +1,23 @@
 //! The transport-agnostic TUI application: state, the async event loop, and
 //! per-screen key handling. Rendering lives in [`ui`].
 
+pub mod ansi;
 pub mod state;
+pub mod theme;
 pub mod ui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::text::Text;
 use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc::Receiver;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use crate::app::theme::Theme;
 
 use crate::config::Settings;
 use crate::db::models::{
@@ -37,6 +42,11 @@ pub struct App {
     pool: SqlitePool,
     presence: Presence,
     pub config: Arc<Settings>,
+    /// Resolved color theme (from `config.theme`).
+    pub theme: Theme,
+    /// Operator ANSI/text art, keyed by the screen it heads (the main-menu
+    /// welcome art is stored under `Screen::MainMenu`). Empty when unconfigured.
+    pub art: HashMap<Screen, Text<'static>>,
     pub user: User,
     session_id: usize,
 
@@ -175,10 +185,14 @@ impl App {
         }
         menu.push(MenuItem::Help);
         menu.push(MenuItem::Quit);
+        let theme = Theme::resolve(&config.theme);
+        let art = load_art(&config.art);
         Self {
             pool,
             presence,
             config,
+            theme,
+            art,
             user,
             session_id,
             screen: Screen::MainMenu,
@@ -1571,6 +1585,74 @@ fn reply_subject(subject: &str) -> String {
     } else {
         format!("Re: {subject}")
     }
+}
+
+/// Map an `[art.screens]` config key to the screen it heads. Unknown keys
+/// return `None` (skipped with a warning).
+fn screen_from_art_key(key: &str) -> Option<Screen> {
+    Some(match key.trim().to_ascii_lowercase().as_str() {
+        "main_menu" => Screen::MainMenu,
+        "bulletins" => Screen::Bulletins,
+        "board_list" | "boards" => Screen::BoardList,
+        "message_list" | "messages" => Screen::MessageList,
+        "mailbox" | "mail" => Screen::Mailbox,
+        "who_online" | "who" => Screen::WhoOnline,
+        "profile" => Screen::Profile,
+        "stats" => Screen::Stats,
+        "search" => Screen::SearchResults,
+        "file_areas" | "files" => Screen::FileAreas,
+        "file_list" => Screen::FileList,
+        "keys" => Screen::Keys,
+        "help" => Screen::Help,
+        "admin" => Screen::AdminUsers,
+        _ => return None,
+    })
+}
+
+/// Load operator art into per-screen [`Text`]. `welcome` heads the main menu;
+/// `screens` maps keys to files. Missing/oversized files are logged and skipped
+/// so a bad art path never breaks a session. Files are read once at login.
+fn load_art(cfg: &crate::config::Art) -> HashMap<Screen, Text<'static>> {
+    /// Cap on a single art file, so a pathological file can't blow up memory.
+    const MAX_ART_BYTES: u64 = 256 * 1024;
+
+    let mut out = HashMap::new();
+    let mut load = |screen: Screen, file: &str| {
+        let file = file.trim();
+        if file.is_empty() {
+            return;
+        }
+        let path = cfg.dir.join(file);
+        match std::fs::metadata(&path) {
+            Ok(m) if m.len() > MAX_ART_BYTES => {
+                tracing::warn!(
+                    "art file {} exceeds {MAX_ART_BYTES} bytes; skipping",
+                    path.display()
+                );
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("cannot read art file {}: {e}", path.display());
+                return;
+            }
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                out.insert(screen, ansi::to_text(&bytes));
+            }
+            Err(e) => tracing::warn!("cannot read art file {}: {e}", path.display()),
+        }
+    };
+
+    load(Screen::MainMenu, &cfg.welcome);
+    for (key, file) in &cfg.screens {
+        match screen_from_art_key(key) {
+            Some(screen) => load(screen, file),
+            None => tracing::warn!("unknown [art.screens] key: {key:?}"),
+        }
+    }
+    out
 }
 
 fn truncate_status(s: &str) -> String {

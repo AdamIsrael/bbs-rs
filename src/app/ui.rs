@@ -20,7 +20,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     render_title(f, chunks[0], app);
 
-    let body = chunks[1];
+    // If the operator configured art for this screen, render it as a header
+    // band above the screen body (capped so it can't crowd out the content).
+    let body = render_art_header(f, chunks[1], app);
     match app.screen {
         Screen::MainMenu => render_main_menu(f, body, app),
         Screen::Bulletins => render_bulletins(f, body, app),
@@ -67,11 +69,31 @@ fn render_title(f: &mut Frame, area: Rect, app: &App) {
     );
     let bar = Paragraph::new(title).style(
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(app.theme.title_fg)
+            .bg(app.theme.title_bg)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(bar, area);
+}
+
+/// Draw the configured art for `app.screen` as a header band at the top of
+/// `area`, returning the remaining area for the screen's own content. Returns
+/// `area` unchanged when there's no art (or no room for it).
+fn render_art_header(f: &mut Frame, area: Rect, app: &App) -> Rect {
+    /// Never let art take more than this many rows (leave room for content).
+    const MAX_ART_ROWS: u16 = 16;
+    let Some(art) = app.art.get(&app.screen) else {
+        return area;
+    };
+    // Leave at least one row for the screen body.
+    let want = art.lines.len() as u16;
+    let art_h = want.min(MAX_ART_ROWS).min(area.height.saturating_sub(1));
+    if art_h == 0 {
+        return area;
+    }
+    let rows = Layout::vertical([Constraint::Length(art_h), Constraint::Min(0)]).split(area);
+    f.render_widget(Paragraph::new(art.clone()), rows[0]);
+    rows[1]
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
@@ -83,12 +105,14 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 app.can_edit_current_file(),
                 app.can_edit_current_profile(),
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.dim),
         )
     } else {
         (
             format!(" {} ", app.status),
-            Style::default().fg(Color::Black).bg(Color::Yellow),
+            Style::default()
+                .fg(app.theme.warning_fg)
+                .bg(app.theme.warning_bg),
         )
     };
     f.render_widget(Paragraph::new(text).style(style), area);
@@ -116,27 +140,33 @@ fn render_selectable(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, s
 fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
     let bbs = &app.config.bbs;
 
-    // Branding / MOTD banner above the menu.
-    let mut banner: Vec<Line> = vec![Line::from(Span::styled(
-        bbs.name.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-    if !bbs.tagline.is_empty() {
-        banner.push(Line::from(Span::styled(
-            bbs.tagline.clone(),
-            Style::default().fg(Color::DarkGray),
-        )));
+    // When welcome art is configured it heads the screen (drawn as the art
+    // header), so skip the redundant text branding banner here.
+    let mut area = area;
+    if !app.art.contains_key(&Screen::MainMenu) {
+        // Branding / MOTD banner above the menu.
+        let mut banner: Vec<Line> = vec![Line::from(Span::styled(
+            bbs.name.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        if !bbs.tagline.is_empty() {
+            banner.push(Line::from(Span::styled(
+                bbs.tagline.clone(),
+                Style::default().fg(app.theme.dim),
+            )));
+        }
+        if !bbs.welcome.is_empty() {
+            banner.push(Line::from(""));
+            banner.push(Line::from(bbs.welcome.clone()));
+        }
+        let banner_h = banner.len() as u16 + 2; // + borders
+        let rows = Layout::vertical([Constraint::Length(banner_h), Constraint::Min(1)]).split(area);
+        let banner_widget = Paragraph::new(Text::from(banner))
+            .block(Block::bordered())
+            .wrap(Wrap { trim: false });
+        f.render_widget(banner_widget, rows[0]);
+        area = rows[1];
     }
-    if !bbs.welcome.is_empty() {
-        banner.push(Line::from(""));
-        banner.push(Line::from(bbs.welcome.clone()));
-    }
-    let banner_h = banner.len() as u16 + 2; // + borders
-    let rows = Layout::vertical([Constraint::Length(banner_h), Constraint::Min(1)]).split(area);
-    let banner_widget = Paragraph::new(Text::from(banner))
-        .block(Block::bordered())
-        .wrap(Wrap { trim: false });
-    f.render_widget(banner_widget, rows[0]);
 
     let lines: Vec<Line> = app
         .menu
@@ -149,7 +179,7 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
             Line::from(label)
         })
         .collect();
-    render_selectable(f, rows[1], " Main Menu ", lines, app.menu_sel);
+    render_selectable(f, area, " Main Menu ", lines, app.menu_sel);
 }
 
 fn render_bulletins(f: &mut Frame, area: Rect, app: &App) {
@@ -201,7 +231,7 @@ fn render_oneliners(f: &mut Frame, area: Rect, app: &App) {
         let wrapped = wrap_text(&o.body, body_width);
         let prefix = Span::styled(
             format!("{:>12}: ", truncate(&o.author_name, 12)),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(app.theme.accent),
         );
         lines.push(Line::from(vec![
             prefix,
@@ -235,13 +265,13 @@ fn render_boards(f: &mut Frame, area: Rect, app: &App) {
             }
             let mut spans = vec![
                 Span::raw(format!("{:<16} {}", b.name, b.description)),
-                Span::styled(flags, Style::default().fg(Color::DarkGray)),
+                Span::styled(flags, Style::default().fg(app.theme.dim)),
             ];
             if let Some(&n) = app.board_unread.get(&b.id).filter(|&&n| n > 0) {
                 spans.push(Span::styled(
                     format!("  ({n} new)"),
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(app.theme.highlight)
                         .add_modifier(Modifier::BOLD),
                 ));
             }
@@ -299,7 +329,7 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                 Line::from(Span::styled(
                     row,
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(app.theme.highlight)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
@@ -401,21 +431,22 @@ fn render_profile(f: &mut Frame, area: Rect, app: &App) {
         .last_login
         .map(fmt_time)
         .unwrap_or_else(|| "—".to_string());
+    let dim = app.theme.dim;
     let mut lines = vec![
-        field_line("User", &format!("{} ({})", p.username, p.role)),
-        field_line("Real name", &dash(&p.real_name)),
-        field_line("Location", &dash(&p.location)),
-        field_line("Tagline", &dash(&p.tagline)),
+        field_line("User", &format!("{} ({})", p.username, p.role), dim),
+        field_line("Real name", &dash(&p.real_name), dim),
+        field_line("Location", &dash(&p.location), dim),
+        field_line("Tagline", &dash(&p.tagline), dim),
         Line::from(""),
-        field_line("Member since", &fmt_time(p.created_at)),
-        field_line("Last on", &last_on),
-        field_line("Posts", &p.post_count.to_string()),
+        field_line("Member since", &fmt_time(p.created_at), dim),
+        field_line("Last on", &last_on, dim),
+        field_line("Posts", &p.post_count.to_string(), dim),
     ];
     if !p.signature.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Signature",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(dim),
         )));
         lines.push(Line::from(format!("-- {}", p.signature)));
     }
@@ -426,13 +457,10 @@ fn render_profile(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
-/// A `label: value` line with a dim label, for the profile view.
-fn field_line(label: &str, value: &str) -> Line<'static> {
+/// A `label: value` line with a dim label, for the profile/stats views.
+fn field_line(label: &str, value: &str, dim: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label:>13}: "),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("{label:>13}: "), Style::default().fg(dim)),
         Span::raw(value.to_string()),
     ])
 }
@@ -441,18 +469,18 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
     let Some(s) = &app.stats else {
         return placeholder(f, area, " Stats ", "No stats yet.");
     };
+    let dim = app.theme.dim;
+    let accent = app.theme.accent;
     let heading = |text: &str| {
         Line::from(Span::styled(
             text.to_string(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ))
     };
     let mut lines = vec![
-        field_line("Users", &s.total_users.to_string()),
-        field_line("Posts", &s.total_posts.to_string()),
-        field_line("Calls", &s.total_calls.to_string()),
+        field_line("Users", &s.total_users.to_string(), dim),
+        field_line("Posts", &s.total_posts.to_string(), dim),
+        field_line("Calls", &s.total_calls.to_string(), dim),
         Line::from(""),
         heading("Top posters"),
     ];
@@ -501,7 +529,7 @@ fn render_search_results(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(
                     format!("[{}] ", truncate(&h.board_name, 12)),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(app.theme.accent),
                 ),
                 Span::raw(format!("{:<32} ", truncate(&h.subject, 32))),
                 Span::styled(
@@ -510,7 +538,7 @@ fn render_search_results(f: &mut Frame, area: Rect, app: &App) {
                         truncate(&h.author_name, 12),
                         fmt_time(h.created_at)
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.dim),
                 ),
             ])
         })

@@ -53,7 +53,7 @@ These are done and are the substrate several roadmap items build on:
 |---|---|---|---|
 | [**WebSocket + xterm.js HTTP frontend**](https://github.com/AdamIsrael/bbs-rs/issues/13) | L | Reach the BBS from a browser, reusing the whole TUI. | The app is already transport-agnostic (byte-sink + `Event` contract) with a reserved `web` seam. |
 | [**Door games / external programs**](https://github.com/AdamIsrael/bbs-rs/issues/14) | L | Launch classic door games or external programs per session. | Process spawning, drop-file/IO bridging, time limits. |
-| [**ANSI art menus & themes**](https://github.com/AdamIsrael/bbs-rs/issues/15) | M | Custom ANSI welcome screens and selectable color themes. | Theme in config; an ANSI loader. |
+| [**ANSI art menus & themes**](https://github.com/AdamIsrael/bbs-rs/issues/15) | M | Custom ANSI welcome screens and selectable color themes. | **Shipped**: a `[theme]` config section (built-in `classic`/`mono`/`amber`/`matrix` presets, plus per-color overrides in names/hex/256-index) drives all UI colors; `[art]` renders operator ANSI/text art (UTF-8 or CP437 `.ans`) as a main-menu welcome and optional per-screen headers. |
 | [**Notifications / RSS / export**](https://github.com/AdamIsrael/bbs-rs/issues/16) | M | New-mail notices, an RSS feed of a board, data export/backup. | Read-only projections over existing tables. |
 
 ---
