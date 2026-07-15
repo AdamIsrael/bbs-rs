@@ -5,7 +5,7 @@ use sqlx::sqlite::SqlitePool;
 use crate::config::Limits;
 use crate::db::models::{Mail, User};
 use crate::error::{AppError, Result};
-use crate::services::{auth, enforce_rate};
+use crate::services::{auth, enforce_len, enforce_rate};
 use crate::util::now_unix;
 
 /// All mail addressed to a user, newest first.
@@ -72,6 +72,8 @@ pub async fn send_mail(
     if from.is_guest() {
         return Err(AppError::GuestNotAllowed);
     }
+    enforce_len("Subject", subject, limits.max_subject_chars)?;
+    enforce_len("Message", body, limits.max_body_chars)?;
     if !from.is_admin()
         && let Some(since) = limits.window_start(now_unix())
     {

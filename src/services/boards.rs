@@ -10,7 +10,7 @@ use sqlx::sqlite::SqlitePool;
 use crate::config::Limits;
 use crate::db::models::{Board, Message, User};
 use crate::error::{AppError, Result};
-use crate::services::enforce_rate;
+use crate::services::{enforce_len, enforce_rate};
 use crate::util::now_unix;
 
 /// All boards, in id order.
@@ -196,6 +196,8 @@ pub async fn post_message(
     if author.is_guest() {
         return Err(AppError::GuestNotAllowed);
     }
+    enforce_len("Subject", subject, limits.max_subject_chars)?;
+    enforce_len("Message", body, limits.max_body_chars)?;
     let board = get_board(pool, board_id).await?;
     if board.locked && !author.is_admin() {
         return Err(AppError::BoardLocked);

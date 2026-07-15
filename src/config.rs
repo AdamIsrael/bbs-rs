@@ -233,6 +233,10 @@ pub struct Limits {
     pub max_mail: u32,
     /// Max oneliners per user per window (0 disables).
     pub max_oneliners: u32,
+    /// Max characters in a post/mail subject (0 disables).
+    pub max_subject_chars: usize,
+    /// Max characters in a post/mail body (0 disables).
+    pub max_body_chars: usize,
 }
 
 impl Default for Limits {
@@ -244,6 +248,8 @@ impl Default for Limits {
             max_posts: 5,
             max_mail: 10,
             max_oneliners: 8,
+            max_subject_chars: 120,
+            max_body_chars: 8000,
         }
     }
 }
@@ -496,6 +502,10 @@ max_posts = 5
 max_mail = 10
 # Max oneliners per user per window.
 max_oneliners = 8
+# Max characters in a post/mail subject (0 disables).
+max_subject_chars = 120
+# Max characters in a post/mail body (0 disables).
+max_body_chars = 8000
 
 [files]
 # Where uploaded file blobs are stored (relative to the working dir).
@@ -566,6 +576,11 @@ mod tests {
         assert_eq!(parsed.features.oneliners, def.features.oneliners);
         assert_eq!(parsed.features.pubkey_auth, def.features.pubkey_auth);
         assert_eq!(parsed.limits.max_posts, def.limits.max_posts);
+        assert_eq!(
+            parsed.limits.max_subject_chars,
+            def.limits.max_subject_chars
+        );
+        assert_eq!(parsed.limits.max_body_chars, def.limits.max_body_chars);
         assert_eq!(parsed.files.storage_dir, def.files.storage_dir);
         assert_eq!(parsed.files.max_file_bytes, def.files.max_file_bytes);
         assert_eq!(parsed.limits.window_secs, def.limits.window_secs);

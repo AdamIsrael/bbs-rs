@@ -60,9 +60,9 @@ These are done and are the substrate several roadmap items build on:
 
 ## Cross-cutting notes
 
-- [**Message/body length limits**](https://github.com/AdamIsrael/bbs-rs/issues/17) — none enforced
-  today (posts/mail bodies are unbounded). Add configurable limits (`features`/a new `limits`
-  section) alongside rate limiting.
+- [**Message/body length limits**](https://github.com/AdamIsrael/bbs-rs/issues/17) — **Shipped**:
+  `[limits]` gains `max_subject_chars` (120) and `max_body_chars` (8000), enforced on board posts and
+  mail (0 disables). Oneliners keep their own 120-char cap.
 - [**Backups**](https://github.com/AdamIsrael/bbs-rs/issues/18) — document/automate SQLite backup
   (`.backup` / file copy while quiesced).
 - [**Seeded content in config**](https://github.com/AdamIsrael/bbs-rs/issues/19) — default boards and
