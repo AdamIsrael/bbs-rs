@@ -48,6 +48,17 @@ pub async fn run(
     };
 
     let cwd = door.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+    // Ensure the working directory exists so the program can be spawned there
+    // and the drop file written; a configured but missing dir is created rather
+    // than failing the launch.
+    if let Err(e) = std::fs::create_dir_all(&cwd) {
+        say(&format!(
+            "\r\nCannot prepare the working directory {} for {}: {e}\r\n",
+            cwd.display(),
+            door.name
+        ));
+        return DoorExit::Returned;
+    }
     let drop_path = write_drop_file(door, user, bbs_name, sysop, &cwd);
 
     // Open a PTY sized to the client's terminal.
