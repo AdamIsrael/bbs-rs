@@ -735,6 +735,42 @@ async fn seed_uses_configured_boards_and_guest_password() {
 }
 
 #[tokio::test]
+async fn db_backup_into_produces_a_readable_copy() {
+    use bbs_rs::db;
+    use bbs_rs::services::{self, auth};
+
+    // A file-backed source DB (VACUUM INTO snapshots an on-disk database, as in
+    // production).
+    let dir = std::env::temp_dir().join(format!("bbs_bk_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.db");
+    let _ = std::fs::remove_file(&src);
+    let pool = db::connect(&format!("sqlite://{}?mode=rwc", src.display()))
+        .await
+        .unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    services::seed(&pool, &Default::default()).await.unwrap();
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    let dest = dir.join("snap.db");
+    let _ = std::fs::remove_file(&dest);
+    db::backup_into(&pool, &dest).await.unwrap();
+    assert!(dest.exists(), "backup file should be written");
+
+    // The snapshot opens as a valid database with the same data.
+    let bk = db::connect(&format!("sqlite://{}?mode=ro", dest.display()))
+        .await
+        .unwrap();
+    assert!(auth::find_user(&bk, "alice").await.unwrap().is_some());
+    assert!(auth::find_user(&bk, "guest").await.unwrap().is_some());
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&dest);
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();

@@ -199,7 +199,13 @@ bbsctl files <area>              # list files in an area
 bbsctl add-file <area> <user> <path> [--desc D]   # add a file (copied into storage_dir)
 bbsctl rm-file <id>              # remove a file (and its stored blob)
 bbsctl set-file-desc <id> <text> # set a file's description (SFTP uploads have none)
+bbsctl backup [--out DIR] [--files]   # snapshot the DB (and optionally file blobs)
 ```
+
+**Backups** (`bbsctl backup`) use SQLite's online `VACUUM INTO`, so they run **while the server is up**
+— no downtime. Each run writes a timestamped `DIR/bbs-<stamp>.db` (default `DIR` = `backups/`); with
+`--files` it also copies the file-area `storage_dir` to `DIR/files-<stamp>/`. `backup` never applies
+migrations or writes to the live database. Schedule it with cron/systemd for regular snapshots.
 
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
 normal account, then run `bbsctl role <that-user> admin`. Registration refuses reserved usernames —
