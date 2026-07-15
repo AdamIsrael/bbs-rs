@@ -53,6 +53,28 @@ pub struct Settings {
     pub files: Files,
     pub theme: ThemeConfig,
     pub art: Art,
+    pub web: Web,
+}
+
+/// Optional browser frontend: a WebSocket + xterm.js terminal that reuses the
+/// whole TUI. Disabled by default; enable and pick a bind address to serve it
+/// alongside SSH.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Web {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "0.0.0.0".into(),
+            port: 8080,
+        }
+    }
 }
 
 /// Operator-customizable color theme. `preset` names a built-in base
@@ -517,6 +539,13 @@ welcome = \"\"
 # [art.screens]
 # board_list = \"boards.ans\"
 # file_areas = \"files.ans\"
+
+[web]
+# Browser frontend: a WebSocket + xterm.js terminal that reuses the whole TUI,
+# served alongside SSH. Off by default.
+enabled = false
+host = \"0.0.0.0\"
+port = 8080
 ";
 
 #[cfg(test)]
@@ -549,6 +578,8 @@ mod tests {
         assert_eq!(parsed.theme.preset.as_deref(), Some("classic"));
         assert_eq!(parsed.art.dir, def.art.dir);
         assert!(parsed.art.welcome.is_empty());
+        assert_eq!(parsed.web.enabled, def.web.enabled);
+        assert_eq!(parsed.web.port, def.web.port);
     }
 
     #[test]

@@ -33,6 +33,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.
 - **Login audit** — every attempt (success or failure) is recorded with username, IP, and time.
 - **`bbsctl`** — an operator CLI for user management that works even when the server is down.
+- **Browser frontend** — an optional WebSocket + xterm.js web terminal (`[web] enabled = true`) that
+  reuses the whole TUI: same screens, same auth, same who's-online. xterm.js is vendored (self-contained).
 - **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles.
 - **Themes & ANSI art** — pick a built-in color preset (or override individual colors), and drop in a
   custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work).
@@ -125,12 +127,22 @@ welcome = ""           # file shown on the main menu (blank = none)
 # [art.screens]        # optional per-screen header art (file per screen key)
 # board_list = "boards.ans"
 # file_areas = "files.ans"
+
+[web]        # optional browser frontend (WebSocket + xterm.js), off by default
+enabled = false
+host = "0.0.0.0"
+port = 8080
 ```
 
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.
 **Art** lets you drop in a welcome screen and per-screen headers — real CP437 `.ans` files and modern
 UTF-8 text with ANSI color escapes both render. See [`art/welcome.example.txt`](art/welcome.example.txt)
 for a starting point (`welcome = "welcome.example.txt"` to use it).
+
+**Browser frontend**: set `[web] enabled = true` and browse to `http://<host>:<port>/` for the same BBS
+in a web terminal (try `guest` / `guest`). It shares the SSH server's users, login audit, bans, and
+who's-online. xterm.js ([MIT](https://github.com/xtermjs/xterm.js)) is vendored under `src/web/static/`,
+so the page is fully self-contained — no CDN at runtime.
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
 (registration is reached from the guest session). `bbsctl` reads the same `bbs.toml` for its database
