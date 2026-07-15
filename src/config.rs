@@ -54,6 +54,28 @@ pub struct Settings {
     pub theme: ThemeConfig,
     pub art: Art,
     pub web: Web,
+    pub oneliners: Oneliners,
+}
+
+/// Oneliners (graffiti wall) policy: how many entries to keep and the max post
+/// length. Separate from the `[features] oneliners` on/off toggle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Oneliners {
+    /// After each post, trim the wall to the most recent N entries (0 = keep
+    /// everything, no trimming).
+    pub max_entries: usize,
+    /// Max characters in a oneliner body (0 = no length cap).
+    pub max_length: usize,
+}
+
+impl Default for Oneliners {
+    fn default() -> Self {
+        Self {
+            max_entries: 200,
+            max_length: 120,
+        }
+    }
 }
 
 /// Optional browser frontend: a WebSocket + xterm.js terminal that reuses the
@@ -556,6 +578,12 @@ welcome = \"\"
 enabled = false
 host = \"0.0.0.0\"
 port = 8088
+
+[oneliners]
+# Graffiti-wall policy (separate from the [features] oneliners on/off toggle).
+# After each post the wall is trimmed to the most recent max_entries rows.
+max_entries = 200      # 0 = keep everything (no trimming)
+max_length = 120       # max characters per oneliner (0 = no cap)
 ";
 
 #[cfg(test)]
@@ -595,6 +623,8 @@ mod tests {
         assert!(parsed.art.welcome.is_empty());
         assert_eq!(parsed.web.enabled, def.web.enabled);
         assert_eq!(parsed.web.port, def.web.port);
+        assert_eq!(parsed.oneliners.max_entries, def.oneliners.max_entries);
+        assert_eq!(parsed.oneliners.max_length, def.oneliners.max_length);
     }
 
     #[test]

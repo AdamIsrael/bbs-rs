@@ -3,14 +3,15 @@
 
 use sqlx::sqlite::SqlitePool;
 
-use crate::config::Limits;
+use crate::config::{Limits, Oneliners};
 use crate::db::models::{Oneliner, User};
 use crate::error::{AppError, Result};
 use crate::services::enforce_rate;
 use crate::util::now_unix;
 
-/// Maximum length of a oneliner body, in characters. Longer (or empty) input
-/// is rejected with [`AppError::OnelinerLength`].
+/// Default maximum length of a oneliner body, in characters (the
+/// `[oneliners] max_length` default). Longer (or empty) input is rejected with
+/// [`AppError::OnelinerLength`].
 pub const MAX_LEN: usize = 120;
 
 /// Recent oneliners, newest first, up to `limit`.
@@ -48,15 +49,22 @@ async fn recent_count(pool: &SqlitePool, author_id: i64, since: i64) -> Result<i
 }
 
 /// Append a oneliner to the wall. Guests are rejected; the (trimmed) body must
-/// be 1..=[`MAX_LEN`] characters; non-admins are subject to the per-user
-/// oneliner rate limit.
-pub async fn add(pool: &SqlitePool, author: &User, body: &str, limits: &Limits) -> Result<()> {
+/// be 1..=`cfg.max_length` characters (0 disables the cap); non-admins are
+/// subject to the per-user oneliner rate limit. After inserting, the wall is
+/// trimmed to `cfg.max_entries` most-recent rows (0 keeps everything).
+pub async fn add(
+    pool: &SqlitePool,
+    author: &User,
+    body: &str,
+    limits: &Limits,
+    cfg: &Oneliners,
+) -> Result<()> {
     if author.is_guest() {
         return Err(AppError::GuestNotAllowed);
     }
     let body = body.trim();
-    if body.is_empty() || body.chars().count() > MAX_LEN {
-        return Err(AppError::OnelinerLength(MAX_LEN));
+    if body.is_empty() || (cfg.max_length > 0 && body.chars().count() > cfg.max_length) {
+        return Err(AppError::OnelinerLength(cfg.max_length));
     }
     if !author.is_admin()
         && let Some(since) = limits.window_start(now_unix())
@@ -70,6 +78,23 @@ pub async fn add(pool: &SqlitePool, author: &User, body: &str, limits: &Limits) 
         .bind(now_unix())
         .execute(pool)
         .await?;
+    trim(pool, cfg.max_entries).await?;
+    Ok(())
+}
+
+/// Prune the wall to its `max` most-recent rows (by id). A `max` of 0 is a
+/// no-op (keep everything).
+async fn trim(pool: &SqlitePool, max: usize) -> Result<()> {
+    if max == 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "DELETE FROM oneliners WHERE id NOT IN \
+         (SELECT id FROM oneliners ORDER BY id DESC LIMIT ?)",
+    )
+    .bind(max as i64)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

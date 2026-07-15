@@ -134,6 +134,10 @@ welcome = ""           # file shown on the main menu (blank = none)
 enabled = false
 host = "0.0.0.0"
 port = 8088
+
+[oneliners]  # graffiti-wall policy (separate from the [features] on/off toggle)
+max_entries = 200      # trim to the most recent N after each post (0 = keep all)
+max_length = 120       # max chars per oneliner (0 = no cap)
 ```
 
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.

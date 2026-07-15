@@ -915,10 +915,14 @@ async fn rate_limits_throttle_non_admins() {
         mail::send_mail(&pool, &alice, "bob", "s", "b", &limits).await,
         Err(AppError::RateLimited)
     ));
-    oneliners::add(&pool, &alice, "a", &limits).await.unwrap();
-    oneliners::add(&pool, &alice, "b", &limits).await.unwrap();
+    oneliners::add(&pool, &alice, "a", &limits, &Default::default())
+        .await
+        .unwrap();
+    oneliners::add(&pool, &alice, "b", &limits, &Default::default())
+        .await
+        .unwrap();
     assert!(matches!(
-        oneliners::add(&pool, &alice, "c", &limits).await,
+        oneliners::add(&pool, &alice, "c", &limits, &Default::default()).await,
         Err(AppError::RateLimited)
     ));
 
@@ -973,9 +977,15 @@ async fn rate_limits_throttle_non_admins() {
         ..Default::default()
     };
     for i in 0..5 {
-        oneliners::add(&pool, &bob, &format!("y{i}"), &no_window)
-            .await
-            .unwrap();
+        oneliners::add(
+            &pool,
+            &bob,
+            &format!("y{i}"),
+            &no_window,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
     }
 }
 
@@ -1253,28 +1263,61 @@ async fn oneliners_post_list_and_guardrails() {
 
     // Guests cannot post to the wall.
     assert!(matches!(
-        oneliners::add(&pool, &guest, "hi", &Default::default()).await,
+        oneliners::add(
+            &pool,
+            &guest,
+            "hi",
+            &Default::default(),
+            &Default::default()
+        )
+        .await,
         Err(bbs_rs::error::AppError::GuestNotAllowed)
     ));
 
     // Empty / whitespace-only and over-length bodies are rejected.
     assert!(matches!(
-        oneliners::add(&pool, &alice, "   ", &Default::default()).await,
+        oneliners::add(
+            &pool,
+            &alice,
+            "   ",
+            &Default::default(),
+            &Default::default()
+        )
+        .await,
         Err(bbs_rs::error::AppError::OnelinerLength(_))
     ));
     let too_long = "x".repeat(oneliners::MAX_LEN + 1);
     assert!(matches!(
-        oneliners::add(&pool, &alice, &too_long, &Default::default()).await,
+        oneliners::add(
+            &pool,
+            &alice,
+            &too_long,
+            &Default::default(),
+            &Default::default()
+        )
+        .await,
         Err(bbs_rs::error::AppError::OnelinerLength(_))
     ));
 
     // A valid post is trimmed and stored.
-    oneliners::add(&pool, &alice, "  first!  ", &Default::default())
-        .await
-        .unwrap();
-    oneliners::add(&pool, &alice, "second", &Default::default())
-        .await
-        .unwrap();
+    oneliners::add(
+        &pool,
+        &alice,
+        "  first!  ",
+        &Default::default(),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    oneliners::add(
+        &pool,
+        &alice,
+        "second",
+        &Default::default(),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(oneliners::count(&pool).await.unwrap(), 2);
 
     let list = oneliners::recent(&pool, 10).await.unwrap();
@@ -1288,6 +1331,50 @@ async fn oneliners_post_list_and_guardrails() {
     assert!(oneliners::delete(&pool, list[0].id).await.unwrap());
     assert!(!oneliners::delete(&pool, list[0].id).await.unwrap());
     assert_eq!(oneliners::count(&pool).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn oneliner_wall_auto_trims() {
+    use bbs_rs::config::{Limits, Oneliners};
+    use bbs_rs::services::{auth, oneliners};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    // Rate limiting off so we can post freely; keep only the 3 newest.
+    let limits = Limits {
+        window_secs: 0,
+        ..Default::default()
+    };
+    let cfg = Oneliners {
+        max_entries: 3,
+        max_length: 120,
+    };
+
+    for n in 1..=5 {
+        oneliners::add(&pool, &alice, &n.to_string(), &limits, &cfg)
+            .await
+            .unwrap();
+    }
+    // Only the 3 most recent survive, newest first.
+    assert_eq!(oneliners::count(&pool).await.unwrap(), 3);
+    let bodies: Vec<String> = oneliners::recent(&pool, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.body)
+        .collect();
+    assert_eq!(bodies, vec!["5", "4", "3"]);
+
+    // max_entries = 0 disables trimming — the wall grows unbounded.
+    let no_trim = Oneliners {
+        max_entries: 0,
+        max_length: 120,
+    };
+    oneliners::add(&pool, &alice, "6", &limits, &no_trim)
+        .await
+        .unwrap();
+    assert_eq!(oneliners::count(&pool).await.unwrap(), 4);
 }
 
 #[tokio::test]

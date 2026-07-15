@@ -425,7 +425,15 @@ impl App {
             self.status = "Say something first.".into();
             return;
         }
-        match oneliners::add(&self.pool, &self.user, &body, &self.config.limits).await {
+        match oneliners::add(
+            &self.pool,
+            &self.user,
+            &body,
+            &self.config.limits,
+            &self.config.oneliners,
+        )
+        .await
+        {
             Ok(()) => {
                 self.open_oneliners().await;
                 self.status = "Posted to the wall.".into();
