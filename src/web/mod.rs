@@ -66,6 +66,8 @@ impl WebState {
 }
 
 /// Serve the browser frontend on a pre-bound listener until the process stops.
+/// The caller binds (so a port conflict fails startup eagerly) and constructs
+/// the [`WebState`].
 pub async fn serve(listener: tokio::net::TcpListener, state: WebState) -> anyhow::Result<()> {
     let app = router(state);
     axum::serve(
@@ -74,28 +76,6 @@ pub async fn serve(listener: tokio::net::TcpListener, state: WebState) -> anyhow
     )
     .await?;
     Ok(())
-}
-
-/// Bind the configured address and serve the browser frontend.
-pub async fn run(
-    config: Arc<Settings>,
-    pool: SqlitePool,
-    presence: Presence,
-    next_id: Arc<AtomicUsize>,
-) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", config.web.host, config.web.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("web frontend listening on http://{addr}");
-    serve(
-        listener,
-        WebState {
-            pool,
-            config,
-            presence,
-            next_id,
-        },
-    )
-    .await
 }
 
 /// Build the axum router for the browser frontend.

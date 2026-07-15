@@ -21,6 +21,8 @@ pub mod web;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use anyhow::Context;
+
 use config::Settings;
 use services::presence::Presence;
 
@@ -37,14 +39,24 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     let next_id = Arc::new(AtomicUsize::new(0));
 
     if config.web.enabled {
-        let (c, p, pr, id) = (
-            config.clone(),
+        // Bind the web port eagerly so a conflict (port already in use) fails
+        // startup with a clear error, rather than being lost in a background
+        // task while the process keeps running SSH-only.
+        let addr = format!("{}:{}", config.web.host, config.web.port);
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .with_context(|| {
+                format!("binding web frontend to {addr} — is the port already in use?")
+            })?;
+        tracing::info!("web frontend listening on http://{addr}");
+        let state = web::WebState::new(
             pool.clone(),
+            config.clone(),
             presence.clone(),
             next_id.clone(),
         );
         tokio::spawn(async move {
-            if let Err(e) = web::run(c, p, pr, id).await {
+            if let Err(e) = web::serve(listener, state).await {
                 tracing::error!("web frontend stopped: {e}");
             }
         });
