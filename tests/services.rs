@@ -13,7 +13,9 @@ async fn setup() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    bbs_rs::services::seed(&pool).await.expect("seed");
+    bbs_rs::services::seed(&pool, &Default::default())
+        .await
+        .expect("seed");
     pool
 }
 
@@ -671,6 +673,65 @@ async fn subject_and_body_length_limits() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn seed_uses_configured_boards_and_guest_password() {
+    use bbs_rs::config::{Seed, SeedBoard};
+    use bbs_rs::services::{self, auth, boards};
+
+    // A bare migrated DB (no default seeding).
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let seed = Seed {
+        guest_password: Some("swordfish".into()),
+        boards: Some(vec![
+            SeedBoard {
+                name: "Lobby".into(),
+                description: "hi".into(),
+                min_read: "guest".into(),
+                min_write: "user".into(),
+            },
+            SeedBoard {
+                name: "Staff".into(),
+                description: String::new(),
+                min_read: "admin".into(),
+                min_write: "admin".into(),
+            },
+        ]),
+    };
+    services::seed(&pool, &seed).await.unwrap();
+
+    // Exactly the configured boards exist (not the built-in General/Announcements).
+    let all = boards::list_boards(&pool).await.unwrap();
+    let names: Vec<&str> = all.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, vec!["Lobby", "Staff"]);
+    let staff = all.iter().find(|b| b.name == "Staff").unwrap();
+    assert_eq!(staff.min_read_role, "admin");
+    assert_eq!(staff.min_write_role, "admin");
+
+    // Guest authenticates with the configured password, not the default.
+    assert!(
+        auth::verify_login(&pool, "guest", "swordfish")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        auth::verify_login(&pool, "guest", "guest")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Re-seeding is a no-op once boards exist.
+    services::seed(&pool, &Default::default()).await.unwrap();
+    assert_eq!(boards::list_boards(&pool).await.unwrap().len(), 2);
 }
 
 #[tokio::test]

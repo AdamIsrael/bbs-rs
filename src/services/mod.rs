@@ -45,11 +45,11 @@ pub fn role_rank(role: &str) -> usize {
     admin::ROLES.iter().position(|r| *r == role).unwrap_or(0)
 }
 
-/// One-time startup seeding: the guest account, default boards, and a default
-/// file area.
-pub async fn seed(pool: &SqlitePool) -> Result<()> {
-    auth::ensure_guest(pool).await?;
-    boards::ensure_default_boards(pool).await?;
+/// One-time startup seeding: the guest account, the (operator-configurable)
+/// default boards, and a default file area.
+pub async fn seed(pool: &SqlitePool, seed: &crate::config::Seed) -> Result<()> {
+    auth::ensure_guest(pool, seed.guest_password()).await?;
+    boards::ensure_default_boards(pool, &seed.boards()).await?;
     files::ensure_default_areas(pool).await?;
     Ok(())
 }

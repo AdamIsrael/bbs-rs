@@ -65,6 +65,6 @@ These are done and are the substrate several roadmap items build on:
   mail (0 disables). Oneliners keep their own 120-char cap.
 - [**Backups**](https://github.com/AdamIsrael/bbs-rs/issues/18) — document/automate SQLite backup
   (`.backup` / file copy while quiesced).
-- [**Seeded content in config**](https://github.com/AdamIsrael/bbs-rs/issues/19) — default boards and
-  the guest account are still hardcoded; a future `[seed]` config section could make them
-  operator-defined.
+- [**Seeded content in config**](https://github.com/AdamIsrael/bbs-rs/issues/19) — **Shipped**: a
+  `[seed]` section defines the first-run boards (name/description/min_read/min_write, replacing the
+  built-in General + Announcements) and the guest account's password. Boards seed only on a fresh DB.

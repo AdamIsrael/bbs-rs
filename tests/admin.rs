@@ -17,7 +17,7 @@ async fn setup() -> SqlitePool {
         .run(&pool)
         .await
         .expect("run migrations");
-    seed(&pool).await.expect("seed");
+    seed(&pool, &Default::default()).await.expect("seed");
     pool
 }
 

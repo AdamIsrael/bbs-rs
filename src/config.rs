@@ -55,6 +55,72 @@ pub struct Settings {
     pub art: Art,
     pub web: Web,
     pub oneliners: Oneliners,
+    pub seed: Seed,
+}
+
+/// First-run seeded content: the boards created when the board table is empty,
+/// and the shared guest account's password. Both are optional — unset uses the
+/// built-in defaults; see [`Seed::boards`] / [`Seed::guest_password`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Seed {
+    /// Boards to create on first run. `None` (unset) uses the built-in defaults
+    /// (General + Announcements); `Some([])` seeds no boards.
+    pub boards: Option<Vec<SeedBoard>>,
+    /// Password for the shared `guest` account (unset → "guest").
+    pub guest_password: Option<String>,
+}
+
+/// One operator-defined seed board.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeedBoard {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Minimum role to read (`guest` | `user` | `admin`). Default `guest`.
+    #[serde(default = "default_read_role")]
+    pub min_read: String,
+    /// Minimum role to post. Default `user`.
+    #[serde(default = "default_write_role")]
+    pub min_write: String,
+}
+
+fn default_read_role() -> String {
+    "guest".into()
+}
+fn default_write_role() -> String {
+    "user".into()
+}
+
+impl Seed {
+    /// The boards to seed: the operator's list, or the built-in defaults when
+    /// unset.
+    pub fn boards(&self) -> Vec<SeedBoard> {
+        self.boards.clone().unwrap_or_else(default_seed_boards)
+    }
+
+    /// The guest account's password (configured, or "guest").
+    pub fn guest_password(&self) -> &str {
+        self.guest_password.as_deref().unwrap_or("guest")
+    }
+}
+
+/// The built-in default boards, used when `[seed] boards` is unset.
+fn default_seed_boards() -> Vec<SeedBoard> {
+    vec![
+        SeedBoard {
+            name: "General".into(),
+            description: "General chatter and introductions".into(),
+            min_read: "guest".into(),
+            min_write: "user".into(),
+        },
+        SeedBoard {
+            name: "Announcements".into(),
+            description: "System news and updates".into(),
+            min_read: "guest".into(),
+            min_write: "admin".into(),
+        },
+    ]
 }
 
 /// Oneliners (graffiti wall) policy: how many entries to keep and the max post
@@ -584,6 +650,18 @@ port = 8088
 # After each post the wall is trimmed to the most recent max_entries rows.
 max_entries = 200      # 0 = keep everything (no trimming)
 max_length = 120       # max characters per oneliner (0 = no cap)
+
+[seed]
+# First-run seeded content. Boards are created only when the board table is
+# empty (i.e. on a fresh database).
+# guest_password = \"guest\"   # password for the shared guest account
+# Uncomment to define your own boards (replaces the General + Announcements
+# defaults). min_read/min_write are guest|user|admin and default to guest/user.
+# boards = [
+#   { name = \"General\", description = \"General chatter\", min_write = \"user\" },
+#   { name = \"Announcements\", description = \"System news\", min_write = \"admin\" },
+#   { name = \"Staff\", description = \"Admins only\", min_read = \"admin\", min_write = \"admin\" },
+# ]
 ";
 
 #[cfg(test)]
@@ -625,6 +703,37 @@ mod tests {
         assert_eq!(parsed.web.port, def.web.port);
         assert_eq!(parsed.oneliners.max_entries, def.oneliners.max_entries);
         assert_eq!(parsed.oneliners.max_length, def.oneliners.max_length);
+        // The template's [seed] is all commented, so it resolves to the
+        // built-in defaults.
+        assert_eq!(parsed.seed.guest_password(), "guest");
+        let boards = parsed.seed.boards();
+        assert_eq!(boards.len(), 2);
+        assert_eq!(boards[0].name, "General");
+    }
+
+    #[test]
+    fn seed_boards_and_guest_password_are_configurable() {
+        let toml = r#"
+[seed]
+guest_password = "visitor"
+boards = [
+  { name = "Lobby", description = "hi", min_write = "user" },
+  { name = "Staff", min_read = "admin", min_write = "admin" },
+]
+"#;
+        let s: Settings = toml::from_str(toml).unwrap();
+        assert_eq!(s.seed.guest_password(), "visitor");
+        let boards = s.seed.boards();
+        assert_eq!(boards.len(), 2);
+        assert_eq!(boards[0].name, "Lobby");
+        // Omitted fields fall back to their defaults.
+        assert_eq!(boards[1].description, "");
+        assert_eq!(boards[1].min_read, "admin");
+        assert_eq!(boards[0].min_read, "guest");
+
+        // An explicit empty list seeds no boards (distinct from "unset").
+        let none: Settings = toml::from_str("[seed]\nboards = []\n").unwrap();
+        assert!(none.seed.boards().is_empty());
     }
 
     #[test]
