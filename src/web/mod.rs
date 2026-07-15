@@ -18,7 +18,7 @@ use axum::extract::State;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::header;
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use ratatui::Terminal;
@@ -112,7 +112,24 @@ pub fn router(state: WebState) -> Router {
             get(|| asset(ASSET_ADDON_FIT, "text/javascript")),
         )
         .route("/ws", get(ws_handler))
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
+}
+
+/// Log every HTTP request and its response status. Errors (e.g. a 404) log at
+/// `info` so they're visible with the default `RUST_LOG`; successes log at
+/// `debug` (`RUST_LOG=bbs_rs=debug`).
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let res = next.run(req).await;
+    let status = res.status();
+    if status.is_client_error() || status.is_server_error() {
+        tracing::info!("web {method} {path} -> {status}");
+    } else {
+        tracing::debug!("web {method} {path} -> {status}");
+    }
+    res
 }
 
 const INDEX_HTML: &str = include_str!("static/index.html");
