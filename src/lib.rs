@@ -16,18 +16,54 @@ pub mod services;
 pub mod ssh;
 pub mod transport;
 pub mod util;
+pub mod web;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+
+use anyhow::Context;
 
 use config::Settings;
+use services::presence::Presence;
 
-/// Open the database, run migrations, seed defaults, and serve over SSH.
+/// Open the database, run migrations, seed defaults, and serve over SSH (and,
+/// when enabled, the browser frontend). Both transports share one presence
+/// registry and session-id counter, so who's-online and kicks span them.
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     let pool = db::connect(&settings.network.database_url).await?;
     db::run_migrations(&pool).await?;
     services::seed(&pool).await?;
 
     let config = Arc::new(settings);
+    let presence = Presence::new();
+    let next_id = Arc::new(AtomicUsize::new(0));
+
+    if config.web.enabled {
+        // Bind the web port eagerly so a conflict (port already in use) fails
+        // startup with a clear error, rather than being lost in a background
+        // task while the process keeps running SSH-only.
+        let addr = format!("{}:{}", config.web.host, config.web.port);
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .with_context(|| {
+                format!("binding web frontend to {addr} — is the port already in use?")
+            })?;
+        tracing::info!("web frontend listening on http://{addr}");
+        let state = web::WebState::new(
+            pool.clone(),
+            config.clone(),
+            presence.clone(),
+            next_id.clone(),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = web::serve(listener, state).await {
+                tracing::error!("web frontend stopped: {e}");
+            }
+        });
+        // Best-effort: warn if something other than us answers on the port.
+        tokio::spawn(web::self_check(config.web.host.clone(), config.web.port));
+    }
+
     tracing::info!(
         "{} listening on {}:{}",
         config.bbs.name,
@@ -35,7 +71,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         config.network.port
     );
 
-    ssh::run(config, pool).await
+    ssh::run(config, pool, presence, next_id).await
 }
 
 /// Apply pending migrations and report, without starting the server. Backs

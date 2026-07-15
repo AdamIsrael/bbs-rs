@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ratatui::backend::CrosstermBackend;
@@ -33,19 +34,20 @@ struct BbsServer {
     pool: SqlitePool,
     presence: Presence,
     config: Arc<Settings>,
-    next_id: usize,
+    /// Session-id source shared with the web frontend so ids never collide.
+    next_id: Arc<AtomicUsize>,
 }
 
 impl Server for BbsServer {
     type Handler = SessionHandler;
 
     fn new_client(&mut self, addr: Option<SocketAddr>) -> SessionHandler {
-        self.next_id += 1;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         SessionHandler {
             pool: self.pool.clone(),
             presence: self.presence.clone(),
             config: self.config.clone(),
-            id: self.next_id,
+            id,
             peer: addr,
             user: None,
             terminal: None,
@@ -431,10 +433,15 @@ fn advertised_methods(config: &Settings) -> russh::MethodSet {
     methods
 }
 
-/// Bind and serve the SSH BBS until the process is stopped.
-pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> {
+/// Bind and serve the SSH BBS until the process is stopped. `presence` and
+/// `next_id` are shared with the (optional) web frontend.
+pub async fn run(
+    config: Arc<Settings>,
+    pool: SqlitePool,
+    presence: Presence,
+    next_id: Arc<AtomicUsize>,
+) -> anyhow::Result<()> {
     let net = &config.network;
-    let presence = Presence::new();
     let key = load_or_generate_host_key(&net.host_key)?;
 
     tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
@@ -454,7 +461,7 @@ pub async fn run(config: Arc<Settings>, pool: SqlitePool) -> anyhow::Result<()> 
         pool,
         presence,
         config,
-        next_id: 0,
+        next_id,
     };
     server.run_on_address(Arc::new(ssh_config), addr).await?;
     Ok(())
