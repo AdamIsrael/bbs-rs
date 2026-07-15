@@ -23,6 +23,19 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Write a consistent snapshot of the database to `dest` using SQLite's online
+/// `VACUUM INTO`. This works while the server is running (it takes only a brief
+/// read lock) and produces a fresh, defragmented copy. `dest` must not already
+/// exist, and its parent directory must exist.
+pub async fn backup_into(pool: &SqlitePool, dest: &std::path::Path) -> Result<()> {
+    let dest = dest.to_string_lossy().into_owned();
+    sqlx::query("VACUUM INTO ?")
+        .bind(dest)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// One migration and whether it has been applied to the database.
 #[derive(Debug, Clone)]
 pub struct MigrationStatus {

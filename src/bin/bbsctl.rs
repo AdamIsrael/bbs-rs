@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
@@ -173,6 +174,16 @@ enum Cmd {
         #[arg(long)]
         failures: bool,
     },
+    /// Snapshot the database (and optionally the file blobs) into a directory.
+    /// Uses SQLite's online VACUUM INTO, so it's safe while the server runs.
+    Backup {
+        /// Directory to write the backup into (created if missing).
+        #[arg(long, default_value = "backups")]
+        out: PathBuf,
+        /// Also copy the file-area storage directory.
+        #[arg(long)]
+        files: bool,
+    },
 }
 
 #[tokio::main]
@@ -183,8 +194,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Operational commands need a current schema, so auto-apply migrations for
     // them. `migrate` controls apply/report itself; `migrate --status` must not
-    // apply, so skip the auto-apply for it entirely.
-    if !matches!(cli.cmd, Cmd::Migrate { .. }) {
+    // apply, so skip the auto-apply for it entirely. `backup` is read-only and
+    // must not mutate the live DB, so it's skipped too.
+    if !matches!(cli.cmd, Cmd::Migrate { .. } | Cmd::Backup { .. }) {
         db::run_migrations(&pool).await?;
     }
 
@@ -495,6 +507,66 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Cmd::Backup { out, files } => {
+            std::fs::create_dir_all(&out)
+                .with_context(|| format!("creating backup dir {}", out.display()))?;
+            let stamp = backup_stamp();
+
+            // Database snapshot (online, consistent).
+            let db_dest = out.join(format!("bbs-{stamp}.db"));
+            if db_dest.exists() {
+                anyhow::bail!("backup target {} already exists", db_dest.display());
+            }
+            db::backup_into(&pool, &db_dest).await?;
+            let size = std::fs::metadata(&db_dest).map(|m| m.len()).unwrap_or(0);
+            println!("database -> {} ({size} bytes)", db_dest.display());
+
+            // Optionally, the file-area blobs.
+            if files {
+                let src = &settings.files.storage_dir;
+                if src.is_dir() {
+                    let dst = out.join(format!("files-{stamp}"));
+                    let (n, bytes) = copy_dir_all(src, &dst)?;
+                    println!("files    -> {} ({n} files, {bytes} bytes)", dst.display());
+                } else {
+                    println!("files    -> (none; {} does not exist)", src.display());
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// A filesystem-safe UTC timestamp for backup names, e.g. `20260715-011530`.
+fn backup_stamp() -> String {
+    let dt = time::OffsetDateTime::now_utc();
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
+/// Recursively copy `src` into `dst`, returning (files copied, total bytes).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    std::fs::create_dir_all(dst)?;
+    let (mut files, mut bytes) = (0u64, 0u64);
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            let (f, b) = copy_dir_all(&from, &to)?;
+            files += f;
+            bytes += b;
+        } else {
+            bytes += std::fs::copy(&from, &to)?;
+            files += 1;
+        }
+    }
+    Ok((files, bytes))
 }
