@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::connect_info::ConnectInfo;
@@ -44,7 +45,8 @@ use terminal::WebTerminalHandle;
 #[derive(Clone)]
 pub struct WebState {
     pool: SqlitePool,
-    config: Arc<Settings>,
+    /// Hot-swappable settings; each WS session snapshots the current value.
+    config: Arc<ArcSwap<Settings>>,
     presence: Presence,
     /// Session-id source shared with SSH so ids never collide across transports.
     next_id: Arc<AtomicUsize>,
@@ -53,7 +55,7 @@ pub struct WebState {
 impl WebState {
     pub fn new(
         pool: SqlitePool,
-        config: Arc<Settings>,
+        config: Arc<ArcSwap<Settings>>,
         presence: Presence,
         next_id: Arc<AtomicUsize>,
     ) -> Self {
@@ -203,6 +205,9 @@ enum Control {
 async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
     let (mut ws_sink, mut ws_stream) = socket.split();
     let ip = peer.ip().to_string();
+    // Snapshot the current settings for this session's lifetime (picks up any
+    // hot-reloaded config).
+    let config = state.config.load_full();
 
     // 1. Expect a login handshake as the first (text) frame.
     let login: Login = match ws_stream.next().await {
@@ -215,7 +220,7 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
 
     // 2. Authenticate — same path as SSH: guest toggle, then attempt_login
     //    (which enforces IP/account bans and records the audit trail).
-    if login.user == "guest" && !state.config.features.guest {
+    if login.user == "guest" && !config.features.guest {
         let _ = admin::record_login(&state.pool, &login.user, Some(&ip), false).await;
         let _ = ws_sink
             .send(Message::Text("\r\nGuest login is disabled.\r\n".into()))
@@ -250,10 +255,7 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
         .join(id, user.username.clone(), Some(ip), ev_tx.clone())
         .await;
 
-    let (cols, rows) = (
-        state.config.network.default_cols,
-        state.config.network.default_rows,
-    );
+    let (cols, rows) = (config.network.default_cols, config.network.default_rows);
     let backend = CrosstermBackend::new(WebTerminalHandle::new(out_tx));
     let terminal = match Terminal::with_options(
         backend,
@@ -271,7 +273,7 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
     let app = App::new(
         state.pool.clone(),
         state.presence.clone(),
-        state.config.clone(),
+        config.clone(),
         user,
         id,
     );
@@ -293,7 +295,7 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
                 }
                 Message::Text(t) => {
                     if let Ok(Control::Resize { cols, rows }) = serde_json::from_str(&t) {
-                        let (w, h) = clamp_size(cols, rows, &state.config);
+                        let (w, h) = clamp_size(cols, rows, &config);
                         if ev_tx.send(Event::Resize(w, h)).await.is_err() {
                             return;
                         }
