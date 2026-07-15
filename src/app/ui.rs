@@ -42,6 +42,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Stats => render_stats(f, body, app),
         Screen::SearchInput => render_form(f, body, " Search Messages ", app),
         Screen::SearchResults => render_search_results(f, body, app),
+        Screen::Doors => render_doors(f, body, app),
         Screen::FileAreas => render_file_areas(f, body, app),
         Screen::FileList => render_files(f, body, app),
         Screen::FileDetail => render_file_detail(f, body, app),
@@ -517,6 +518,29 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+fn render_doors(f: &mut Frame, area: Rect, app: &App) {
+    if app.config.doors.is_empty() {
+        return placeholder(f, area, " Door Games ", "No doors configured.");
+    }
+    let lines: Vec<Line> = app
+        .config
+        .doors
+        .iter()
+        .map(|d| {
+            let limit = match d.time_limit_secs {
+                0 => String::new(),
+                s if s % 60 == 0 => format!("  ({} min limit)", s / 60),
+                s => format!("  ({s}s limit)"),
+            };
+            Line::from(vec![
+                Span::raw(format!("{:<20} ", truncate(&d.name, 20))),
+                Span::styled(limit, Style::default().fg(app.theme.dim)),
+            ])
+        })
+        .collect();
+    render_selectable(f, area, " Door Games ", lines, app.door_sel);
+}
+
 fn render_search_results(f: &mut Frame, area: Rect, app: &App) {
     let title = format!(" Search: {} ", truncate(&app.search_query, 40));
     if app.search_results.is_empty() {
@@ -818,6 +842,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Stats => "Stats",
         Screen::SearchInput => "Search",
         Screen::SearchResults => "Search Results",
+        Screen::Doors => "Door Games",
         Screen::FileAreas => "File Areas",
         Screen::FileList => "Files",
         Screen::FileDetail => "File",
@@ -877,6 +902,7 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::Stats => " r refresh · Esc back ",
         Screen::SearchInput => " type a query · Enter search · Esc cancel ",
         Screen::SearchResults => " ↑/↓ move · Enter open · / new search · Esc back ",
+        Screen::Doors => " ↑/↓ move · Enter launch · Esc back ",
         Screen::FileAreas => " ↑/↓ move · Enter open · Esc back ",
         Screen::FileList => " ↑/↓ move · Enter details · Esc back ",
         Screen::FileDetail => {

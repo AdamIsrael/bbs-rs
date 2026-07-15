@@ -2,6 +2,7 @@
 //! per-screen key handling. Rendering lives in [`ui`].
 
 pub mod ansi;
+pub mod door;
 pub mod state;
 pub mod theme;
 pub mod ui;
@@ -102,6 +103,11 @@ pub struct App {
     /// The query that produced `search_results` (shown in the results title).
     pub search_query: String,
 
+    // Door games
+    pub door_sel: usize,
+    /// Set when the user picks a door; the run loop launches it and clears this.
+    pub pending_door: Option<usize>,
+
     // Mail
     pub mails: Vec<Mail>,
     pub mail_sel: usize,
@@ -170,6 +176,10 @@ impl App {
         }
         menu.push(MenuItem::Stats);
         menu.push(MenuItem::Search);
+        // Doors appear only when the operator has configured at least one.
+        if !config.doors.is_empty() {
+            menu.push(MenuItem::Doors);
+        }
         if f.file_areas {
             menu.push(MenuItem::Files);
         }
@@ -220,6 +230,8 @@ impl App {
             search_results: Vec::new(),
             search_sel: 0,
             search_query: String::new(),
+            door_sel: 0,
+            pending_door: None,
             mails: Vec::new(),
             mail_sel: 0,
             current_mail: None,
@@ -277,6 +289,7 @@ impl App {
             Screen::Stats => self.on_stats(key).await,
             Screen::SearchInput => self.on_search_input(key).await,
             Screen::SearchResults => self.on_search_results(key).await,
+            Screen::Doors => self.on_doors(key),
             Screen::FileAreas => self.on_file_areas(key).await,
             Screen::FileList => self.on_file_list(key).await,
             Screen::FileDetail => self.on_file_detail(key).await,
@@ -323,6 +336,10 @@ impl App {
             MenuItem::Profile => self.open_profile(self.user.id, Screen::MainMenu).await,
             MenuItem::Stats => self.open_stats().await,
             MenuItem::Search => self.begin_search(),
+            MenuItem::Doors => {
+                self.door_sel = 0;
+                self.screen = Screen::Doors;
+            }
             MenuItem::Files => self.open_file_areas().await,
             MenuItem::Keys => self.open_keys().await,
             MenuItem::Register => {
@@ -1222,6 +1239,25 @@ impl App {
         }
     }
 
+    // ---- Doors -----------------------------------------------------------
+
+    fn on_doors(&mut self, key: KeyEvent) {
+        let last = self.config.doors.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => self.door_sel = self.door_sel.saturating_sub(1),
+            KeyCode::Down => self.door_sel = (self.door_sel + 1).min(last),
+            // Signal the run loop to launch the door (it owns the terminal and
+            // the raw byte streams needed to bridge the program's I/O).
+            KeyCode::Enter => {
+                if self.door_sel < self.config.doors.len() {
+                    self.pending_door = Some(self.door_sel);
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
     // ---- File areas ------------------------------------------------------
 
     async fn open_file_areas(&mut self) {
@@ -1675,11 +1711,15 @@ fn truncate_status(s: &str) -> String {
 }
 
 /// The transport-agnostic event loop: draw, wait for an event, apply it, repeat.
-/// Generic over any `Write` sink so SSH and a future WebSocket share it.
+/// Generic over any `Write` sink so SSH and the WebSocket frontend share it.
+///
+/// `raw_out` writes bytes straight to the client (bypassing ratatui) — used to
+/// bridge a door program's output while the TUI is suspended.
 pub async fn run<W: std::io::Write>(
     mut app: App,
     mut terminal: Terminal<CrosstermBackend<W>>,
     mut events: Receiver<Event>,
+    raw_out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) -> anyhow::Result<()> {
     // Show bulletins after login when any exist.
     app.load_startup_bulletins().await;
@@ -1696,6 +1736,36 @@ pub async fn run<W: std::io::Write>(
             }
             Event::Quit => app.should_quit = true,
         }
+
+        // A door launch was requested: suspend the TUI, bridge the program's
+        // raw I/O, then resume.
+        if let Some(idx) = app.pending_door.take() {
+            let size = terminal
+                .size()
+                .map(|s| (s.width, s.height))
+                .unwrap_or((80, 24));
+            let outcome = door::run(
+                &app.config.doors[idx],
+                &app.user,
+                app.session_id,
+                size,
+                &app.config.bbs.name,
+                &app.config.bbs.sysop,
+                &raw_out,
+                &mut events,
+            )
+            .await;
+            match outcome {
+                door::DoorExit::Quit => app.should_quit = true,
+                door::DoorExit::Returned => {
+                    // Reset attributes and force a full repaint of the TUI.
+                    let _ = raw_out.send(b"\x1b[0m".to_vec());
+                    let _ = terminal.clear();
+                    app.screen = Screen::MainMenu;
+                }
+            }
+        }
+
         if app.should_quit {
             break;
         }

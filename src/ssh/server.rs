@@ -54,6 +54,7 @@ impl Server for BbsServer {
             peer: addr,
             user: None,
             terminal: None,
+            raw_out: None,
             events_tx: None,
             input_buf: Vec::new(),
             channels: HashMap::new(),
@@ -72,6 +73,8 @@ struct SessionHandler {
     user: Option<User>,
     /// Built at channel open, moved into the app task at shell request.
     terminal: Option<SshTerminal>,
+    /// Raw byte sink to the client (bypasses ratatui); used to bridge doors.
+    raw_out: Option<mpsc::UnboundedSender<Vec<u8>>>,
     /// Feeds decoded input events to the running app loop.
     events_tx: Option<mpsc::Sender<Event>>,
     /// Carries incomplete escape/UTF-8 sequences between `data` callbacks.
@@ -163,6 +166,7 @@ impl Handler for SessionHandler {
     ) -> Result<(), Self::Error> {
         let id = channel.id();
         let handle = TerminalHandle::start(session.handle(), id).await;
+        self.raw_out = Some(handle.raw_sender());
         let backend = CrosstermBackend::new(handle);
         // Correct size is applied on the pty request.
         let options = TerminalOptions {
@@ -203,8 +207,8 @@ impl Handler for SessionHandler {
         // The TUI uses the `data`/handle callback path; drop the stored channel
         // so russh doesn't also buffer input into it (which would stall).
         self.channels.remove(&channel);
-        match (self.terminal.take(), self.user.clone()) {
-            (Some(terminal), Some(user)) => {
+        match (self.terminal.take(), self.raw_out.take(), self.user.clone()) {
+            (Some(terminal), Some(raw_out), Some(user)) => {
                 let (tx, rx) = mpsc::channel::<Event>(64);
                 self.events_tx = Some(tx.clone());
                 self.presence
@@ -223,7 +227,7 @@ impl Handler for SessionHandler {
                 // or disconnect), close the SSH channel here so the client exits.
                 let handle = session.handle();
                 tokio::spawn(async move {
-                    if let Err(e) = app::run(app, terminal, rx).await {
+                    if let Err(e) = app::run(app, terminal, rx, raw_out).await {
                         tracing::warn!("session {id} ended with error: {e}");
                     }
                     let _ = handle.exit_status_request(channel, 0).await;

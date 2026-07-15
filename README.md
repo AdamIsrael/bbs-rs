@@ -26,6 +26,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Private mail** — send and read user-to-user messages.
 - **Who's online** — a live view of currently-connected users; open a user's profile from here.
 - **Stats** — board totals, a top-posters leaderboard, and a recent-callers list.
+- **Door games** — launch operator-configured external programs on a pseudo-terminal (full-screen ANSI,
+  `isatty`), with the user's info in the environment + an optional classic drop file, and a time limit.
 - **Full-text search** — keyword search across board messages (SQLite FTS5), scoped to boards you can read;
   jump straight from a hit to the message.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
@@ -146,6 +148,14 @@ max_length = 120       # max chars per oneliner (0 = no cap)
 #   { name = "General", description = "General chatter", min_write = "user" },
 #   { name = "Staff", min_read = "admin", min_write = "admin" },
 # ]
+
+# [[doors]]  # external "door" programs (a Doors menu appears when any exist)
+# name = "Adventure"
+# command = "/usr/games/adventure"
+# args = []
+# cwd = "/var/bbs/doors/adventure"
+# time_limit_secs = 900        # 0 = no limit
+# drop_file = "dorinfo1.def"   # or "door.sys"; blank = none
 ```
 
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.
