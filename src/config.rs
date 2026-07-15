@@ -56,6 +56,34 @@ pub struct Settings {
     pub web: Web,
     pub oneliners: Oneliners,
     pub seed: Seed,
+    /// External "door" programs launchable per session (classic BBS doors).
+    #[serde(default)]
+    pub doors: Vec<Door>,
+}
+
+/// An external program launchable from the Doors menu. Run on a pseudo-terminal
+/// with the session's user info in the environment (and an optional drop file),
+/// with an optional wall-clock time limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Door {
+    /// Menu label.
+    pub name: String,
+    /// Program to run.
+    pub command: String,
+    /// Arguments passed to the program.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory (also where a drop file is written). Defaults to the
+    /// current directory.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    /// Kill the program after this many seconds (0 = no limit).
+    #[serde(default)]
+    pub time_limit_secs: u64,
+    /// Write a classic drop file before launch: `door.sys` or `dorinfo1.def`
+    /// (case-insensitive). Blank/unset writes none.
+    #[serde(default)]
+    pub drop_file: Option<String>,
 }
 
 /// First-run seeded content: the boards created when the board table is empty,
@@ -662,6 +690,18 @@ max_length = 120       # max characters per oneliner (0 = no cap)
 #   { name = \"Announcements\", description = \"System news\", min_write = \"admin\" },
 #   { name = \"Staff\", description = \"Admins only\", min_read = \"admin\", min_write = \"admin\" },
 # ]
+
+# Door games / external programs. Each runs on a pseudo-terminal with the user's
+# info in the environment (BBS_USER, BBS_TIME_LEFT_SECS, …) and, if requested, a
+# drop file (door.sys / dorinfo1.def) in the working dir. A Doors menu appears
+# when at least one is configured. Uncomment to add some:
+# [[doors]]
+# name = \"Adventure\"
+# command = \"/usr/games/adventure\"
+# args = []
+# cwd = \"/var/bbs/doors/adventure\"
+# time_limit_secs = 900        # 0 = no limit
+# drop_file = \"dorinfo1.def\"   # or \"door.sys\"; blank = none
 ";
 
 #[cfg(test)]
@@ -709,6 +749,33 @@ mod tests {
         let boards = parsed.seed.boards();
         assert_eq!(boards.len(), 2);
         assert_eq!(boards[0].name, "General");
+        // No doors are configured by default.
+        assert!(parsed.doors.is_empty());
+    }
+
+    #[test]
+    fn doors_parse_from_config() {
+        let toml = r#"
+[[doors]]
+name = "Adventure"
+command = "/usr/games/adventure"
+time_limit_secs = 600
+drop_file = "door.sys"
+
+[[doors]]
+name = "Trivia"
+command = "python3"
+args = ["trivia.py"]
+"#;
+        let s: Settings = toml::from_str(toml).unwrap();
+        assert_eq!(s.doors.len(), 2);
+        assert_eq!(s.doors[0].name, "Adventure");
+        assert_eq!(s.doors[0].time_limit_secs, 600);
+        assert_eq!(s.doors[0].drop_file.as_deref(), Some("door.sys"));
+        assert_eq!(s.doors[1].args, vec!["trivia.py"]);
+        // Omitted fields default.
+        assert_eq!(s.doors[1].time_limit_secs, 0);
+        assert!(s.doors[1].cwd.is_none());
     }
 
     #[test]

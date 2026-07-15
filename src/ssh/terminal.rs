@@ -35,6 +35,12 @@ impl TerminalHandle {
             sink: Vec::new(),
         }
     }
+
+    /// A clone of the sender that ships bytes straight to the client channel,
+    /// bypassing ratatui — used to bridge a door program's raw output.
+    pub fn raw_sender(&self) -> UnboundedSender<Vec<u8>> {
+        self.sender.clone()
+    }
 }
 
 impl std::io::Write for TerminalHandle {

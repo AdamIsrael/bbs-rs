@@ -256,6 +256,8 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
         .await;
 
     let (cols, rows) = (config.network.default_cols, config.network.default_rows);
+    // A clone of the output channel bridges door output straight to the client.
+    let raw_out = out_tx.clone();
     let backend = CrosstermBackend::new(WebTerminalHandle::new(out_tx));
     let terminal = match Terminal::with_options(
         backend,
@@ -277,7 +279,7 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
         user,
         id,
     );
-    let mut app_task = tokio::spawn(app::run(app, terminal, ev_rx));
+    let mut app_task = tokio::spawn(app::run(app, terminal, ev_rx, raw_out));
 
     // 5. Input path: decode WS frames into events until the app ends (user
     //    quit) or the client disconnects.
