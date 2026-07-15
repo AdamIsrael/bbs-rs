@@ -595,6 +595,85 @@ async fn search_matches_ranks_and_respects_acl() {
 }
 
 #[tokio::test]
+async fn subject_and_body_length_limits() {
+    use bbs_rs::config::Limits;
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, boards, mail};
+    let pool = setup().await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // Tight caps; rate limiting disabled so it doesn't interfere.
+    let limits = Limits {
+        window_secs: 0,
+        max_posts: 0,
+        max_mail: 0,
+        max_oneliners: 0,
+        max_subject_chars: 5,
+        max_body_chars: 10,
+    };
+
+    // Over-long subject / body are rejected; within-limit posts succeed.
+    assert!(matches!(
+        boards::post_message(&pool, general.id, &alice, "toolong", "ok", None, &limits).await,
+        Err(AppError::FieldTooLong("Subject", 5))
+    ));
+    assert!(matches!(
+        boards::post_message(
+            &pool,
+            general.id,
+            &alice,
+            "s",
+            "this body is way too long",
+            None,
+            &limits
+        )
+        .await,
+        Err(AppError::FieldTooLong("Message", 10))
+    ));
+    boards::post_message(&pool, general.id, &alice, "hi", "short", None, &limits)
+        .await
+        .unwrap();
+
+    // Mail honors the same caps.
+    assert!(matches!(
+        mail::send_mail(&pool, &alice, "bob", "toolong", "ok", &limits).await,
+        Err(AppError::FieldTooLong("Subject", 5))
+    ));
+    mail::send_mail(&pool, &alice, "bob", "hi", "short", &limits)
+        .await
+        .unwrap();
+
+    // A 0 cap disables the limit — a long subject/body is accepted.
+    let no_cap = Limits {
+        max_subject_chars: 0,
+        max_body_chars: 0,
+        ..limits
+    };
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "a very long subject indeed",
+        "and a considerably longer body than before",
+        None,
+        &no_cap,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn guest_cannot_post_but_users_can() {
     let pool = setup().await;
     let boards = bbs_rs::services::boards::list_boards(&pool).await.unwrap();
@@ -796,6 +875,7 @@ async fn rate_limits_throttle_non_admins() {
         max_posts: 2,
         max_mail: 2,
         max_oneliners: 2,
+        ..Default::default()
     };
     let general = boards::list_boards(&pool)
         .await
@@ -870,6 +950,7 @@ async fn rate_limits_throttle_non_admins() {
         max_posts: 0,
         max_mail: 0,
         max_oneliners: 0,
+        ..Default::default()
     };
     for i in 0..5 {
         boards::post_message(
@@ -889,6 +970,7 @@ async fn rate_limits_throttle_non_admins() {
         max_posts: 2,
         max_mail: 2,
         max_oneliners: 2,
+        ..Default::default()
     };
     for i in 0..5 {
         oneliners::add(&pool, &bob, &format!("y{i}"), &no_window)

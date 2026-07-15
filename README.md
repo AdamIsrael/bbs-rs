@@ -100,11 +100,13 @@ ban_secs = 3600        # how long an auto-ban lasts (0 = permanent)
 # "guest" is always reserved regardless of this list.
 reserved_usernames = ["root", "admin"]
 
-[limits]     # per-user rate limits (admins are never throttled; 0 = off)
+[limits]     # per-user rate limits + content length caps (admins bypass rates; 0 = off)
 window_secs = 60       # sliding window for counting a user's recent actions
 max_posts = 5          # board posts per user per window
 max_mail = 10          # mail sent per user per window
 max_oneliners = 8      # oneliners per user per window
+max_subject_chars = 120  # max chars in a post/mail subject
+max_body_chars = 8000    # max chars in a post/mail body
 
 [files]      # file-area storage policy
 storage_dir = "files"          # where uploaded file blobs live

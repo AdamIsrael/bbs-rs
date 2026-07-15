@@ -29,6 +29,16 @@ pub fn enforce_rate(count: i64, max: u32) -> Result<()> {
     Ok(())
 }
 
+/// Reject content whose character count exceeds `max` (0 disables the limit).
+/// `field` names the offending field for the error message. Used to bound
+/// post/mail subjects and bodies.
+pub fn enforce_len(field: &'static str, value: &str, max: usize) -> Result<()> {
+    if max > 0 && value.chars().count() > max {
+        return Err(AppError::FieldTooLong(field, max));
+    }
+    Ok(())
+}
+
 /// Rank a role for access comparisons: `guest` < `user` < `admin`. An unknown
 /// role ranks as the most restrictive (0), so a typo never grants access.
 pub fn role_rank(role: &str) -> usize {
