@@ -141,10 +141,11 @@ pub async fn register_user(
     find_user(pool, username).await?.ok_or(AppError::NotFound)
 }
 
-/// Ensure the shared `guest/guest` limited account exists.
-pub async fn ensure_guest(pool: &SqlitePool) -> Result<()> {
+/// Ensure the shared `guest` limited account exists, with the given password
+/// (defaults to "guest" via `[seed] guest_password`).
+pub async fn ensure_guest(pool: &SqlitePool, password: &str) -> Result<()> {
     if find_user(pool, "guest").await?.is_none() {
-        let hash = hash_password("guest")?;
+        let hash = hash_password(password)?;
         sqlx::query("INSERT INTO users (username, password_hash, role, created_at) VALUES ('guest', ?, 'guest', ?)")
             .bind(hash)
             .bind(now_unix())

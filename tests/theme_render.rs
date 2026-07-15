@@ -22,7 +22,7 @@ async fn guest_pool() -> (sqlx::SqlitePool, bbs_rs::db::models::User) {
         .await
         .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-    services::seed(&pool).await.unwrap();
+    services::seed(&pool, &Default::default()).await.unwrap();
     let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
     (pool, guest)
 }

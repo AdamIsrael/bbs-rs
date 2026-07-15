@@ -32,7 +32,7 @@ use services::presence::Presence;
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     let pool = db::connect(&settings.network.database_url).await?;
     db::run_migrations(&pool).await?;
-    services::seed(&pool).await?;
+    services::seed(&pool, &settings.seed).await?;
 
     let config = Arc::new(settings);
     let presence = Presence::new();

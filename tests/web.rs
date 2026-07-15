@@ -26,7 +26,9 @@ async fn web_guest_login_renders() {
         .await
         .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-    bbs_rs::services::seed(&pool).await.unwrap();
+    bbs_rs::services::seed(&pool, &Default::default())
+        .await
+        .unwrap();
 
     let state = web::WebState::new(
         pool,

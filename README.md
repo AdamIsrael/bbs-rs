@@ -138,6 +138,13 @@ port = 8088
 [oneliners]  # graffiti-wall policy (separate from the [features] on/off toggle)
 max_entries = 200      # trim to the most recent N after each post (0 = keep all)
 max_length = 120       # max chars per oneliner (0 = no cap)
+
+[seed]       # first-run seeded content (boards created only on a fresh DB)
+# guest_password = "guest"     # password for the shared guest account
+# boards = [                   # replaces the default General + Announcements
+#   { name = "General", description = "General chatter", min_write = "user" },
+#   { name = "Staff", min_read = "admin", min_write = "admin" },
+# ]
 ```
 
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.

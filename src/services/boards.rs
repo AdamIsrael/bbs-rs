@@ -7,7 +7,7 @@
 
 use sqlx::sqlite::SqlitePool;
 
-use crate::config::Limits;
+use crate::config::{Limits, SeedBoard};
 use crate::db::models::{Board, Message, User};
 use crate::error::{AppError, Result};
 use crate::services::{enforce_len, enforce_rate};
@@ -305,24 +305,39 @@ pub async fn set_locked_by_name(pool: &SqlitePool, board_name: &str, locked: boo
     Ok(())
 }
 
-/// Seed a couple of default boards on first run. Announcements is admin-only to
-/// post to (readable by everyone), showcasing the write ACL.
-pub async fn ensure_default_boards(pool: &SqlitePool) -> Result<()> {
+/// Seed the operator-configured boards on first run (only when the board table
+/// is empty). A board whose `min_read`/`min_write` isn't a known role is logged
+/// and falls back to the safe default rather than failing startup.
+pub async fn ensure_default_boards(pool: &SqlitePool, boards: &[SeedBoard]) -> Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM boards")
         .fetch_one(pool)
         .await?;
-    if count == 0 {
-        for (name, desc, min_write) in [
-            ("General", "General chatter and introductions", "user"),
-            ("Announcements", "System news and updates", "admin"),
-        ] {
-            sqlx::query("INSERT INTO boards (name, description, min_write_role) VALUES (?, ?, ?)")
-                .bind(name)
-                .bind(desc)
-                .bind(min_write)
-                .execute(pool)
-                .await?;
-        }
+    if count != 0 {
+        return Ok(());
+    }
+    for b in boards {
+        let min_read = valid_role(&b.min_read, "guest", &b.name, "min_read");
+        let min_write = valid_role(&b.min_write, "user", &b.name, "min_write");
+        sqlx::query(
+            "INSERT INTO boards (name, description, min_read_role, min_write_role) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&b.name)
+        .bind(&b.description)
+        .bind(min_read)
+        .bind(min_write)
+        .execute(pool)
+        .await?;
     }
     Ok(())
+}
+
+/// Return `role` if it's a known role, otherwise log and fall back to `default`.
+fn valid_role<'a>(role: &'a str, default: &'a str, board: &str, field: &str) -> &'a str {
+    if crate::services::admin::ROLES.contains(&role) {
+        role
+    } else {
+        tracing::warn!("seed board {board:?}: invalid {field} {role:?}; using {default:?}");
+        default
+    }
 }
