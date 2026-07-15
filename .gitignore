@@ -10,3 +10,9 @@
 /host_key.pub
 # File-area storage (default [files].storage_dir)
 /files/
+
+# Editor swap files
+*.swp
+*.swo
+*.swn
+.*.swp
