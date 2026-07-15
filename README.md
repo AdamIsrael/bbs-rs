@@ -150,13 +150,16 @@ max_length = 120       # max chars per oneliner (0 = no cap)
 # ]
 
 # [[doors]]  # external "door" programs (a Doors menu appears when any exist)
-# name = "Adventure"
-# command = "/usr/games/adventure"
-# args = []
-# cwd = "/var/bbs/doors/adventure"
-# time_limit_secs = 900        # 0 = no limit
-# drop_file = "dorinfo1.def"   # or "door.sys"; blank = none
+# name = "Legend of the Indigo Dragon"
+# command = "target/release/loid"   # the bundled example game (cargo build --release)
+# cwd = "doors/loid-data"           # writable; LOID stores saves here
+# time_limit_secs = 900             # 0 = no limit
+# drop_file = "dorinfo1.def"        # or "door.sys"; blank = none
 ```
+
+A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-style RPG — ships in
+[`doors/`](doors/) (a self-contained workspace built on a reusable `doorkit` library). See
+[`doors/README.md`](doors/README.md) to build it and wire it up, or to write your own.
 
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.
 **Art** lets you drop in a welcome screen and per-screen headers — real CP437 `.ans` files and modern

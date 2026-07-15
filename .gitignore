@@ -16,3 +16,7 @@
 *.swo
 *.swn
 .*.swp
+
+# Door game save data (runtime)
+loid-saves/
+doors/loid-data/

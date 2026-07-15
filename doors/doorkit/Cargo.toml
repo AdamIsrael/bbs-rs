@@ -1,0 +1,9 @@
+[package]
+name = "doorkit"
+version = "0.1.0"
+edition = "2024"
+description = "A small, BBS-agnostic toolkit for writing terminal door games: drop-file parsing and raw-terminal I/O."
+license = "MIT"
+
+[dependencies]
+crossterm = "0.29.0"
