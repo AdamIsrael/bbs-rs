@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -33,7 +34,8 @@ use crate::transport::Event;
 struct BbsServer {
     pool: SqlitePool,
     presence: Presence,
-    config: Arc<Settings>,
+    /// Hot-swappable settings; each connection snapshots the current value.
+    config: Arc<ArcSwap<Settings>>,
     /// Session-id source shared with the web frontend so ids never collide.
     next_id: Arc<AtomicUsize>,
 }
@@ -46,7 +48,8 @@ impl Server for BbsServer {
         SessionHandler {
             pool: self.pool.clone(),
             presence: self.presence.clone(),
-            config: self.config.clone(),
+            // Snapshot the current settings for this session's lifetime.
+            config: self.config.load_full(),
             id,
             peer: addr,
             user: None,
@@ -357,13 +360,15 @@ fn load_or_generate_host_key(path: &Path) -> anyhow::Result<russh::keys::Private
 /// failed logins, then drop live sessions belonging to banned users or IPs.
 /// This is also how bans applied out-of-process (by `bbsctl`) reach active
 /// sessions; in-BBS admin bans also kick immediately.
-async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<Settings>) {
-    let mut ticker = tokio::time::interval(config.network.ban_sweep_interval());
+async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<ArcSwap<Settings>>) {
+    // The sweep interval is fixed at startup; the abuse policy is re-read each
+    // tick, so tightening/loosening it hot-reloads without a restart.
+    let mut ticker = tokio::time::interval(config.load().network.ban_sweep_interval());
     loop {
         ticker.tick().await;
 
         let _ = admin::purge_expired_ip_bans(&pool).await;
-        auto_ban(&pool, &config.abuse).await;
+        auto_ban(&pool, &config.load().abuse).await;
 
         let (users, ips) =
             match tokio::try_join!(admin::banned_usernames(&pool), admin::banned_ips(&pool)) {
@@ -436,18 +441,23 @@ fn advertised_methods(config: &Settings) -> russh::MethodSet {
 /// Bind and serve the SSH BBS until the process is stopped. `presence` and
 /// `next_id` are shared with the (optional) web frontend.
 pub async fn run(
-    config: Arc<Settings>,
+    config: Arc<ArcSwap<Settings>>,
     pool: SqlitePool,
     presence: Presence,
     next_id: Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
-    let net = &config.network;
+    // The SSH listener, host key, advertised methods, and timeouts are bound
+    // once from this boot snapshot; changing them needs a restart (the reload
+    // task warns when they change). Per-session settings are snapshotted fresh
+    // in `new_client`, so they hot-reload.
+    let boot = config.load_full();
+    let net = &boot.network;
     let key = load_or_generate_host_key(&net.host_key)?;
 
     tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
 
     let ssh_config = Config {
-        methods: advertised_methods(&config),
+        methods: advertised_methods(&boot),
         inactivity_timeout: Some(net.inactivity_timeout()),
         auth_rejection_time: net.auth_rejection_time(),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),

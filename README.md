@@ -35,7 +35,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **`bbsctl`** — an operator CLI for user management that works even when the server is down.
 - **Browser frontend** — an optional WebSocket + xterm.js web terminal (`[web] enabled = true`) that
   reuses the whole TUI: same screens, same auth, same who's-online. xterm.js is vendored (self-contained).
-- **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles.
+- **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles,
+  with **hot reload**: edit the file (or send `SIGHUP`) and new sessions pick it up without a restart.
 - **Themes & ANSI art** — pick a built-in color preset (or override individual colors), and drop in a
   custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work).
 
@@ -160,6 +161,13 @@ so the page is fully self-contained — no CDN at runtime.
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
 (registration is reached from the guest session). `bbsctl` reads the same `bbs.toml` for its database
 URL (`bbsctl --config bbs.toml …`), or takes `--database-url` directly.
+
+**Hot reload**: edit `bbs.toml` while the server runs (or send it `SIGHUP`) and it re-reads the file —
+no restart, no dropped sessions. **New** logins pick up the change; existing sessions keep the settings
+they started with. Reloadable: branding, theme/art, `[features]`, `[limits]`, `[abuse]`, `[accounts]`,
+`[files]`, `[oneliners]`. The listeners (`[network]`, `[web]`), host key, `database_url`, and `[seed]`
+are bound once at startup — a reload applies but logs that those need a restart to take effect. A file
+that fails to parse is rejected and the running config is kept.
 
 Set `RUST_LOG=info` for server logs (written to stderr, never into a client's terminal).
 

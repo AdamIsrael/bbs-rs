@@ -20,6 +20,6 @@ async fn main() -> anyhow::Result<()> {
     if cli.migrate {
         bbs_rs::migrate(settings).await
     } else {
-        bbs_rs::serve(settings).await
+        bbs_rs::serve(cli, settings).await
     }
 }

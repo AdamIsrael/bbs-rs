@@ -10,6 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio_tungstenite::tungstenite::Message;
 
+use arc_swap::ArcSwap;
 use bbs_rs::config::Settings;
 use bbs_rs::services::presence::Presence;
 use bbs_rs::web;
@@ -32,7 +33,7 @@ async fn web_guest_login_renders() {
 
     let state = web::WebState::new(
         pool,
-        Arc::new(Settings::default()),
+        Arc::new(ArcSwap::from_pointee(Settings::default())),
         Presence::new(),
         Arc::new(AtomicUsize::new(0)),
     );

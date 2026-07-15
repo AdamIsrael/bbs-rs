@@ -12,6 +12,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod input;
+pub mod reload;
 pub mod services;
 pub mod ssh;
 pub mod transport;
@@ -22,27 +23,35 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use anyhow::Context;
+use arc_swap::ArcSwap;
 
-use config::Settings;
+use config::{Cli, Settings};
 use services::presence::Presence;
 
 /// Open the database, run migrations, seed defaults, and serve over SSH (and,
 /// when enabled, the browser frontend). Both transports share one presence
 /// registry and session-id counter, so who's-online and kicks span them.
-pub async fn serve(settings: Settings) -> anyhow::Result<()> {
+pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
     let pool = db::connect(&settings.network.database_url).await?;
     db::run_migrations(&pool).await?;
     services::seed(&pool, &settings.seed).await?;
 
-    let config = Arc::new(settings);
+    // Settings live in an `ArcSwap` so the config file can be hot-reloaded:
+    // new sessions snapshot the current value; the reload task swaps it in.
+    let config = Arc::new(ArcSwap::from_pointee(settings));
+    reload::spawn(cli, config.clone());
+
     let presence = Presence::new();
     let next_id = Arc::new(AtomicUsize::new(0));
 
-    if config.web.enabled {
+    // A snapshot for the startup-bound values (listeners, host key). These are
+    // fixed for the process lifetime — reload flags changes to them.
+    let boot = config.load_full();
+    if boot.web.enabled {
         // Bind the web port eagerly so a conflict (port already in use) fails
         // startup with a clear error, rather than being lost in a background
         // task while the process keeps running SSH-only.
-        let addr = format!("{}:{}", config.web.host, config.web.port);
+        let addr = format!("{}:{}", boot.web.host, boot.web.port);
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .with_context(|| {
@@ -61,14 +70,14 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
             }
         });
         // Best-effort: warn if something other than us answers on the port.
-        tokio::spawn(web::self_check(config.web.host.clone(), config.web.port));
+        tokio::spawn(web::self_check(boot.web.host.clone(), boot.web.port));
     }
 
     tracing::info!(
         "{} listening on {}:{}",
-        config.bbs.name,
-        config.network.host,
-        config.network.port
+        boot.bbs.name,
+        boot.network.host,
+        boot.network.port
     );
 
     ssh::run(config, pool, presence, next_id).await

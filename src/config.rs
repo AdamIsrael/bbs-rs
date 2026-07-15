@@ -61,7 +61,7 @@ pub struct Settings {
 /// First-run seeded content: the boards created when the board table is empty,
 /// and the shared guest account's password. Both are optional — unset uses the
 /// built-in defaults; see [`Seed::boards`] / [`Seed::guest_password`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Seed {
     /// Boards to create on first run. `None` (unset) uses the built-in defaults
@@ -72,7 +72,7 @@ pub struct Seed {
 }
 
 /// One operator-defined seed board.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeedBoard {
     pub name: String,
     #[serde(default)]
@@ -147,7 +147,7 @@ impl Default for Oneliners {
 /// Optional browser frontend: a WebSocket + xterm.js terminal that reuses the
 /// whole TUI. Disabled by default; enable and pick a bind address to serve it
 /// alongside SSH.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Web {
     pub enabled: bool,
@@ -221,7 +221,7 @@ pub struct Bbs {
 }
 
 /// Network and SSH tuning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Network {
     pub host: String,
