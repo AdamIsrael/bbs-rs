@@ -72,7 +72,7 @@ impl Default for Web {
         Self {
             enabled: false,
             host: "0.0.0.0".into(),
-            port: 8080,
+            port: 8088,
         }
     }
 }
@@ -545,7 +545,7 @@ welcome = \"\"
 # served alongside SSH. Off by default.
 enabled = false
 host = \"0.0.0.0\"
-port = 8080
+port = 8088
 ";
 
 #[cfg(test)]

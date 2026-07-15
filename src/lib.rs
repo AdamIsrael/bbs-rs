@@ -60,6 +60,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
                 tracing::error!("web frontend stopped: {e}");
             }
         });
+        // Best-effort: warn if something other than us answers on the port.
+        tokio::spawn(web::self_check(config.web.host.clone(), config.web.port));
     }
 
     tracing::info!(

@@ -12,6 +12,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -91,9 +92,61 @@ pub fn router(state: WebState) -> Router {
             "/addon-fit.js",
             get(|| asset(ASSET_ADDON_FIT, "text/javascript")),
         )
+        .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
+}
+
+/// Body of the health endpoint — a marker the startup self-check looks for to
+/// confirm that *bbs-rs* (not another process that also bound the port) is the
+/// one answering on the web address.
+const HEALTH_MARKER: &str = "bbs-rs-web-ok";
+
+async fn healthz() -> &'static str {
+    HEALTH_MARKER
+}
+
+/// Probe our own web port shortly after startup and warn if the responder
+/// isn't us. This catches the case a bind check can't: on macOS/BSD a wildcard
+/// bind (`0.0.0.0:PORT`) succeeds even when another process holds
+/// `127.0.0.1:PORT`, and local clients then reach that other process. Best
+/// effort — a failed probe only warns, never stops the server.
+pub async fn self_check(host: String, port: u16) {
+    // Give the accept loop a moment to come up.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // A client can't connect to a wildcard bind address; probe loopback instead.
+    let target = match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
+        h => h.to_string(),
+    };
+    match probe_health(&target, port).await {
+        Ok(body) if body.contains(HEALTH_MARKER) => {
+            tracing::debug!("web self-check ok on {target}:{port}");
+        }
+        Ok(_) => tracing::warn!(
+            "web self-check: another process is answering on {target}:{port} — browsers will \
+             reach it, not bbs-rs. Free the port or set a different [web] port."
+        ),
+        Err(e) => tracing::warn!(
+            "web self-check could not reach {target}:{port} ({e}); the frontend may be unreachable."
+        ),
+    }
+}
+
+/// Fetch `/healthz` over a raw HTTP/1.0 request (no HTTP-client dependency).
+async fn probe_health(host: &str, port: u16) -> anyhow::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await??;
+    let req = format!("GET /healthz HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await?;
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut buf)).await??;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Log every HTTP request and its response status. Errors (e.g. a 404) log at

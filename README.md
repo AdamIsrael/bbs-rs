@@ -131,7 +131,7 @@ welcome = ""           # file shown on the main menu (blank = none)
 [web]        # optional browser frontend (WebSocket + xterm.js), off by default
 enabled = false
 host = "0.0.0.0"
-port = 8080
+port = 8088
 ```
 
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.
