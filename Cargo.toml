@@ -10,6 +10,13 @@ readme = "README.md"
 keywords = ["bbs", "ssh", "tui", "ratatui", "russh"]
 categories = ["command-line-utilities", "network-programming"]
 
+# Door games live in their own workspace members. They have no dependency on
+# the bbs-rs crate — they talk to any BBS via a drop file + the terminal — so
+# they stay portable and could be split into their own repo unchanged.
+[workspace]
+members = ["doors/doorkit", "doors/loid"]
+resolver = "2"
+
 [dependencies]
 anyhow = "1.0.103"
 arc-swap = "1.7.1"

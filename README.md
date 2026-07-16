@@ -159,6 +159,10 @@ max_length = 120       # max chars per oneliner (0 = no cap)
 # drop_file = "dorinfo1.def"   # or "door.sys"; blank = none
 ```
 
+A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-style RPG — ships in
+[`doors/`](doors/) (a self-contained workspace built on a reusable `doorkit` library). See
+[`doors/README.md`](doors/README.md) to build it and wire it up, or to write your own.
+
 **Themes** are fully customizable: pick a built-in `preset` and/or override individual colors.
 **Art** lets you drop in a welcome screen and per-screen headers — real CP437 `.ans` files and modern
 UTF-8 text with ANSI color escapes both render. See [`art/welcome.example.txt`](art/welcome.example.txt)
