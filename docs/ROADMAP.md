@@ -69,3 +69,62 @@ These are done and are the substrate several roadmap items build on:
 - [**Seeded content in config**](https://github.com/AdamIsrael/bbs-rs/issues/19) — **Shipped**: a
   `[seed]` section defines the first-run boards (name/description/min_read/min_write, replacing the
   built-in General + Announcements) and the guest account's password. Boards seed only on a fresh DB.
+
+---
+
+# Roadmap v2 — beyond the basics
+
+The original three tiers above are **all shipped**. This second wave targets the biggest remaining gaps:
+real-time interaction, deeper messaging, account/operator lifecycle, and reach — plus a flagship
+**federation** effort to network instances together. Prioritization lens is unchanged (classic-BBS flavor
++ ops/security first).
+
+## Theme A — Real-time & social *(classic flavor)*
+
+The substrate already exists: every session parks a `Sender<Event>` in the shared `Presence` registry and
+the per-session run loop redraws after every event, so pushed lines need no polling; SSH and web share the
+same path. These add `Presence` fan-out methods (`send_to`, `send_to_user`, `broadcast`) + new `Event`
+variants.
+
+| Feature | Size | Issue |
+|---|---|---|
+| **Multi-user chat / teleconference** | M | [#67](https://github.com/AdamIsrael/bbs-rs/issues/67) |
+| **User paging (yell)** | S | [#68](https://github.com/AdamIsrael/bbs-rs/issues/68) |
+| **Sysop broadcast to live sessions** | S | [#69](https://github.com/AdamIsrael/bbs-rs/issues/69) |
+
+## Theme B — Deeper messaging *(engagement)*
+
+| Feature | Size | Issue |
+|---|---|---|
+| **Mail actions: reply / forward / delete** | M | [#70](https://github.com/AdamIsrael/bbs-rs/issues/70) |
+| **Mail to sysop** | S | [#71](https://github.com/AdamIsrael/bbs-rs/issues/71) |
+| **Polls / voting booth** | M | [#72](https://github.com/AdamIsrael/bbs-rs/issues/72) |
+
+## Theme C — Accounts, ops & security *(ops/security)*
+
+| Feature | Size | Issue |
+|---|---|---|
+| **New-user validation queue** | M | [#73](https://github.com/AdamIsrael/bbs-rs/issues/73) |
+| **Moderation / audit log** | M | [#74](https://github.com/AdamIsrael/bbs-rs/issues/74) |
+| **Per-user daily time limits** | S | [#75](https://github.com/AdamIsrael/bbs-rs/issues/75) |
+| **Password reset / account recovery (+ optional TOTP 2FA)** | M | [#76](https://github.com/AdamIsrael/bbs-rs/issues/76) |
+| **HTTPS/WSS for the web frontend** | S | [#54](https://github.com/AdamIsrael/bbs-rs/issues/54) |
+
+## Theme D — Reach *(classic flavor / reach)*
+
+| Feature | Size | Issue |
+|---|---|---|
+| **`finger` service (RFC 1288)** — user discovery over TCP/79, reusing profiles + last-on + who's-online | S | [#77](https://github.com/AdamIsrael/bbs-rs/issues/77) |
+
+## Theme E — Federation *(flagship, multi-phase)* — epic [#82](https://github.com/AdamIsrael/bbs-rs/issues/82)
+
+Network independent instances FidoNet-style (store-and-forward) to exchange boards + user mail. New
+subsystem layered over the existing schema; the data model has no cross-instance identity today (local
+autoincrement ids, `author_id` a NOT NULL FK to local `users`, no node/msgid/seen-by concepts).
+
+| Phase | Size | Issue |
+|---|---|---|
+| **1 — instance identity + peer registry** | M | [#78](https://github.com/AdamIsrael/bbs-rs/issues/78) |
+| **2 — echomail (networked boards)** | L | [#79](https://github.com/AdamIsrael/bbs-rs/issues/79) |
+| **3 — netmail (cross-instance mail)** | L | [#80](https://github.com/AdamIsrael/bbs-rs/issues/80) |
+| **4 — transport & security** | M | [#81](https://github.com/AdamIsrael/bbs-rs/issues/81) |
