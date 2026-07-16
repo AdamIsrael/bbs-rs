@@ -1518,3 +1518,39 @@ async fn presence_kick_signals_matching_sessions() {
     assert!(matches!(rx_ip.try_recv(), Ok(Event::Quit)));
     assert!(rx_safe.try_recv().is_err(), "carol is not signalled");
 }
+
+#[tokio::test]
+async fn mail_unread_count_tracks_reads() {
+    use bbs_rs::services::{auth, mail};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    let limits = Default::default();
+
+    // No mail yet.
+    assert_eq!(mail::unread_count(&pool, bob.id).await.unwrap(), 0);
+
+    // Alice sends bob two messages: both unread.
+    mail::send_mail(&pool, &alice, "bob", "one", "hi", &limits)
+        .await
+        .unwrap();
+    mail::send_mail(&pool, &alice, "bob", "two", "yo", &limits)
+        .await
+        .unwrap();
+    assert_eq!(mail::unread_count(&pool, bob.id).await.unwrap(), 2);
+    // The sender has nothing addressed to them.
+    assert_eq!(mail::unread_count(&pool, alice.id).await.unwrap(), 0);
+
+    // Reading one message marks it read and drops the count to 1.
+    let inbox = mail::inbox(&pool, bob.id).await.unwrap();
+    mail::read_mail(&pool, inbox[0].id, bob.id).await.unwrap();
+    assert_eq!(mail::unread_count(&pool, bob.id).await.unwrap(), 1);
+
+    // Re-reading the same message is idempotent for the count.
+    mail::read_mail(&pool, inbox[0].id, bob.id).await.unwrap();
+    assert_eq!(mail::unread_count(&pool, bob.id).await.unwrap(), 1);
+}

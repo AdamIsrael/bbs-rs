@@ -74,6 +74,10 @@ pub struct App {
     /// Unread message counts per board id ("new since last call"), empty for
     /// guests (whose shared account has no meaningful watermark).
     pub board_unread: std::collections::HashMap<i64, i64>,
+    /// Unread private-mail count, surfaced as a login notice and a main-menu
+    /// badge. Always 0 for guests (they can't receive mail) and when the
+    /// private-mail feature is disabled.
+    pub mail_unread: i64,
 
     // Messages (threaded: each item carries its reply depth)
     pub messages: Vec<ThreadItem>,
@@ -218,6 +222,7 @@ impl App {
             board_sel: 0,
             current_board: None,
             board_unread: std::collections::HashMap::new(),
+            mail_unread: 0,
             messages: Vec::new(),
             msg_sel: 0,
             current_message: None,
@@ -590,16 +595,26 @@ impl App {
         }
     }
 
-    /// Refresh per-board unread counts ("new since last call"). Guests share a
-    /// single account with no meaningful watermark, so they get no counts.
+    /// Refresh per-board unread counts ("new since last call") and the unread
+    /// private-mail count. Guests share a single account with no meaningful
+    /// watermark and can't receive mail, so they get no counts.
     async fn refresh_unread(&mut self) {
         if self.user.is_guest() {
             self.board_unread.clear();
+            self.mail_unread = 0;
             return;
         }
         match boards::unread_counts(&self.pool, self.user.id).await {
             Ok(counts) => self.board_unread = counts,
             Err(e) => self.status = format!("Error loading unread: {e}"),
+        }
+        if self.config.features.private_mail {
+            match mail::unread_count(&self.pool, self.user.id).await {
+                Ok(n) => self.mail_unread = n,
+                Err(e) => self.status = format!("Error loading mail count: {e}"),
+            }
+        } else {
+            self.mail_unread = 0;
         }
     }
 
@@ -926,7 +941,12 @@ impl App {
                 ]);
                 self.screen = Screen::ComposeMail;
             }
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
+                // Reading a message cleared its `read_at`; refresh so the
+                // main-menu badge reflects what's left.
+                self.refresh_unread().await;
+                self.screen = Screen::MainMenu;
+            }
             _ => {}
         }
     }
@@ -1723,6 +1743,17 @@ pub async fn run<W: std::io::Write>(
 ) -> anyhow::Result<()> {
     // Show bulletins after login when any exist.
     app.load_startup_bulletins().await;
+    // Populate the unread counts (board badges + mail badge) for the first
+    // frame, and surface a one-shot "new mail" notice in the status bar. The
+    // status line always renders, so this shows even when bulletins take over
+    // the landing screen; it clears as soon as the user presses a key.
+    app.refresh_unread().await;
+    if app.mail_unread > 0 {
+        app.status = format!(
+            "\u{1F4EC} You have {} unread message(s) \u{2014} open Private Mail to read.",
+            app.mail_unread
+        );
+    }
     terminal.draw(|f| ui::draw(f, &app))?;
 
     while let Some(event) = events.recv().await {

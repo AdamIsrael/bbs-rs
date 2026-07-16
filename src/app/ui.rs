@@ -174,8 +174,12 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|m| {
             let mut label = m.label().to_string();
-            if *m == MenuItem::Mail && app.user.is_guest() {
-                label.push_str("   (register required)");
+            if *m == MenuItem::Mail {
+                if app.user.is_guest() {
+                    label.push_str("   (register required)");
+                } else if app.mail_unread > 0 {
+                    label.push_str(&format!("   ({} new)", app.mail_unread));
+                }
             }
             Line::from(label)
         })
