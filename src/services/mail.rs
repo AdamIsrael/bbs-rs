@@ -48,6 +48,17 @@ pub async fn read_mail(pool: &SqlitePool, id: i64, user_id: i64) -> Result<Mail>
     Ok(mail)
 }
 
+/// Number of unread messages addressed to a user (`read_at IS NULL`). Used to
+/// surface a "you have N new messages" notice at login and a main-menu badge.
+pub async fn unread_count(pool: &SqlitePool, user_id: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM mail WHERE to_id = ? AND read_at IS NULL")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 /// Count mail a user has sent since `since` (Unix seconds).
 async fn recent_sent_count(pool: &SqlitePool, from_id: i64, since: i64) -> Result<i64> {
     Ok(
