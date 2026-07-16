@@ -1007,6 +1007,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "doorkit"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2002,6 +2009,16 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "loid"
+version = "0.1.0"
+dependencies = [
+ "doorkit",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lru"
