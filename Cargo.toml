@@ -1,6 +1,6 @@
 [package]
 name = "bbs-rs"
-version = "0.1.0"
+version = "0.3.1"
 edition = "2024"
 description = "A bulletin board system (BBS) served over SSH: message boards, private mail, bulletins, and a graffiti wall in a ratatui TUI."
 license = "MIT"
