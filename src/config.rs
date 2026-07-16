@@ -181,6 +181,25 @@ pub struct Web {
     pub enabled: bool,
     pub host: String,
     pub port: u16,
+    /// Serve HTTPS/WSS. On by default: with no cert configured the server
+    /// generates a persistent self-signed cert so TLS works out of the box.
+    pub tls: bool,
+    /// PEM certificate-chain path. Blank = auto-generate a self-signed cert at
+    /// `tls_cert`/`tls_key` (created if missing). Set both to bring your own.
+    pub tls_cert: String,
+    /// PEM private-key path (see `tls_cert`).
+    pub tls_key: String,
+    /// Domains to fetch a trusted Let's Encrypt cert for (ACME, TLS-ALPN-01).
+    /// Non-empty takes precedence over `tls_cert`/`tls_key`. Requires public
+    /// DNS and reachability on port 443.
+    pub acme_domains: Vec<String>,
+    /// ACME account contact email.
+    pub acme_email: String,
+    /// Directory where ACME caches the account key and issued certs.
+    pub acme_cache: String,
+    /// Use the Let's Encrypt staging environment (untrusted certs, higher rate
+    /// limits) for testing the ACME flow.
+    pub acme_staging: bool,
 }
 
 impl Default for Web {
@@ -189,6 +208,13 @@ impl Default for Web {
             enabled: false,
             host: "0.0.0.0".into(),
             port: 8088,
+            tls: true,
+            tls_cert: String::new(),
+            tls_key: String::new(),
+            acme_domains: Vec::new(),
+            acme_email: String::new(),
+            acme_cache: "acme-cache".into(),
+            acme_staging: false,
         }
     }
 }
@@ -672,6 +698,20 @@ welcome = \"\"
 enabled = false
 host = \"0.0.0.0\"
 port = 8088
+# TLS (HTTPS/WSS). On by default: with no cert configured a persistent
+# self-signed cert is generated at tls_cert/tls_key (default web-cert.pem /
+# web-key.pem), so TLS works out of the box — browsers show a one-time trust
+# warning until you install a real cert. Set tls = false for plain HTTP.
+tls = true
+# Bring your own cert instead (real CA, mkcert, certbot output):
+# tls_cert = \"web-cert.pem\"
+# tls_key  = \"web-key.pem\"
+# Or fetch a trusted Let's Encrypt cert automatically (ACME). Takes precedence
+# over tls_cert/tls_key. Requires public DNS and reachability on port 443:
+# acme_domains = [\"bbs.example.com\"]
+# acme_email   = \"sysop@example.com\"
+# acme_cache   = \"acme-cache\"
+# acme_staging = false   # true = Let's Encrypt staging (untrusted, for testing)
 
 [oneliners]
 # Graffiti-wall policy (separate from the [features] oneliners on/off toggle).
@@ -741,6 +781,8 @@ mod tests {
         assert!(parsed.art.welcome.is_empty());
         assert_eq!(parsed.web.enabled, def.web.enabled);
         assert_eq!(parsed.web.port, def.web.port);
+        assert_eq!(parsed.web.tls, def.web.tls);
+        assert_eq!(parsed.web.acme_cache, def.web.acme_cache);
         assert_eq!(parsed.oneliners.max_entries, def.oneliners.max_entries);
         assert_eq!(parsed.oneliners.max_length, def.oneliners.max_length);
         // The template's [seed] is all commented, so it resolves to the

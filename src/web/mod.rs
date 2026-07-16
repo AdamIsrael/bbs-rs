@@ -39,7 +39,9 @@ use crate::services::{admin, auth};
 use crate::transport::Event;
 
 mod terminal;
+pub mod tls;
 use terminal::WebTerminalHandle;
+pub use tls::TlsSetup;
 
 /// Shared HTTP state, cloned per request.
 #[derive(Clone)]
@@ -81,6 +83,32 @@ pub async fn serve(listener: tokio::net::TcpListener, state: WebState) -> anyhow
     Ok(())
 }
 
+/// Serve the frontend over TLS (HTTPS/WSS) on an already-bound listener. The
+/// `SocketAddr` connect-info is preserved so the `/ws` handler still sees the
+/// real peer IP for ban/audit.
+pub async fn serve_tls(
+    listener: std::net::TcpListener,
+    state: WebState,
+    tls: TlsSetup,
+) -> anyhow::Result<()> {
+    let make = router(state).into_make_service_with_connect_info::<SocketAddr>();
+    match tls {
+        TlsSetup::Rustls(config) => {
+            axum_server::from_tcp_rustls(listener, config)?
+                .serve(make)
+                .await?;
+        }
+        TlsSetup::Acme { acceptor, driver } => {
+            tokio::spawn(driver);
+            axum_server::from_tcp(listener)?
+                .acceptor(acceptor)
+                .serve(make)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Build the axum router for the browser frontend.
 pub fn router(state: WebState) -> Router {
     Router::new()
@@ -114,7 +142,7 @@ async fn healthz() -> &'static str {
 /// bind (`0.0.0.0:PORT`) succeeds even when another process holds
 /// `127.0.0.1:PORT`, and local clients then reach that other process. Best
 /// effort — a failed probe only warns, never stops the server.
-pub async fn self_check(host: String, port: u16) {
+pub async fn self_check(host: String, port: u16, tls: bool) {
     // Give the accept loop a moment to come up.
     tokio::time::sleep(Duration::from_millis(300)).await;
     // A client can't connect to a wildcard bind address; probe loopback instead.
@@ -122,7 +150,14 @@ pub async fn self_check(host: String, port: u16) {
         "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
         h => h.to_string(),
     };
-    match probe_health(&target, port).await {
+    // Over HTTPS a cleartext probe can't complete the handshake, so use a
+    // TLS client that trusts any cert (loopback only) to read /healthz.
+    let probe = if tls {
+        tls::probe_health_tls(&target, port).await
+    } else {
+        probe_health(&target, port).await
+    };
+    match probe {
         Ok(body) if body.contains(HEALTH_MARKER) => {
             tracing::debug!("web self-check ok on {target}:{port}");
         }
