@@ -22,6 +22,7 @@ anyhow = "1.0.103"
 arc-swap = "1.7.1"
 argon2 = "0.5.3"
 axum = { version = "0.8.7", features = ["ws"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"
 flate2 = "1.1.9"
@@ -30,8 +31,11 @@ getrandom = "0.4"
 notify = "8.2.0"
 portable-pty = "0.9.0"
 ratatui = "0.30.2"
+rcgen = "0.14.8"
 russh = "0.62.2"
 russh-sftp = { version = "2.3.0", default-features = false }
+rustls = "0.23.42"
+rustls-acme = { version = "0.15.3", features = ["axum", "tokio"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
@@ -39,10 +43,13 @@ tar = "0.4.46"
 thiserror = "2.0.18"
 time = "0.3.53"
 tokio = { version = "1.52.3", features = ["full"] }
+tokio-rustls = "0.26.4"
 toml = "1.1.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-tokio-tungstenite = "0.28.0"
+rustls = "0.23.42"
+rustls-pemfile = "2.2.0"
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }

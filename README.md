@@ -137,6 +137,11 @@ welcome = ""           # file shown on the main menu (blank = none)
 enabled = false
 host = "0.0.0.0"
 port = 8088
+tls = true             # HTTPS/WSS; auto self-signed cert if none configured
+# tls_cert = "web-cert.pem"   # bring your own PEM cert + key instead
+# tls_key  = "web-key.pem"
+# acme_domains = ["bbs.example.com"]  # or auto Let's Encrypt (needs DNS + :443)
+# acme_email   = "sysop@example.com"
 
 [oneliners]  # graffiti-wall policy (separate from the [features] on/off toggle)
 max_entries = 200      # trim to the most recent N after each post (0 = keep all)
@@ -168,10 +173,28 @@ A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-st
 UTF-8 text with ANSI color escapes both render. See [`art/welcome.example.txt`](art/welcome.example.txt)
 for a starting point (`welcome = "welcome.example.txt"` to use it).
 
-**Browser frontend**: set `[web] enabled = true` and browse to `http://<host>:<port>/` for the same BBS
+**Browser frontend**: set `[web] enabled = true` and browse to `https://<host>:<port>/` for the same BBS
 in a web terminal (try `guest` / `guest`). It shares the SSH server's users, login audit, bans, and
 who's-online. xterm.js ([MIT](https://github.com/xtermjs/xterm.js)) is vendored under `src/web/static/`,
 so the page is fully self-contained — no CDN at runtime.
+
+**HTTPS / TLS**: TLS is **on by default** when the web frontend is enabled, so credentials and the session
+are encrypted (the page automatically uses `wss://` for its WebSocket). There are three cert modes,
+resolved in this order:
+
+- **Self-signed (default)** — with no cert configured, a persistent self-signed cert is generated at
+  `tls_cert`/`tls_key` (default `web-cert.pem` / `web-key.pem`) on first start and reused thereafter. TLS
+  works out of the box; browsers show a **one-time trust warning** you must accept (or import the cert as
+  trusted). Best for a LAN or a quick start.
+- **Bring your own cert** — set `tls_cert` and `tls_key` to PEM files from a real CA, `certbot`, or
+  [`mkcert`](https://github.com/FiloSottile/mkcert) (`mkcert <host>` → locally-trusted, no warning).
+- **Automatic Let's Encrypt (ACME)** — set `acme_domains = ["bbs.example.com"]` and `acme_email`. The
+  server fetches and renews a **trusted** cert automatically via the TLS-ALPN-01 challenge. This needs
+  the domain's public DNS pointed at the host and the server reachable on **port 443** (`port = 443`);
+  it can't work on a bare localhost. Use `acme_staging = true` to rehearse against Let's Encrypt staging.
+
+Set `tls = false` for plain HTTP (e.g. when a **reverse proxy** such as Caddy or nginx+certbot already
+terminates TLS in front of bbs-rs and forwards to the plain-HTTP port).
 
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
 (registration is reached from the guest session). `bbsctl` reads the same `bbs.toml` for its database
