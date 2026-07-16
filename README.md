@@ -151,9 +151,10 @@ max_length = 120       # max chars per oneliner (0 = no cap)
 
 # [[doors]]  # external "door" programs (a Doors menu appears when any exist)
 # name = "Adventure"
-# command = "/usr/games/adventure"
+# command = "/usr/games/adventure"  # absolute path (or a bare name on $PATH);
+#                                   # a relative path resolves against `cwd`, not the server's dir
 # args = []
-# cwd = "/var/bbs/doors/adventure"
+# cwd = "/var/bbs/doors/adventure"  # created if missing; the door runs here
 # time_limit_secs = 900        # 0 = no limit
 # drop_file = "dorinfo1.def"   # or "door.sys"; blank = none
 ```
