@@ -48,12 +48,16 @@ async fn door_launches_on_a_pty_over_websocket() {
         .await
         .unwrap();
 
+    // Point cwd at a directory that does NOT exist yet: the door runner must
+    // create it before writing the drop file / spawning (regression for a
+    // missing `cwd` failing the launch).
+    let workdir = dir.join("work_autocreate");
     let settings = Settings {
         doors: vec![Door {
             name: "Demo".into(),
             command: "/bin/sh".into(),
             args: vec![script.to_string_lossy().into_owned()],
-            cwd: Some(dir.clone()),
+            cwd: Some(workdir),
             time_limit_secs: 30,
             drop_file: Some("dorinfo1.def".into()),
         }],

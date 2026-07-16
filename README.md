@@ -150,11 +150,13 @@ max_length = 120       # max chars per oneliner (0 = no cap)
 # ]
 
 # [[doors]]  # external "door" programs (a Doors menu appears when any exist)
-# name = "Legend of the Indigo Dragon"
-# command = "target/release/loid"   # the bundled example game (cargo build --release)
-# cwd = "doors/loid-data"           # writable; LOID stores saves here
-# time_limit_secs = 900             # 0 = no limit
-# drop_file = "dorinfo1.def"        # or "door.sys"; blank = none
+# name = "Adventure"
+# command = "/usr/games/adventure"  # absolute path (or a bare name on $PATH);
+#                                   # a relative path resolves against `cwd`, not the server's dir
+# args = []
+# cwd = "/var/bbs/doors/adventure"  # created if missing; the door runs here
+# time_limit_secs = 900        # 0 = no limit
+# drop_file = "dorinfo1.def"   # or "door.sys"; blank = none
 ```
 
 A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-style RPG — ships in

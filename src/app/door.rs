@@ -23,10 +23,14 @@ use crate::transport::Event;
 /// How a door session ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DoorExit {
-    /// Back to the BBS (program exited, timed out, or failed to launch).
+    /// The program ran and exited (or timed out); return to the BBS.
     Returned,
     /// The client asked to disconnect while in the door.
     Quit,
+    /// The program could not be launched; the message is shown in the BBS
+    /// status bar (the screen is repainted on return, which would otherwise
+    /// wipe anything the door wrote to the client).
+    Failed(String),
 }
 
 /// Run `door` on a PTY, bridging bytes to/from the client until it exits, the
@@ -48,6 +52,18 @@ pub async fn run(
     };
 
     let cwd = door.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+    // Ensure the working directory exists so the program can be spawned there
+    // and the drop file written; a configured but missing dir is created rather
+    // than failing the launch.
+    if let Err(e) = std::fs::create_dir_all(&cwd) {
+        let msg = format!(
+            "Cannot prepare working dir {} for door {:?}: {e}",
+            cwd.display(),
+            door.name
+        );
+        tracing::warn!("{msg}");
+        return DoorExit::Failed(msg);
+    }
     let drop_path = write_drop_file(door, user, bbs_name, sysop, &cwd);
 
     // Open a PTY sized to the client's terminal.
@@ -59,12 +75,10 @@ pub async fn run(
     }) {
         Ok(p) => p,
         Err(e) => {
-            say(&format!(
-                "\r\nCannot open a terminal for {}: {e}\r\n",
-                door.name
-            ));
             cleanup_drop(&drop_path);
-            return DoorExit::Returned;
+            let msg = format!("Cannot open a terminal for door {:?}: {e}", door.name);
+            tracing::warn!("{msg}");
+            return DoorExit::Failed(msg);
         }
     };
 
@@ -84,9 +98,10 @@ pub async fn run(
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(e) => {
-            say(&format!("\r\nCannot launch {}: {e}\r\n", door.name));
             cleanup_drop(&drop_path);
-            return DoorExit::Returned;
+            let msg = format!("Cannot launch door {:?} ({}): {e}", door.name, door.command);
+            tracing::warn!("{msg}");
+            return DoorExit::Failed(msg);
         }
     };
     drop(pair.slave); // close our slave handle so master sees EOF on child exit

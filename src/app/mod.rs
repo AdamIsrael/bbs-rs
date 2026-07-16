@@ -1755,13 +1755,17 @@ pub async fn run<W: std::io::Write>(
                 &mut events,
             )
             .await;
+            // Reset attributes and force a full repaint of the TUI on return.
+            let _ = raw_out.send(b"\x1b[0m".to_vec());
+            let _ = terminal.clear();
             match outcome {
                 door::DoorExit::Quit => app.should_quit = true,
-                door::DoorExit::Returned => {
-                    // Reset attributes and force a full repaint of the TUI.
-                    let _ = raw_out.send(b"\x1b[0m".to_vec());
-                    let _ = terminal.clear();
+                door::DoorExit::Returned => app.screen = Screen::MainMenu,
+                door::DoorExit::Failed(msg) => {
+                    // The repaint would wipe anything the door wrote, so surface
+                    // the reason in the status bar instead.
                     app.screen = Screen::MainMenu;
+                    app.status = msg;
                 }
             }
         }
