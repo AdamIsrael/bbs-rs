@@ -8,6 +8,11 @@
 /bbs.db-shm
 /host_key
 /host_key.pub
+# Web TLS: the auto-generated self-signed cert/key ([web] tls_cert/tls_key)
+# and the ACME account key + issued certs. Never commit these.
+/web-cert.pem
+/web-key.pem
+/acme-cache/
 # File-area storage (default [files].storage_dir)
 /files/
 
