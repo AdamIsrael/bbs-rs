@@ -82,6 +82,16 @@ impl Origin {
         format!("{}/c/{slug}", self.0)
     }
 
+    /// A status (oneliner) `Note`.
+    pub fn status(&self, id: i64) -> String {
+        format!("{}/s/{id}", self.0)
+    }
+
+    /// The `Create` activity that wraps a status in an outbox.
+    pub fn status_activity(&self, id: i64) -> String {
+        format!("{}/s/{id}/activity", self.0)
+    }
+
     /// The `acct:` URI a WebFinger query resolves, e.g. `acct:alice@bbs.example.com`.
     pub fn acct(&self, username: &str) -> String {
         format!("acct:{username}@{}", self.host())
@@ -154,6 +164,38 @@ pub async fn ensure_person_keys(
         public_key: keypair.public_key,
         private_key: keypair.private_key,
     })
+}
+
+/// The ActivityStreams "public" collection. **Emit the full URI, not the
+/// `as:Public` CURIE** — the short form is a known interop bug that makes posts
+/// invisible on some servers.
+pub const PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
+
+/// Record a status's permanent `ap_id`, if it doesn't have one yet.
+///
+/// Lazy, like actor keys: a board that never federates mints no URIs. The value
+/// is derivable from the local id, but it's *stored* so it stays fixed even if
+/// the configured origin later changes — the URI is already out in the world by
+/// then.
+pub async fn ensure_status_ap_id(pool: &SqlitePool, origin: &Origin, id: i64) -> Result<String> {
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT ap_id FROM oneliners WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    match existing {
+        None => Err(AppError::NotFound),
+        Some(Some(ap_id)) => Ok(ap_id),
+        Some(None) => {
+            let ap_id = origin.status(id);
+            sqlx::query("UPDATE oneliners SET ap_id = ? WHERE id = ?")
+                .bind(&ap_id)
+                .bind(id)
+                .execute(pool)
+                .await?;
+            Ok(ap_id)
+        }
+    }
 }
 
 /// Look up a local user by the username in an `acct:` URI, for WebFinger.

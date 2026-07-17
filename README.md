@@ -146,8 +146,7 @@ tls = true             # HTTPS/WSS; auto self-signed cert if none configured
 # acme_email   = "sysop@example.com"
 
 [oneliners]  # graffiti-wall policy (separate from the [features] on/off toggle)
-max_entries = 200      # trim to the most recent N after each post (0 = keep all)
-max_length = 120       # max chars per oneliner (0 = no cap)
+max_length = 500       # max chars per oneliner (0 = no cap; 500 matches Mastodon)
 
 [seed]       # first-run seeded content (boards created only on a fresh DB)
 # guest_password = "guest"     # password for the shared guest account
@@ -296,10 +295,16 @@ brute-force / bot traffic). Auto-bans expire after `ban_secs` and are purged aut
 session lands on the **Bulletins** screen right after login (in addition to the `bbs.welcome` MOTD);
 they're also reachable any time from the main menu.
 
-**Oneliners** are a shared "graffiti wall" of short public one-liners (up to 120 chars). Any registered
-user can append one from the **Oneliners** menu (press `n`); guests are read-only, like on the boards.
-Sysops can prune the wall with `bbsctl rm-oneliner <id>`, and the whole feature can be turned off with
+**Oneliners** are a shared "graffiti wall" of short public posts (up to 500 chars). Any registered user
+can append one from the **Oneliners** menu (press `n`); guests are read-only, like on the boards. Sysops
+can prune the wall with `bbsctl rm-oneliner <id>`, and the whole feature can be turned off with
 `[features].oneliners = false`.
+
+Oneliners are also this board's **ActivityPub statuses** ([docs/FEDERATION.md](docs/FEDERATION.md)): each
+one is a `Note` attributed to its author, so a user's oneliners are their outbox and the wall is the
+instance's local timeline. That's why the wall no longer auto-trims to a fixed size — a federated post
+has a permanent URI, and deleting one out from under remote servers would orphan their references. Use
+`[limits] max_oneliners` and `bbsctl rm-oneliner` to keep it in hand.
 
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details
