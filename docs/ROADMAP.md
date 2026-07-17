@@ -75,9 +75,9 @@ These are done and are the substrate several roadmap items build on:
 # Roadmap v2 — beyond the basics
 
 The original three tiers above are **all shipped**. This second wave targets the biggest remaining gaps:
-real-time interaction, deeper messaging, account/operator lifecycle, and reach — plus a flagship
-**federation** effort to network instances together. Prioritization lens is unchanged (classic-BBS flavor
-+ ops/security first).
+real-time interaction, deeper messaging, account/operator lifecycle, and reach — plus three flagship
+epics: **federation** (network instances together), an **operator-designable menu**, and **context-aware
+templating**. Prioritization lens is unchanged (classic-BBS flavor + ops/security first).
 
 ## Theme A — Real-time & social *(classic flavor)*
 
@@ -91,6 +91,7 @@ variants.
 | **Multi-user chat / teleconference** | M | [#67](https://github.com/AdamIsrael/bbs-rs/issues/67) |
 | **User paging (yell)** | S | [#68](https://github.com/AdamIsrael/bbs-rs/issues/68) |
 | **Sysop broadcast to live sessions** | S | [#69](https://github.com/AdamIsrael/bbs-rs/issues/69) |
+| **User ignore / block list** — hide a user's posts, block their pages/mail | M | [#97](https://github.com/AdamIsrael/bbs-rs/issues/97) |
 
 ## Theme B — Deeper messaging *(engagement)*
 
@@ -99,6 +100,11 @@ variants.
 | **Mail actions: reply / forward / delete** | M | [#70](https://github.com/AdamIsrael/bbs-rs/issues/70) |
 | **Mail to sysop** | S | [#71](https://github.com/AdamIsrael/bbs-rs/issues/71) |
 | **Polls / voting booth** | M | [#72](https://github.com/AdamIsrael/bbs-rs/issues/72) |
+| **Author edit/delete own posts** — today only admins can delete | M | [#92](https://github.com/AdamIsrael/bbs-rs/issues/92) |
+| **Mail full-text search** — parity with board search (#10) | S | [#93](https://github.com/AdamIsrael/bbs-rs/issues/93) |
+| **Post reactions / upvotes** | S | [#94](https://github.com/AdamIsrael/bbs-rs/issues/94) |
+| **Attachments** — link file-area files to posts/mail | M | [#95](https://github.com/AdamIsrael/bbs-rs/issues/95) |
+| **Full-screen multi-line compose editor** | M | [#96](https://github.com/AdamIsrael/bbs-rs/issues/96) |
 
 ## Theme C — Accounts, ops & security *(ops/security)*
 
@@ -108,13 +114,19 @@ variants.
 | **Moderation / audit log** | M | [#74](https://github.com/AdamIsrael/bbs-rs/issues/74) |
 | **Per-user daily time limits** | S | [#75](https://github.com/AdamIsrael/bbs-rs/issues/75) |
 | **Password reset / account recovery (+ optional TOTP 2FA)** | M | [#76](https://github.com/AdamIsrael/bbs-rs/issues/76) |
-| **HTTPS/WSS for the web frontend** | S | [#54](https://github.com/AdamIsrael/bbs-rs/issues/54) |
+| **Prometheus / metrics endpoint** | S | [#98](https://github.com/AdamIsrael/bbs-rs/issues/98) |
+| **Sysop session monitor (spy)** — privacy-sensitive; needs a consent policy | M | [#99](https://github.com/AdamIsrael/bbs-rs/issues/99) |
+| ~~**HTTPS/WSS for the web frontend**~~ | S | **Shipped** ([#54](https://github.com/AdamIsrael/bbs-rs/issues/54)): native TLS on by default when `[web]` is enabled — auto self-signed cert out of the box, operator-provided `tls_cert`/`tls_key`, or automatic Let's Encrypt via ACME (TLS-ALPN-01). The page already selects `wss://` from its origin. |
 
 ## Theme D — Reach *(classic flavor / reach)*
 
 | Feature | Size | Issue |
 |---|---|---|
 | **`finger` service (RFC 1288)** — user discovery over TCP/79, reusing profiles + last-on + who's-online | S | [#77](https://github.com/AdamIsrael/bbs-rs/issues/77) |
+| **Public-board RSS/Atom feeds** — viable now that the web server is an HTTP surface; guest-readable boards only | M | [#100](https://github.com/AdamIsrael/bbs-rs/issues/100) |
+| **QWK offline-mail packets** — classic offline-reader support | L | [#101](https://github.com/AdamIsrael/bbs-rs/issues/101) |
+| **NNTP gateway** — boards as newsgroups | L | [#102](https://github.com/AdamIsrael/bbs-rs/issues/102) |
+| **Email gateway (SMTP in/out)** | L | [#103](https://github.com/AdamIsrael/bbs-rs/issues/103) |
 
 ## Theme E — Federation *(flagship, multi-phase)* — epic [#82](https://github.com/AdamIsrael/bbs-rs/issues/82)
 
@@ -128,3 +140,27 @@ autoincrement ids, `author_id` a NOT NULL FK to local `users`, no node/msgid/see
 | **2 — echomail (networked boards)** | L | [#79](https://github.com/AdamIsrael/bbs-rs/issues/79) |
 | **3 — netmail (cross-instance mail)** | L | [#80](https://github.com/AdamIsrael/bbs-rs/issues/80) |
 | **4 — transport & security** | M | [#81](https://github.com/AdamIsrael/bbs-rs/issues/81) |
+
+## Theme F — Operator-designable menu *(epic [#87](https://github.com/AdamIsrael/bbs-rs/issues/87))*
+
+Let each operator design their main menu — placement, ANSI graphics, custom names/hotkeys, submenus.
+Today the menu is a compile-time `MenuItem` enum with hardcoded labels/order (`src/app/state.rs`,
+`src/app/mod.rs`) drawn as a bordered list; this moves structure and appearance into config.
+
+| Phase | Size | Issue |
+|---|---|---|
+| **1 — config-driven labels, order & hotkeys** *(the action-dispatch foundation)* | M | [#84](https://github.com/AdamIsrael/bbs-rs/issues/84) |
+| **2 — ANSI backdrop + item placement** | L | [#85](https://github.com/AdamIsrael/bbs-rs/issues/85) |
+| **3 — submenus & custom targets** *(doors/boards/nested menus)* | M | [#86](https://github.com/AdamIsrael/bbs-rs/issues/86) |
+
+## Theme G — Context-aware templating *(epic [#91](https://github.com/AdamIsrael/bbs-rs/issues/91))*
+
+Vary layout and content by runtime context — most notably the **connection method (SSH vs web)**, so a web
+user can be told the SSH address and vice-versa. `App` is transport-agnostic today (`App::new` gets no
+transport hint), so phase 1 is the prerequisite for the rest — and for the menu epic's dynamic content.
+
+| Phase | Size | Issue |
+|---|---|---|
+| **1 — transport & session context in the UI** *(keystone; also ships the cross-advertising)* | S | [#88](https://github.com/AdamIsrael/bbs-rs/issues/88) |
+| **2 — template engine for text content** *(variables + conditionals)* | M | [#89](https://github.com/AdamIsrael/bbs-rs/issues/89) |
+| **3 — context-conditional ANSI/art & layout variants** | M | [#90](https://github.com/AdamIsrael/bbs-rs/issues/90) |
