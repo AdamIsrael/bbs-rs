@@ -281,6 +281,229 @@ async fn guest_and_remote_actors_are_not_federatable() {
     assert!(ensure_person_keys(&pool, &origin, &eve).await.is_err());
 }
 
+/// Serve the AP endpoints on an ephemeral port with the given federation
+/// config, returning the base URL.
+async fn serve_ap(pool: SqlitePool, fed: bbs_rs::config::Federation) -> String {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    use arc_swap::ArcSwap;
+    use bbs_rs::config::Settings;
+    use bbs_rs::services::presence::Presence;
+
+    let settings = Settings {
+        federation: fed,
+        ..Default::default()
+    };
+    let state = bbs_rs::web::WebState::new(
+        pool,
+        Arc::new(ArcSwap::from_pointee(settings)),
+        Presence::new(),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = bbs_rs::web::serve(listener, state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    format!("http://{addr}")
+}
+
+fn enabled_fed() -> bbs_rs::config::Federation {
+    bbs_rs::config::Federation {
+        enabled: true,
+        origin: "https://bbs.example.com".into(),
+        ..Default::default()
+    }
+}
+
+/// WebFinger is how `@alice@bbs.example.com` resolves anywhere in the
+/// fediverse. Mastodon checks that the actor it fetches agrees with the domain
+/// it asked about, so subject/href must both come from the validated origin.
+#[tokio::test]
+async fn webfinger_resolves_a_local_actor() {
+    let pool = setup().await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let base = serve_ap(pool, enabled_fed()).await;
+
+    let res = reqwest::get(format!(
+        "{base}/.well-known/webfinger?resource=acct:alice@bbs.example.com"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(res.status(), 200);
+    // RFC 7033 media type, not application/json.
+    assert_eq!(
+        res.headers()["content-type"],
+        "application/jrd+json",
+        "webfinger must use the JRD content type"
+    );
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["subject"], "acct:alice@bbs.example.com");
+    let self_link = body["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["rel"] == "self")
+        .expect("a rel=self link is what points at the actor");
+    assert_eq!(self_link["type"], "application/activity+json");
+    assert_eq!(self_link["href"], "https://bbs.example.com/u/alice");
+}
+
+/// We must only answer for our own domain, and only for real local members.
+#[tokio::test]
+async fn webfinger_refuses_what_isnt_ours() {
+    let pool = setup().await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    insert_remote_actor(&pool, "eve@remote.social", "remote.social").await;
+    let base = serve_ap(pool, enabled_fed()).await;
+
+    let get = |q: String| {
+        let base = base.clone();
+        async move {
+            reqwest::get(format!("{base}/.well-known/webfinger?resource={q}"))
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    // A domain we don't serve.
+    assert_eq!(get("acct:alice@elsewhere.example".into()).await, 404);
+    // The shared guest account is not federatable.
+    assert_eq!(get("acct:guest@bbs.example.com".into()).await, 404);
+    // A remote actor is not ours to publish.
+    assert_eq!(get("acct:eve@remote.social".into()).await, 404);
+    // Nonexistent, and malformed.
+    assert_eq!(get("acct:nobody@bbs.example.com".into()).await, 404);
+    assert_eq!(get("nonsense".into()).await, 400);
+}
+
+/// The actor document is what a remote server fetches after WebFinger. Field
+/// names are camelCase on the wire — getting that wrong doesn't error, it just
+/// silently fails to interop.
+#[tokio::test]
+async fn person_actor_document_is_shaped_for_interop() {
+    let pool = setup().await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let base = serve_ap(pool, enabled_fed()).await;
+
+    let res = reqwest::get(format!("{base}/u/alice")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(
+        res.headers()["content-type"],
+        "application/activity+json",
+        "actors must not be served as plain application/json"
+    );
+
+    let b: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(b["type"], "Person");
+    assert_eq!(b["id"], "https://bbs.example.com/u/alice");
+    // The handle WebFinger resolves must match preferredUsername.
+    assert_eq!(b["preferredUsername"], "alice");
+    assert_eq!(b["inbox"], "https://bbs.example.com/u/alice/inbox");
+    assert_eq!(b["outbox"], "https://bbs.example.com/u/alice/outbox");
+    assert_eq!(b["followers"], "https://bbs.example.com/u/alice/followers");
+    assert_eq!(
+        b["endpoints"]["sharedInbox"],
+        "https://bbs.example.com/inbox"
+    );
+    // The security context is required for publicKey to be understood.
+    assert!(
+        b["@context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "https://w3id.org/security/v1"),
+        "the security context must be present for publicKey"
+    );
+    // keyId is what peers cite when verifying our HTTP signatures.
+    assert_eq!(
+        b["publicKey"]["id"],
+        "https://bbs.example.com/u/alice#main-key"
+    );
+    assert_eq!(b["publicKey"]["owner"], "https://bbs.example.com/u/alice");
+    assert!(
+        b["publicKey"]["publicKeyPem"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN PUBLIC KEY"),
+        "publicKeyPem must carry a real PEM key"
+    );
+
+    // Guests and unknown names aren't actors.
+    for name in ["guest", "nobody"] {
+        let status = reqwest::get(format!("{base}/u/{name}"))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 404, "/u/{name} must not resolve");
+    }
+}
+
+/// A board that isn't federating — or is misconfigured — must not expose an AP
+/// surface at all, rather than minting URIs it would be stuck with.
+#[tokio::test]
+async fn ap_endpoints_are_closed_unless_configured() {
+    use bbs_rs::config::Federation;
+
+    // Federation off (the default).
+    let pool = setup().await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let base = serve_ap(pool, Federation::default()).await;
+    assert_eq!(
+        reqwest::get(format!("{base}/u/alice"))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    // Enabled but with an origin that would poison every URI it minted.
+    let pool = setup().await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let base = serve_ap(
+        pool.clone(),
+        Federation {
+            enabled: true,
+            origin: "https://localhost:8088".into(),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        reqwest::get(format!("{base}/u/alice"))
+            .await
+            .unwrap()
+            .status(),
+        404,
+        "an invalid origin must fail closed"
+    );
+    // ...and crucially, nothing was minted on the way to that 404.
+    let actor: Option<String> =
+        sqlx::query_scalar("SELECT actor_uri FROM users WHERE username = 'alice'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        actor.is_none(),
+        "a rejected origin must never mint a permanent actor_uri"
+    );
+}
+
 /// `actor_uri` is globally unique, but NULLs stay distinct — so any number of
 /// not-yet-federated local rows can coexist.
 #[tokio::test]
