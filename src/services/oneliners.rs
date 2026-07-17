@@ -1,5 +1,15 @@
-//! Oneliners — a shared public "graffiti wall" of short one-line posts. Any
-//! registered user can append one; guests are read-only, like boards and mail.
+//! Oneliners — a shared public "graffiti wall". Any registered user can append
+//! one; guests are read-only, like boards and mail.
+//!
+//! These are also the BBS's **ActivityPub statuses** (#108): each oneliner is a
+//! `Note` attributed to its author, so a user's oneliners are their outbox and
+//! the wall is the instance's local timeline.
+//!
+//! That federation role is why the wall no longer auto-trims. A federated post
+//! has a permanent URI; deleting one out from under remote servers would orphan
+//! their references and demand `Delete` fan-out. The wall therefore grows
+//! without bound, and moderation (`bbsctl rm-oneliner`) replaces the old ring
+//! buffer — a deliberate reversal of #32.
 
 use sqlx::sqlite::SqlitePool;
 
@@ -12,7 +22,11 @@ use crate::util::now_unix;
 /// Default maximum length of a oneliner body, in characters (the
 /// `[oneliners] max_length` default). Longer (or empty) input is rejected with
 /// [`AppError::OnelinerLength`].
-pub const MAX_LEN: usize = 120;
+///
+/// 500 matches Mastodon: "like a federated post" means a *server-defined*
+/// limit, not none. Unbounded statuses are an abuse vector, and remote servers
+/// reject oversized payloads anyway. `0` still disables the cap.
+pub const MAX_LEN: usize = 500;
 
 /// Recent oneliners, newest first, up to `limit`.
 pub async fn recent(pool: &SqlitePool, limit: i64) -> Result<Vec<Oneliner>> {
@@ -25,6 +39,42 @@ pub async fn recent(pool: &SqlitePool, limit: i64) -> Result<Vec<Oneliner>> {
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+/// One oneliner by id, or `None`. Backs the `Note` endpoint (#108).
+pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<Oneliner>> {
+    let row = sqlx::query_as::<_, Oneliner>(
+        "SELECT o.id, o.author_id, u.username AS author_name, o.body, o.created_at \
+         FROM oneliners o JOIN users u ON u.id = o.author_id WHERE o.id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// A user's own oneliners, newest first — their ActivityPub outbox (#108).
+pub async fn by_author(pool: &SqlitePool, author_id: i64, limit: i64) -> Result<Vec<Oneliner>> {
+    let rows = sqlx::query_as::<_, Oneliner>(
+        "SELECT o.id, o.author_id, u.username AS author_name, o.body, o.created_at \
+         FROM oneliners o JOIN users u ON u.id = o.author_id \
+         WHERE o.author_id = ? ORDER BY o.id DESC LIMIT ?",
+    )
+    .bind(author_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// How many oneliners a user has posted (the outbox's `totalItems`).
+pub async fn count_by_author(pool: &SqlitePool, author_id: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM oneliners WHERE author_id = ?")
+            .bind(author_id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 /// Number of oneliners on the wall.
@@ -50,8 +100,10 @@ async fn recent_count(pool: &SqlitePool, author_id: i64, since: i64) -> Result<i
 
 /// Append a oneliner to the wall. Guests are rejected; the (trimmed) body must
 /// be 1..=`cfg.max_length` characters (0 disables the cap); non-admins are
-/// subject to the per-user oneliner rate limit. After inserting, the wall is
-/// trimmed to `cfg.max_entries` most-recent rows (0 keeps everything).
+/// subject to the per-user oneliner rate limit.
+///
+/// The wall is **not** trimmed — see the module docs. With no ring buffer the
+/// rate limit (`[limits] max_oneliners`) is what keeps the wall sane.
 pub async fn add(
     pool: &SqlitePool,
     author: &User,
@@ -78,23 +130,6 @@ pub async fn add(
         .bind(now_unix())
         .execute(pool)
         .await?;
-    trim(pool, cfg.max_entries).await?;
-    Ok(())
-}
-
-/// Prune the wall to its `max` most-recent rows (by id). A `max` of 0 is a
-/// no-op (keep everything).
-async fn trim(pool: &SqlitePool, max: usize) -> Result<()> {
-    if max == 0 {
-        return Ok(());
-    }
-    sqlx::query(
-        "DELETE FROM oneliners WHERE id NOT IN \
-         (SELECT id FROM oneliners ORDER BY id DESC LIMIT ?)",
-    )
-    .bind(max as i64)
-    .execute(pool)
-    .await?;
     Ok(())
 }
 

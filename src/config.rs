@@ -152,23 +152,25 @@ fn default_seed_boards() -> Vec<SeedBoard> {
     ]
 }
 
-/// Oneliners (graffiti wall) policy: how many entries to keep and the max post
-/// length. Separate from the `[features] oneliners` on/off toggle.
+/// Oneliners (graffiti wall) policy. Separate from the `[features] oneliners`
+/// on/off toggle.
+///
+/// The old `max_entries` ring buffer is gone (#108): oneliners are now
+/// ActivityPub statuses, and a federated post has a permanent URI — trimming
+/// one out from under remote servers would orphan their references. The wall
+/// grows without bound; the rate limit and moderation replace the trim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Oneliners {
-    /// After each post, trim the wall to the most recent N entries (0 = keep
-    /// everything, no trimming).
-    pub max_entries: usize,
-    /// Max characters in a oneliner body (0 = no length cap).
+    /// Max characters in a oneliner body (0 = no length cap). Defaults to
+    /// [`crate::services::oneliners::MAX_LEN`] (500, matching Mastodon).
     pub max_length: usize,
 }
 
 impl Default for Oneliners {
     fn default() -> Self {
         Self {
-            max_entries: 200,
-            max_length: 120,
+            max_length: crate::services::oneliners::MAX_LEN,
         }
     }
 }
@@ -910,9 +912,11 @@ delivery_max_attempts = 10    # give up on an activity after this many failures
 
 [oneliners]
 # Graffiti-wall policy (separate from the [features] oneliners on/off toggle).
-# After each post the wall is trimmed to the most recent max_entries rows.
-max_entries = 200      # 0 = keep everything (no trimming)
-max_length = 120       # max characters per oneliner (0 = no cap)
+# Oneliners are also this board's ActivityPub statuses, so the wall no longer
+# auto-trims: a federated post has a permanent URI, and deleting one out from
+# under remote servers would orphan their references. Use [limits]
+# max_oneliners and bbsctl rm-oneliner to keep the wall in hand.
+max_length = 500       # max characters per oneliner (0 = no cap; 500 = Mastodon parity)
 
 [seed]
 # First-run seeded content. Boards are created only when the board table is
@@ -993,7 +997,6 @@ mod tests {
             parsed.features.advertise_transports,
             def.features.advertise_transports
         );
-        assert_eq!(parsed.oneliners.max_entries, def.oneliners.max_entries);
         assert_eq!(parsed.oneliners.max_length, def.oneliners.max_length);
         // The template's [seed] is all commented, so it resolves to the
         // built-in defaults.

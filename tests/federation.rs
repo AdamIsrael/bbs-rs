@@ -504,6 +504,247 @@ async fn ap_endpoints_are_closed_unless_configured() {
     );
 }
 
+/// Post some statuses (oneliners) as `user`.
+async fn post_statuses(pool: &SqlitePool, user: &bbs_rs::db::models::User, bodies: &[&str]) {
+    use bbs_rs::config::Limits;
+    let limits = Limits {
+        window_secs: 0, // rate limiting off for the fixture
+        ..Default::default()
+    };
+    for b in bodies {
+        bbs_rs::services::oneliners::add(pool, user, b, &limits, &Default::default())
+            .await
+            .unwrap();
+    }
+}
+
+/// A status is a `Note`: plain text becomes HTML, addressed to the **full**
+/// Public URI (the `as:Public` CURIE is a known interop bug), and its ap_id is
+/// minted on first serve.
+#[tokio::test]
+async fn status_is_served_as_a_note() {
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    post_statuses(&pool, &alice, &["hello <fediverse> & \"friends\""]).await;
+    let base = serve_ap(pool.clone(), enabled_fed()).await;
+
+    let res = reqwest::get(format!("{base}/s/1")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "application/activity+json");
+
+    let b: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(b["type"], "Note");
+    assert_eq!(b["id"], "https://bbs.example.com/s/1");
+    assert_eq!(b["attributedTo"], "https://bbs.example.com/u/alice");
+    assert_eq!(
+        b["to"][0], "https://www.w3.org/ns/activitystreams#Public",
+        "must emit the full Public URI, not the as:Public CURIE"
+    );
+    assert_eq!(b["cc"][0], "https://bbs.example.com/u/alice/followers");
+    // AP content is HTML, so a body must not be able to inject markup.
+    assert_eq!(
+        b["content"], "<p>hello &lt;fediverse&gt; &amp; &quot;friends&quot;</p>",
+        "status bodies must be escaped into their HTML wrapper"
+    );
+    // RFC 3339, which is what `published` requires.
+    let published = b["published"].as_str().unwrap();
+    assert!(
+        published.ends_with('Z') && published.contains('T') && published.len() == 20,
+        "published must be RFC 3339 UTC, got {published:?}"
+    );
+
+    // The ap_id was persisted on that first fetch — it's permanent now.
+    let ap_id: Option<String> = sqlx::query_scalar("SELECT ap_id FROM oneliners WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ap_id.as_deref(), Some("https://bbs.example.com/s/1"));
+
+    assert_eq!(
+        reqwest::get(format!("{base}/s/999"))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+/// The outbox is the user's statuses as `Create{Note}` — what a remote server
+/// fetches to see what someone has posted.
+#[tokio::test]
+async fn outbox_lists_create_note_activities() {
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    post_statuses(&pool, &alice, &["first", "second"]).await;
+    post_statuses(&pool, &bob, &["not alice's"]).await;
+    let base = serve_ap(pool, enabled_fed()).await;
+
+    let res = reqwest::get(format!("{base}/u/alice/outbox"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "application/activity+json");
+
+    let b: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(b["type"], "OrderedCollection");
+    assert_eq!(b["id"], "https://bbs.example.com/u/alice/outbox");
+    assert_eq!(b["totalItems"], 2, "only alice's own statuses");
+
+    let items = b["orderedItems"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    // Newest first.
+    assert_eq!(items[0]["type"], "Create");
+    assert_eq!(items[0]["actor"], "https://bbs.example.com/u/alice");
+    assert_eq!(items[0]["object"]["content"], "<p>second</p>");
+    assert_eq!(items[1]["object"]["content"], "<p>first</p>");
+    // The Create and its Note are separate identities.
+    assert_eq!(items[0]["object"]["id"], "https://bbs.example.com/s/2");
+    assert_eq!(items[0]["id"], "https://bbs.example.com/s/2/activity");
+
+    // Guests and unknowns have no outbox.
+    for name in ["guest", "nobody"] {
+        assert_eq!(
+            reqwest::get(format!("{base}/u/{name}/outbox"))
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+    }
+}
+
+/// nodeinfo is how crawlers and relays identify the instance.
+#[tokio::test]
+async fn nodeinfo_describes_the_instance() {
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    insert_remote_actor(&pool, "eve@remote.social", "remote.social").await;
+    post_statuses(&pool, &alice, &["hi"]).await;
+    let base = serve_ap(pool, enabled_fed()).await;
+
+    // Discovery document points at the real one.
+    let b: serde_json::Value = reqwest::get(format!("{base}/.well-known/nodeinfo"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        b["links"][0]["href"], "https://bbs.example.com/nodeinfo/2.1",
+        "discovery must point at our origin, not the request host"
+    );
+
+    let b: serde_json::Value = reqwest::get(format!("{base}/nodeinfo/2.1"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(b["version"], "2.1");
+    assert_eq!(b["software"]["name"], "bbs-rs");
+    assert_eq!(b["protocols"][0], "activitypub");
+    // Registration happens in the BBS, not over HTTP.
+    assert_eq!(b["openRegistrations"], false);
+    // Local members only — the remote actor is not ours to count.
+    assert_eq!(b["usage"]["users"]["total"], 2);
+}
+
+/// The delivery queue is durable because the AP crate's is in-memory: a restart
+/// inside its 1min/1hr/2.5day retry window silently drops deliveries.
+#[tokio::test]
+async fn delivery_queue_backs_off_and_eventually_gives_up() {
+    use bbs_rs::services::federation::queue;
+    let pool = setup().await;
+
+    let id = queue::enqueue(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        "https://remote.social/users/bob/inbox",
+        r#"{"type":"Create"}"#,
+        Some("https://bbs.example.com/s/1/activity"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(queue::pending(&pool).await.unwrap(), 1);
+
+    // A fresh delivery is due immediately.
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, id);
+    assert_eq!(due[0].attempts, 0);
+    assert_eq!(due[0].inbox_url, "https://remote.social/users/bob/inbox");
+
+    // A failure backs it off, so it's no longer due...
+    assert!(
+        !queue::mark_failed(&pool, id, "connection refused", 10)
+            .await
+            .unwrap()
+    );
+    assert!(
+        queue::due(&pool, 10).await.unwrap().is_empty(),
+        "a backed-off delivery must not be retried immediately"
+    );
+    assert_eq!(
+        queue::pending(&pool).await.unwrap(),
+        1,
+        "but it's still queued"
+    );
+
+    // ...and the backoff grows, patiently. Hammering a struggling peer is how
+    // you get defederated.
+    assert_eq!(queue::backoff_secs(1), 120);
+    assert_eq!(queue::backoff_secs(2), 240);
+    assert!(queue::backoff_secs(3) < queue::backoff_secs(4));
+    assert_eq!(
+        queue::backoff_secs(99),
+        60 * 60 * 3,
+        "backoff is capped, and huge attempt counts must not overflow"
+    );
+
+    // Past max_attempts we give up: a peer can vanish permanently, and a queue
+    // that never forgets grows without bound.
+    for _ in 0..10 {
+        queue::mark_failed(&pool, id, "gone", 3).await.unwrap();
+    }
+    assert_eq!(
+        queue::pending(&pool).await.unwrap(),
+        0,
+        "a dead delivery must eventually be dropped"
+    );
+    // Marking a row that's already gone is harmless.
+    assert!(!queue::mark_failed(&pool, id, "gone", 3).await.unwrap());
+}
+
+/// Success removes the row — the queue holds outstanding work only.
+#[tokio::test]
+async fn delivered_activities_leave_the_queue() {
+    use bbs_rs::services::federation::queue;
+    let pool = setup().await;
+    let a = queue::enqueue(&pool, "actor", "https://a.example/inbox", "{}", None)
+        .await
+        .unwrap();
+    // One row per (activity, inbox), so a single dead server can't stall the
+    // deliveries bound for everyone else.
+    let b = queue::enqueue(&pool, "actor", "https://b.example/inbox", "{}", None)
+        .await
+        .unwrap();
+    assert_eq!(queue::pending(&pool).await.unwrap(), 2);
+
+    queue::mark_delivered(&pool, a).await.unwrap();
+    let left = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, b);
+}
+
 /// `actor_uri` is globally unique, but NULLs stay distinct — so any number of
 /// not-yet-federated local rows can coexist.
 #[tokio::test]

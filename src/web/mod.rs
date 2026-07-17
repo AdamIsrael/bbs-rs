@@ -125,10 +125,14 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
-        // ActivityPub (#107). Both 404 unless [federation] is enabled with a
-        // validated origin, so a non-federating board looks like one.
+        // ActivityPub (#107, #108). All 404 unless [federation] is enabled with
+        // a validated origin, so a non-federating board looks like one.
         .route("/.well-known/webfinger", get(activitypub::webfinger))
+        .route("/.well-known/nodeinfo", get(activitypub::nodeinfo_index))
+        .route("/nodeinfo/2.1", get(activitypub::nodeinfo))
         .route("/u/{username}", get(activitypub::person))
+        .route("/u/{username}/outbox", get(activitypub::outbox))
+        .route("/s/{id}", get(activitypub::status))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
 }

@@ -76,11 +76,20 @@ statuses.
   permanent URI, and trimming would orphan remote references and require `Delete` fan-out. This
   deliberately reverts [#32](https://github.com/AdamIsrael/bbs-rs/issues/32). The wall now grows forever;
   moderation and explicit deletion replace auto-trim.
-- **The length cap should be raised, not removed.** "Like a federated post" means a *server-defined*
-  limit, not none — Mastodon's is 500 chars. Unbounded statuses are an abuse vector and remote servers
-  reject oversized payloads. `0` can still mean unlimited for operators who want it.
-- `[limits] max_oneliners` (rate limiting) is unaffected, and matters more once the cap is loose.
+- **The length cap is raised, not removed** — 120 → **500**, matching Mastodon. "Like a federated post"
+  means a *server-defined* limit, not none: unbounded statuses are an abuse vector and remote servers
+  reject oversized payloads. `0` still means unlimited for operators who want it.
+- `[limits] max_oneliners` (rate limiting) is unaffected, and matters more now that the ring buffer is
+  gone — it's what keeps the wall sane.
 - **Naming is unresolved:** "oneliners" stops being accurate once they aren't one line.
+
+Wire details that fail **silently** rather than loudly, so each is pinned by a test:
+
+- the full `https://www.w3.org/ns/activitystreams#Public` URI, never the `as:Public` CURIE;
+- camelCase throughout (`preferredUsername`, `publicKeyPem`, `sharedInbox`);
+- RFC 3339 `published`;
+- status bodies HTML-escaped into their `<p>` wrapper — AP `content` is HTML, and a body must not be able
+  to inject markup into every reader's timeline.
 
 ## Key design decision: additive-only schema
 
@@ -115,18 +124,29 @@ it is the load-bearing assumption of the whole approach.
 
 ## Phases
 
-| # | Scope | Size |
-|---|---|---|
-| 0 | Relicense to AGPL-3.0, this doc, issue housekeeping | S |
-| 1 | Federated foundation: keypairs, `users` AP columns, WebFinger, `Person`/`Application`, signing, `[federation]` config, durable queue, follows, blocks | M |
-| 2 | **Outbound statuses** — oneliners rework, `Note`, outbox, nodeinfo, `Accept` negotiation. No inbox. Users followable from Mastodon | M–L |
-| 3 | **Inbound** — inbox POST, signature verification, `Follow`/`Accept`, remote statuses, timeline screen, allowlist, **content degradation** | L |
-| 4 | Remote DMs — opt-in, labeled not-private | M |
-| 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L |
-| 6 | Inbound board posts + moderation | L |
+| # | Scope | Size | Status |
+|---|---|---|---|
+| 0 | Relicense to AGPL-3.0, this doc, issue housekeeping | S | **done** (#114) |
+| 1 | Federated foundation: keypairs, `users` AP columns, WebFinger, `Person`, `[federation]` config | M | **done** (#115) |
+| 2 | **Outbound statuses** — oneliners rework, `Note`, outbox, nodeinfo, delivery-queue storage. No inbox | M–L | in progress (#108) |
+| 3 | **Inbound** — inbox POST, signature verification, `Follow`/`Accept`, remote statuses, timeline screen, allowlist, **content degradation**, queue drain | L | #109 |
+| 4 | Remote DMs — opt-in, labeled not-private | M | #110 |
+| 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
+| 6 | Inbound board posts + moderation | L | #112 |
 
-Phase 2 leads because it pays off immediately against live Mastodon, while board syndication needs a
+Phase 2 leads because it pays off against live Mastodon sooner than board syndication, which needs a
 second bbs-rs instance to exist before it means anything.
+
+### What phase 2 does *not* deliver
+
+**Being followed requires an inbox.** Mastodon POSTs a `Follow` and expects an `Accept`; with no inbox
+that POST 404s and the follow hangs pending. Delivery has the same gap — no followers means nothing to
+deliver to. So after phase 2 a user is **discoverable and fetchable** (WebFinger → actor → outbox), not
+followable. Following, delivery, and the queue's drain loop all arrive together in **phase 3**, which is
+the first point any of them has a real target.
+
+This is why phase 2's delivery work is storage-only: `enqueue`/`due`/`mark_*`/backoff are fully specified
+by the schema and testable in isolation, but signing and POSTing needs somewhere to POST *to*.
 
 ### Content degradation (phase 3) is unavoidable
 

@@ -1476,48 +1476,85 @@ async fn oneliners_post_list_and_guardrails() {
     assert_eq!(oneliners::count(&pool).await.unwrap(), 1);
 }
 
+/// The wall no longer auto-trims. This deliberately reverses #32: oneliners are
+/// ActivityPub statuses now, and a federated post has a permanent URI — trimming
+/// one out from under remote servers would orphan their references and demand
+/// `Delete` fan-out. Moderation replaces the ring buffer.
 #[tokio::test]
-async fn oneliner_wall_auto_trims() {
+async fn oneliner_wall_keeps_everything() {
     use bbs_rs::config::{Limits, Oneliners};
     use bbs_rs::services::{auth, oneliners};
     let pool = setup().await;
     let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
         .await
         .unwrap();
-    // Rate limiting off so we can post freely; keep only the 3 newest.
+    // Rate limiting off so we can post freely.
     let limits = Limits {
         window_secs: 0,
         ..Default::default()
     };
-    let cfg = Oneliners {
-        max_entries: 3,
-        max_length: 120,
-    };
+    let cfg = Oneliners::default();
 
-    for n in 1..=5 {
+    for n in 1..=25 {
         oneliners::add(&pool, &alice, &n.to_string(), &limits, &cfg)
             .await
             .unwrap();
     }
-    // Only the 3 most recent survive, newest first.
-    assert_eq!(oneliners::count(&pool).await.unwrap(), 3);
-    let bodies: Vec<String> = oneliners::recent(&pool, 10)
+    assert_eq!(
+        oneliners::count(&pool).await.unwrap(),
+        25,
+        "posts must survive: their URIs are permanent once federated"
+    );
+    let bodies: Vec<String> = oneliners::recent(&pool, 3)
         .await
         .unwrap()
         .into_iter()
         .map(|o| o.body)
         .collect();
-    assert_eq!(bodies, vec!["5", "4", "3"]);
+    assert_eq!(bodies, vec!["25", "24", "23"], "newest first");
 
-    // max_entries = 0 disables trimming — the wall grows unbounded.
-    let no_trim = Oneliners {
-        max_entries: 0,
-        max_length: 120,
-    };
-    oneliners::add(&pool, &alice, "6", &limits, &no_trim)
+    // Explicit deletion is the way a post leaves the wall now.
+    let oldest = oneliners::recent(&pool, 100).await.unwrap().pop().unwrap();
+    assert!(oneliners::delete(&pool, oldest.id).await.unwrap());
+    assert_eq!(oneliners::count(&pool).await.unwrap(), 24);
+}
+
+/// The length cap is raised to Mastodon's 500, not removed: "like a federated
+/// post" means a server-defined limit, and remote servers reject oversized
+/// payloads.
+#[tokio::test]
+async fn oneliner_length_cap_is_mastodon_sized() {
+    use bbs_rs::config::{Limits, Oneliners};
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, oneliners};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
         .await
         .unwrap();
-    assert_eq!(oneliners::count(&pool).await.unwrap(), 4);
+    let limits = Limits {
+        window_secs: 0,
+        ..Default::default()
+    };
+    let cfg = Oneliners::default();
+    assert_eq!(cfg.max_length, 500);
+
+    // The old 120-char limit no longer bites.
+    oneliners::add(&pool, &alice, &"x".repeat(300), &limits, &cfg)
+        .await
+        .unwrap();
+    oneliners::add(&pool, &alice, &"x".repeat(500), &limits, &cfg)
+        .await
+        .unwrap();
+    assert!(matches!(
+        oneliners::add(&pool, &alice, &"x".repeat(501), &limits, &cfg).await,
+        Err(AppError::OnelinerLength(500))
+    ));
+
+    // 0 still means unlimited, for operators who want it.
+    let uncapped = Oneliners { max_length: 0 };
+    oneliners::add(&pool, &alice, &"x".repeat(5000), &limits, &uncapped)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
