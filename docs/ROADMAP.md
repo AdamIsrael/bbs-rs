@@ -76,8 +76,8 @@ These are done and are the substrate several roadmap items build on:
 
 The original three tiers above are **all shipped**. This second wave targets the biggest remaining gaps:
 real-time interaction, deeper messaging, account/operator lifecycle, and reach — plus three flagship
-epics: **federation** (network instances together), an **operator-designable menu**, and **context-aware
-templating**. Prioritization lens is unchanged (classic-BBS flavor + ops/security first).
+epics: **ActivityPub federation** (join the fediverse), an **operator-designable menu**, and
+**context-aware templating**. Prioritization lens is unchanged (classic-BBS flavor + ops/security first).
 
 ## Theme A — Real-time & social *(classic flavor)*
 
@@ -124,22 +124,37 @@ variants.
 |---|---|---|
 | **`finger` service (RFC 1288)** — user discovery over TCP/79, reusing profiles + last-on + who's-online | S | [#77](https://github.com/AdamIsrael/bbs-rs/issues/77) |
 | **Public-board RSS/Atom feeds** — viable now that the web server is an HTTP surface; guest-readable boards only | M | [#100](https://github.com/AdamIsrael/bbs-rs/issues/100) |
-| **QWK offline-mail packets** — classic offline-reader support | L | [#101](https://github.com/AdamIsrael/bbs-rs/issues/101) |
-| **NNTP gateway** — boards as newsgroups | L | [#102](https://github.com/AdamIsrael/bbs-rs/issues/102) |
-| **Email gateway (SMTP in/out)** | L | [#103](https://github.com/AdamIsrael/bbs-rs/issues/103) |
+| **QWK offline-mail packets** — classic offline-reader support; orthogonal to federation (offline sneakernet, not server-to-server) | L | [#101](https://github.com/AdamIsrael/bbs-rs/issues/101) |
+| **Email gateway (SMTP in/out)** — rescoped: ActivityPub covers notifications and cross-instance messaging, so only real-email bridging survives | L | [#103](https://github.com/AdamIsrael/bbs-rs/issues/103) |
+| ~~**NNTP gateway**~~ | L | **Closed** ([#102](https://github.com/AdamIsrael/bbs-rs/issues/102)): superseded by Theme E — the same message-portability work a third time, through a new listener, for a vanishing audience. |
 
-## Theme E — Federation *(flagship, multi-phase)* — epic [#82](https://github.com/AdamIsrael/bbs-rs/issues/82)
+## Theme E — ActivityPub federation *(flagship, multi-phase)* — epic [#113](https://github.com/AdamIsrael/bbs-rs/issues/113)
 
-Network independent instances FidoNet-style (store-and-forward) to exchange boards + user mail. New
-subsystem layered over the existing schema; the data model has no cross-instance identity today (local
-autoincrement ids, `author_id` a NOT NULL FK to local `users`, no node/msgid/seen-by concepts).
+Join the fediverse. Two goals, one protocol: **syndicate boards across bbs-rs instances**, and make
+**users `user@host`** — followable from Mastodon, able to follow (and optionally message) people on other
+platforms. Design of record: **[docs/FEDERATION.md](FEDERATION.md)**.
+
+Goal 2 *requires* ActivityPub, and once actors/keys/signing/delivery exist for it, board syndication
+reuses all of it — one implementation, both goals. This **supersedes the FidoNet epic** (#82, phases
+#78–#81, all closed): that bought goal 1 only, and ~70% of its schema work was identical, so keeping both
+meant paying for the same message-model surgery twice.
+
+Prerequisites landed by accident: **#54** (native TLS + ACME — self-signed cannot interop) and **#88**
+(`[web] hostname`). Note RFC 7565 `acct:` URIs have **no port component**, so `[web] port = 443` +
+`acme_domains` is required for a valid origin.
 
 | Phase | Size | Issue |
 |---|---|---|
-| **1 — instance identity + peer registry** | M | [#78](https://github.com/AdamIsrael/bbs-rs/issues/78) |
-| **2 — echomail (networked boards)** | L | [#79](https://github.com/AdamIsrael/bbs-rs/issues/79) |
-| **3 — netmail (cross-instance mail)** | L | [#80](https://github.com/AdamIsrael/bbs-rs/issues/80) |
-| **4 — transport & security** | M | [#81](https://github.com/AdamIsrael/bbs-rs/issues/81) |
+| **0 — relicense to AGPL-3.0 + design doc** *(the only maintained Rust AP crate is AGPL; the fediverse norm)* | S | [#114](https://github.com/AdamIsrael/bbs-rs/pull/114) |
+| **1 — federated foundation** *(actors, keys, WebFinger, signing, durable queue)* | M | [#107](https://github.com/AdamIsrael/bbs-rs/issues/107) |
+| **2 — outbound statuses** *(users followable from Mastodon; oneliners become `Note`s)* | L | [#108](https://github.com/AdamIsrael/bbs-rs/issues/108) |
+| **3 — inbound** *(follows, remote statuses, content degradation)* | L | [#109](https://github.com/AdamIsrael/bbs-rs/issues/109) |
+| **4 — remote DMs** *(opt-in, labeled not-private)* | M | [#110](https://github.com/AdamIsrael/bbs-rs/issues/110) |
+| **5 — board syndication** *(bbs-rs ↔ bbs-rs, FEP-1b12 Groups)* | L | [#111](https://github.com/AdamIsrael/bbs-rs/issues/111) |
+| **6 — inbound board posts + moderation** | L | [#112](https://github.com/AdamIsrael/bbs-rs/issues/112) |
+
+Phase 2 leads because it pays off immediately against live Mastodon; board syndication needs a second
+bbs-rs instance to exist before it means anything.
 
 ## Theme F — Operator-designable menu *(epic [#87](https://github.com/AdamIsrael/bbs-rs/issues/87))*
 
