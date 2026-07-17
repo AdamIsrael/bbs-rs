@@ -658,6 +658,93 @@ async fn nodeinfo_describes_the_instance() {
     assert_eq!(b["usage"]["users"]["total"], 2);
 }
 
+/// The delivery queue is durable because the AP crate's is in-memory: a restart
+/// inside its 1min/1hr/2.5day retry window silently drops deliveries.
+#[tokio::test]
+async fn delivery_queue_backs_off_and_eventually_gives_up() {
+    use bbs_rs::services::federation::queue;
+    let pool = setup().await;
+
+    let id = queue::enqueue(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        "https://remote.social/users/bob/inbox",
+        r#"{"type":"Create"}"#,
+        Some("https://bbs.example.com/s/1/activity"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(queue::pending(&pool).await.unwrap(), 1);
+
+    // A fresh delivery is due immediately.
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, id);
+    assert_eq!(due[0].attempts, 0);
+    assert_eq!(due[0].inbox_url, "https://remote.social/users/bob/inbox");
+
+    // A failure backs it off, so it's no longer due...
+    assert!(
+        !queue::mark_failed(&pool, id, "connection refused", 10)
+            .await
+            .unwrap()
+    );
+    assert!(
+        queue::due(&pool, 10).await.unwrap().is_empty(),
+        "a backed-off delivery must not be retried immediately"
+    );
+    assert_eq!(
+        queue::pending(&pool).await.unwrap(),
+        1,
+        "but it's still queued"
+    );
+
+    // ...and the backoff grows, patiently. Hammering a struggling peer is how
+    // you get defederated.
+    assert_eq!(queue::backoff_secs(1), 120);
+    assert_eq!(queue::backoff_secs(2), 240);
+    assert!(queue::backoff_secs(3) < queue::backoff_secs(4));
+    assert_eq!(
+        queue::backoff_secs(99),
+        60 * 60 * 3,
+        "backoff is capped, and huge attempt counts must not overflow"
+    );
+
+    // Past max_attempts we give up: a peer can vanish permanently, and a queue
+    // that never forgets grows without bound.
+    for _ in 0..10 {
+        queue::mark_failed(&pool, id, "gone", 3).await.unwrap();
+    }
+    assert_eq!(
+        queue::pending(&pool).await.unwrap(),
+        0,
+        "a dead delivery must eventually be dropped"
+    );
+    // Marking a row that's already gone is harmless.
+    assert!(!queue::mark_failed(&pool, id, "gone", 3).await.unwrap());
+}
+
+/// Success removes the row — the queue holds outstanding work only.
+#[tokio::test]
+async fn delivered_activities_leave_the_queue() {
+    use bbs_rs::services::federation::queue;
+    let pool = setup().await;
+    let a = queue::enqueue(&pool, "actor", "https://a.example/inbox", "{}", None)
+        .await
+        .unwrap();
+    // One row per (activity, inbox), so a single dead server can't stall the
+    // deliveries bound for everyone else.
+    let b = queue::enqueue(&pool, "actor", "https://b.example/inbox", "{}", None)
+        .await
+        .unwrap();
+    assert_eq!(queue::pending(&pool).await.unwrap(), 2);
+
+    queue::mark_delivered(&pool, a).await.unwrap();
+    let left = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, b);
+}
+
 /// `actor_uri` is globally unique, but NULLs stay distinct — so any number of
 /// not-yet-federated local rows can coexist.
 #[tokio::test]

@@ -208,6 +208,145 @@ pub async fn find_local_actor(pool: &SqlitePool, username: &str) -> Result<Optio
     Ok(user.filter(|u| !u.is_remote && !u.is_guest()))
 }
 
+/// The durable outbound delivery queue.
+///
+/// The AP crate ships its own queue, but it's **in-memory** and retries at
+/// roughly 1min / 1hr / 2.5 days — a restart inside that window silently drops
+/// deliveries, which is a known Lemmy pain point. Since we already have SQLite,
+/// we persist instead and accept at-least-once semantics.
+///
+/// This is the storage half. The drain — signing each activity with its actor's
+/// key and POSTing it — lands in #109, which is where the first real delivery
+/// target appears: nothing can be delivered until an inbox accepts a `Follow`
+/// and gives us a follower.
+pub mod queue {
+    use super::*;
+    use crate::util::now_unix;
+
+    /// A delivery waiting to go out.
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct Delivery {
+        pub id: i64,
+        /// Actor whose key signs the request.
+        pub actor_uri: String,
+        pub inbox_url: String,
+        /// The serialized activity JSON.
+        pub activity: String,
+        pub attempts: i64,
+    }
+
+    /// Queue an activity for delivery to one inbox.
+    ///
+    /// One row per (activity, inbox): a `Create` going to 50 followers is 50
+    /// rows, so one dead server can't stall the other 49.
+    pub async fn enqueue(
+        pool: &SqlitePool,
+        actor_uri: &str,
+        inbox_url: &str,
+        activity: &str,
+        activity_uri: Option<&str>,
+    ) -> Result<i64> {
+        let id = sqlx::query(
+            "INSERT INTO ap_deliveries \
+             (actor_uri, inbox_url, activity, activity_uri, next_attempt_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(actor_uri)
+        .bind(inbox_url)
+        .bind(activity)
+        .bind(activity_uri)
+        .bind(now_unix())
+        .bind(now_unix())
+        .execute(pool)
+        .await?
+        .last_insert_rowid();
+        Ok(id)
+    }
+
+    /// Deliveries whose backoff has elapsed, oldest first.
+    pub async fn due(pool: &SqlitePool, limit: i64) -> Result<Vec<Delivery>> {
+        let rows = sqlx::query_as::<_, Delivery>(
+            "SELECT id, actor_uri, inbox_url, activity, attempts FROM ap_deliveries \
+             WHERE next_attempt_at <= ? ORDER BY id LIMIT ?",
+        )
+        .bind(now_unix())
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Drop a delivered activity. The queue holds only outstanding work — the
+    /// audit trail of what we sent is the activity's own object.
+    pub async fn mark_delivered(pool: &SqlitePool, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM ap_deliveries WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Exponential backoff for attempt `n` (1-based), capped at ~2.7 hours.
+    ///
+    /// Remote outages are routine on the fediverse, so retries are patient
+    /// rather than aggressive: 1m, 2m, 4m … A caller that hammers a struggling
+    /// server is how you get defederated.
+    pub fn backoff_secs(attempts: i64) -> i64 {
+        const BASE: i64 = 60;
+        const CAP: i64 = 60 * 60 * 3;
+        BASE.saturating_mul(
+            1i64.checked_shl(attempts.clamp(0, 16) as u32)
+                .unwrap_or(i64::MAX),
+        )
+        .min(CAP)
+    }
+
+    /// Record a failed attempt: back off, or give up past `max_attempts`.
+    ///
+    /// Returns `true` if the delivery was dropped for good. Giving up is normal
+    /// — a peer can vanish permanently, and a queue that never forgets grows
+    /// without bound.
+    pub async fn mark_failed(
+        pool: &SqlitePool,
+        id: i64,
+        error: &str,
+        max_attempts: u32,
+    ) -> Result<bool> {
+        let attempts: Option<i64> =
+            sqlx::query_scalar("SELECT attempts FROM ap_deliveries WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+        let Some(attempts) = attempts else {
+            return Ok(false);
+        };
+        let attempts = attempts + 1;
+        if attempts >= max_attempts as i64 {
+            tracing::warn!("giving up on delivery {id} after {attempts} attempts: {error}");
+            mark_delivered(pool, id).await?;
+            return Ok(true);
+        }
+        sqlx::query(
+            "UPDATE ap_deliveries SET attempts = ?, next_attempt_at = ?, last_error = ? \
+             WHERE id = ?",
+        )
+        .bind(attempts)
+        .bind(now_unix() + backoff_secs(attempts))
+        .bind(error)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(false)
+    }
+
+    /// How many deliveries are outstanding (operator visibility).
+    pub async fn pending(pool: &SqlitePool) -> Result<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM ap_deliveries")
+            .fetch_one(pool)
+            .await?)
+    }
+}
+
 /// Split a fediverse handle into `(user, domain)`. Accepts `alice@host`,
 /// `@alice@host`, and `acct:alice@host`.
 pub fn split_handle(handle: &str) -> Option<(&str, &str)> {
