@@ -13,6 +13,7 @@ use bbs_rs::app::App;
 use bbs_rs::app::ui;
 use bbs_rs::config::Settings;
 use bbs_rs::services::{self, auth, presence::Presence};
+use bbs_rs::transport::Transport;
 
 async fn guest_pool() -> (sqlx::SqlitePool, bbs_rs::db::models::User) {
     use sqlx::sqlite::SqlitePoolOptions;
@@ -44,7 +45,14 @@ async fn theme_color_reaches_title_bar() {
     let (pool, guest) = guest_pool().await;
     let mut settings = Settings::default();
     settings.theme.preset = Some("amber".into()); // title_bg = Rgb(255,176,0)
-    let app = App::new(pool, Presence::new(), Arc::new(settings), guest, 1);
+    let app = App::new(
+        pool,
+        Presence::new(),
+        Arc::new(settings),
+        guest,
+        1,
+        Transport::Ssh,
+    );
 
     let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
     term.draw(|f| ui::draw(f, &app)).unwrap();
@@ -66,7 +74,14 @@ async fn welcome_art_is_rendered() {
     let mut settings = Settings::default();
     settings.art.dir = dir;
     settings.art.welcome = "welcome.ans".into();
-    let app = App::new(pool, Presence::new(), Arc::new(settings), guest, 1);
+    let app = App::new(
+        pool,
+        Presence::new(),
+        Arc::new(settings),
+        guest,
+        1,
+        Transport::Ssh,
+    );
 
     let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
     term.draw(|f| ui::draw(f, &app)).unwrap();
@@ -75,5 +90,71 @@ async fn welcome_art_is_rendered() {
     assert!(
         screen.contains("XYZZY-ART"),
         "welcome art should be rendered; got:\n{screen}"
+    );
+}
+
+/// Render the main menu for a session and return the screen as text.
+async fn main_menu_screen(settings: Settings, transport: Transport) -> String {
+    let (pool, guest) = guest_pool().await;
+    let app = App::new(
+        pool,
+        Presence::new(),
+        Arc::new(settings),
+        guest,
+        1,
+        transport,
+    );
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| ui::draw(f, &app)).unwrap();
+    dump(term.backend().buffer())
+}
+
+#[tokio::test]
+async fn ssh_session_is_told_about_the_web_frontend() {
+    let mut settings = Settings::default();
+    settings.web.enabled = true;
+    settings.web.hostname = "bbs.example.com".into();
+    settings.web.port = 443; // default https port is omitted from the URL
+
+    let screen = main_menu_screen(settings, Transport::Ssh).await;
+    assert!(
+        screen.contains("https://bbs.example.com"),
+        "an SSH session should see the web URL; got:\n{screen}"
+    );
+}
+
+#[tokio::test]
+async fn web_session_is_told_about_ssh() {
+    let mut settings = Settings::default();
+    settings.network.hostname = "bbs.example.com".into();
+    settings.network.port = 2222;
+
+    let screen = main_menu_screen(settings, Transport::Web).await;
+    assert!(
+        screen.contains("ssh -p 2222 guest@bbs.example.com"),
+        "a web session should see the ssh command; got:\n{screen}"
+    );
+}
+
+#[tokio::test]
+async fn no_cross_advertisement_when_unavailable_or_disabled() {
+    // The web frontend is off, so an SSH session has nothing to advertise.
+    let mut settings = Settings::default();
+    settings.web.enabled = false;
+    settings.web.hostname = "bbs.example.com".into();
+    let screen = main_menu_screen(settings, Transport::Ssh).await;
+    assert!(
+        !screen.contains("bbs.example.com"),
+        "a disabled web frontend must not be advertised; got:\n{screen}"
+    );
+
+    // The toggle suppresses it even when the other transport is available.
+    let mut settings = Settings::default();
+    settings.features.advertise_transports = false;
+    settings.network.hostname = "bbs.example.com".into();
+    let screen = main_menu_screen(settings, Transport::Web).await;
+    assert!(
+        !screen.contains("bbs.example.com"),
+        "advertise_transports = false should suppress the hint; got:\n{screen}"
     );
 }

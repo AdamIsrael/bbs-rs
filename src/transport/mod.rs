@@ -1,16 +1,30 @@
 //! The seam that keeps the TUI transport-agnostic.
 //!
-//! The app loop never talks to russh (or, later, axum/WebSocket) directly. It
-//! renders through a `ratatui::Terminal<CrosstermBackend<W>>` — any `W: Write`
-//! byte sink — and consumes decoded [`Event`]s from an `mpsc` channel. Each
+//! The app loop never talks to russh or axum/WebSocket directly. It renders
+//! through a `ratatui::Terminal<CrosstermBackend<W>>` — any `W: Write` byte
+//! sink — and consumes decoded [`Event`]s from an `mpsc` channel. Each
 //! transport is responsible for:
 //!   1. providing a `Write` sink that ships bytes to the client, and
 //!   2. decoding its raw input bytes into [`Event`]s (see [`crate::input`]).
 //!
-//! A future `web` module implements the same contract over a WebSocket +
-//! xterm.js, reusing the entire `app` unchanged.
+//! [`crate::ssh`] and [`crate::web`] both implement that contract, so the whole
+//! `app` is shared between them. [`Transport`] is the one thing the app knows
+//! about *how* a session arrived — enough to tell a user the other way in.
 
 use crossterm::event::KeyEvent;
+
+/// How a session reached the BBS.
+///
+/// The app is otherwise transport-agnostic; this exists so the UI can adapt the
+/// few places where the connection method actually matters (e.g. pointing a
+/// browser user at the SSH address, and vice-versa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// An SSH session ([`crate::ssh`]).
+    Ssh,
+    /// A browser session over the WebSocket frontend ([`crate::web`]).
+    Web,
+}
 
 /// A decoded client-side event fed into the app loop.
 #[derive(Debug, Clone)]

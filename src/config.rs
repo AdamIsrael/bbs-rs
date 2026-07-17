@@ -181,6 +181,12 @@ pub struct Web {
     pub enabled: bool,
     pub host: String,
     pub port: u16,
+    /// Public hostname browsers use to reach the frontend, shown in connect
+    /// instructions (the mirror of `[network] hostname`). Blank falls back to
+    /// the first `acme_domains` entry, then `host` — or `localhost` when `host`
+    /// is a wildcard bind address. Set this when the frontend sits behind a
+    /// reverse proxy or on a different domain than SSH.
+    pub hostname: String,
     /// Serve HTTPS/WSS. On by default: with no cert configured the server
     /// generates a persistent self-signed cert so TLS works out of the box.
     pub tls: bool,
@@ -208,6 +214,7 @@ impl Default for Web {
             enabled: false,
             host: "0.0.0.0".into(),
             port: 8088,
+            hostname: String::new(),
             tls: true,
             tls_cert: String::new(),
             tls_key: String::new(),
@@ -215,6 +222,42 @@ impl Default for Web {
             acme_email: String::new(),
             acme_cache: "acme-cache".into(),
             acme_staging: false,
+        }
+    }
+}
+
+impl Web {
+    /// The hostname to show clients in connect instructions: the configured
+    /// public `hostname` if set, else the first ACME domain (which is by
+    /// definition public), else `host` — mapping a wildcard bind address
+    /// (`0.0.0.0` / `::` / empty) to `localhost`. Mirrors
+    /// [`Network::connect_host`].
+    pub fn connect_host(&self) -> String {
+        let h = self.hostname.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+        if let Some(d) = self.acme_domains.iter().find(|d| !d.trim().is_empty()) {
+            return d.trim().to_string();
+        }
+        match self.host.trim() {
+            "" | "0.0.0.0" | "::" | "[::]" => "localhost".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The URL to show clients for the browser frontend, e.g.
+    /// `https://bbs.example.com` or `http://localhost:8088`. The port is
+    /// omitted when it's the scheme's default, so a proxied board on 443 reads
+    /// cleanly.
+    pub fn connect_url(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        let default_port = if self.tls { 443 } else { 80 };
+        let host = self.connect_host();
+        if self.port == default_port {
+            format!("{scheme}://{host}")
+        } else {
+            format!("{scheme}://{host}:{}", self.port)
         }
     }
 }
@@ -308,6 +351,10 @@ pub struct Features {
     pub oneliners: bool,
     pub pubkey_auth: bool,
     pub file_areas: bool,
+    /// Tell users about the other way in — show browser users the SSH address
+    /// and SSH users the web URL (needs `[network] hostname` / `[web] hostname`
+    /// set to be useful). Turn off to keep the other transport unadvertised.
+    pub advertise_transports: bool,
 }
 
 /// Abuse protection: auto-ban IPs with repeated failed logins.
@@ -494,6 +541,7 @@ impl Default for Features {
             oneliners: true,
             pubkey_auth: true,
             file_areas: true,
+            advertise_transports: true,
         }
     }
 }
@@ -620,6 +668,10 @@ oneliners = true
 pubkey_auth = true
 # Enable file areas (browse downloadable files).
 file_areas = true
+# Tell users about the other way in: browser users see the SSH address, SSH
+# users see the web URL (when [web] is enabled). Set the hostname fields below
+# for these to show a reachable address rather than localhost.
+advertise_transports = true
 
 [abuse]
 # Auto-ban an IP after this many failed logins within the window. 0 disables.
@@ -698,6 +750,11 @@ welcome = \"\"
 enabled = false
 host = \"0.0.0.0\"
 port = 8088
+# Public hostname browsers use to reach the frontend, shown in connect
+# instructions (the mirror of [network] hostname). Blank falls back to the first
+# acme_domains entry, then host, or localhost when host is a wildcard address.
+# Set this when the frontend is behind a reverse proxy or on its own domain.
+hostname = \"\"
 # TLS (HTTPS/WSS). On by default: with no cert configured a persistent
 # self-signed cert is generated at tls_cert/tls_key (default web-cert.pem /
 # web-key.pem), so TLS works out of the box — browsers show a one-time trust
@@ -783,6 +840,11 @@ mod tests {
         assert_eq!(parsed.web.port, def.web.port);
         assert_eq!(parsed.web.tls, def.web.tls);
         assert_eq!(parsed.web.acme_cache, def.web.acme_cache);
+        assert_eq!(parsed.web.hostname, def.web.hostname);
+        assert_eq!(
+            parsed.features.advertise_transports,
+            def.features.advertise_transports
+        );
         assert_eq!(parsed.oneliners.max_entries, def.oneliners.max_entries);
         assert_eq!(parsed.oneliners.max_length, def.oneliners.max_length);
         // The template's [seed] is all commented, so it resolves to the
@@ -870,6 +932,46 @@ boards = [
 
         net.hostname = "  ".into(); // blank falls back to host
         assert_eq!(net.connect_host(), "bbs.example.com");
+    }
+
+    #[test]
+    fn web_connect_host_prefers_hostname_then_acme_then_host() {
+        let mut web = Web::default(); // host 0.0.0.0, no hostname, no acme
+        assert_eq!(web.connect_host(), "localhost");
+
+        web.host = "10.0.0.5".into();
+        assert_eq!(web.connect_host(), "10.0.0.5");
+
+        // An ACME domain is public by definition, so it beats the bind host.
+        web.acme_domains = vec!["acme.example.com".into()];
+        assert_eq!(web.connect_host(), "acme.example.com");
+
+        // An explicit hostname wins over everything.
+        web.hostname = "www.example.net".into();
+        assert_eq!(web.connect_host(), "www.example.net");
+
+        web.hostname = "  ".into(); // blank falls back down the chain
+        assert_eq!(web.connect_host(), "acme.example.com");
+    }
+
+    #[test]
+    fn web_connect_url_uses_scheme_and_omits_default_port() {
+        let mut web = Web {
+            hostname: "bbs.example.com".into(),
+            ..Web::default()
+        };
+        // Non-default port is shown.
+        assert_eq!(web.connect_url(), "https://bbs.example.com:8088");
+
+        // 443 is the https default — omit it.
+        web.port = 443;
+        assert_eq!(web.connect_url(), "https://bbs.example.com");
+
+        // Plain HTTP: scheme follows tls, and 80 is its default.
+        web.tls = false;
+        assert_eq!(web.connect_url(), "http://bbs.example.com:443");
+        web.port = 80;
+        assert_eq!(web.connect_url(), "http://bbs.example.com");
     }
 
     #[test]

@@ -92,6 +92,7 @@ who_online = true
 oneliners = true       # the graffiti wall
 pubkey_auth = true     # allow SSH public-key login (users register keys in the BBS)
 file_areas = true      # browse downloadable file areas
+advertise_transports = true  # tell users the other way in (SSH ↔ browser)
 
 [abuse]      # auto-ban IPs with repeated failed logins
 max_failures = 10      # failures within the window to trigger a ban (0 disables)
@@ -137,6 +138,7 @@ welcome = ""           # file shown on the main menu (blank = none)
 enabled = false
 host = "0.0.0.0"
 port = 8088
+hostname = ""          # public hostname for connect hints (blank → acme_domains[0]/host/localhost)
 tls = true             # HTTPS/WSS; auto self-signed cert if none configured
 # tls_cert = "web-cert.pem"   # bring your own PEM cert + key instead
 # tls_key  = "web-key.pem"
@@ -177,6 +179,16 @@ for a starting point (`welcome = "welcome.example.txt"` to use it).
 in a web terminal (try `guest` / `guest`). It shares the SSH server's users, login audit, bans, and
 who's-online. xterm.js ([MIT](https://github.com/xtermjs/xterm.js)) is vendored under `src/web/static/`,
 so the page is fully self-contained — no CDN at runtime.
+
+**Two ways in**: the BBS is reachable over SSH *and* (when `[web]` is enabled) in a browser, and each
+session is told about the other — a browser user sees the `ssh …` command, an SSH user sees the web URL,
+on the main menu and the Help screen. Turn it off with `[features] advertise_transports = false`.
+
+> These hints are only as good as your hostnames. Set **`[network] hostname`** and **`[web] hostname`** to
+> the public names people actually connect to; otherwise a wildcard bind (`0.0.0.0`) resolves to
+> `localhost`, which is fine for local testing but useless to a remote user. `[web] hostname` falls back to
+> the first `acme_domains` entry when unset, and the web URL's port is omitted when it's the scheme default
+> (443/80) — so a proxied board on 443 reads as a clean `https://bbs.example.com`.
 
 **HTTPS / TLS**: TLS is **on by default** when the web frontend is enabled, so credentials and the session
 are encrypted (the page automatically uses `wss://` for its WebSocket). There are three cert modes,

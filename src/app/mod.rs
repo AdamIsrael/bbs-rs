@@ -33,7 +33,7 @@ use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
-use crate::transport::Event;
+use crate::transport::{Event, Transport};
 use crate::util::now_unix;
 
 use state::{Field, Form, MenuItem, Screen};
@@ -50,6 +50,10 @@ pub struct App {
     pub art: HashMap<Screen, Text<'static>>,
     pub user: User,
     session_id: usize,
+    /// How this session connected. The app is otherwise transport-agnostic;
+    /// this drives the few spots where it matters (e.g. telling a browser user
+    /// the SSH address, and an SSH user the web URL).
+    pub transport: Transport,
 
     pub screen: Screen,
     pub should_quit: bool,
@@ -160,6 +164,7 @@ impl App {
         config: Arc<Settings>,
         user: User,
         session_id: usize,
+        transport: Transport,
     ) -> Self {
         // Menu honors the feature toggles. Registration is the newcomer
         // bootstrap path, so it's only offered to the guest account.
@@ -209,6 +214,7 @@ impl App {
             art,
             user,
             session_id,
+            transport,
             screen: Screen::MainMenu,
             should_quit: false,
             status: String::new(),
