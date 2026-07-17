@@ -97,6 +97,52 @@ async fn reserved_usernames_are_rejected() {
     );
 }
 
+/// Usernames are restricted to a URI-safe ASCII set. This is a security
+/// boundary, not cosmetics: federated actors are stored in `users` keyed by a
+/// fully-qualified `alice@remote.social` handle, so a local account containing
+/// `@` could impersonate a remote one.
+#[tokio::test]
+async fn register_rejects_unsafe_usernames() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::auth::register_user;
+    let pool = setup().await;
+    let accounts = Default::default();
+
+    for bad in [
+        "alice@remote.social", // impersonates a federated handle
+        "a@b",
+        "alice/bob", // breaks out of an actor URI path
+        "alice bob", // whitespace
+        " alice",    // leading space would collide with "alice" on lookup
+        "alice ",
+        "alice\tbob",
+        "alice\nbob",
+        "",
+        "   ",
+        "aliceßé", // non-ASCII: not safely representable in preferredUsername
+        "alice:8088",
+        "alice#main",
+        "alice?q=1",
+        &"a".repeat(33), // over MAX_USERNAME_CHARS
+    ] {
+        assert!(
+            matches!(
+                register_user(&pool, bad, "pw", &accounts).await,
+                Err(AppError::UsernameInvalid(_))
+            ),
+            "username {bad:?} must be rejected"
+        );
+    }
+
+    // The allowed set still works.
+    for good in ["alice", "bob_2", "carol-x", "dave.jr", &"a".repeat(32)] {
+        assert!(
+            register_user(&pool, good, "pw", &accounts).await.is_ok(),
+            "username {good:?} should be accepted"
+        );
+    }
+}
+
 #[tokio::test]
 async fn message_threads_nest_and_order() {
     use bbs_rs::error::AppError;

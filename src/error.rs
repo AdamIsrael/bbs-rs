@@ -25,6 +25,9 @@ pub enum AppError {
     #[error("that username is reserved")]
     UsernameReserved,
 
+    #[error("usernames may only contain letters, numbers, and _ - . (1–{0} characters)")]
+    UsernameInvalid(usize),
+
     #[error("that action is not available to the guest account")]
     GuestNotAllowed,
 

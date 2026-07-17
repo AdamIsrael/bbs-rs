@@ -15,6 +15,12 @@ pub struct User {
     pub created_at: i64,
     /// Unix timestamp of the ban, or `None` if the account is not banned.
     pub banned_at: Option<i64>,
+    /// A discovered ActivityPub actor from another server, stored here so
+    /// `messages.author_id` can point at it (see docs/FEDERATION.md). Remote
+    /// rows are keyed by a fully-qualified `alice@remote.social` username, have
+    /// no usable password, and must never be logged into or listed as local
+    /// members.
+    pub is_remote: bool,
 }
 
 impl User {
@@ -31,6 +37,13 @@ impl User {
     /// A banned account is refused at login.
     pub fn is_banned(&self) -> bool {
         self.banned_at.is_some()
+    }
+
+    /// Whether this account may hold a session: local, and not banned. Remote
+    /// actors exist only to attribute federated content — they have no
+    /// password and no business logging in.
+    pub fn can_log_in(&self) -> bool {
+        !self.is_remote && !self.is_banned()
     }
 }
 
