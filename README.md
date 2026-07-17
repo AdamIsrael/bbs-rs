@@ -406,3 +406,18 @@ GitHub Release:
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
 ```
+
+## License
+
+**bbs-rs is [AGPL-3.0-or-later](LICENSE).** If you run a modified bbs-rs as a network service, §13
+requires you to offer your users the source of your modified version.
+
+It was MIT until federation work began: the only maintained Rust ActivityPub library
+([`activitypub_federation`](https://github.com/LemmyNet/activitypub-federation-rust)) is AGPL-3.0, and
+the alternatives are GPL-3.0 or unmaintained. AGPL is the fediverse norm — Mastodon and Lemmy are both
+AGPL — so this puts bbs-rs in ordinary company for a federating server. See
+[docs/FEDERATION.md](docs/FEDERATION.md).
+
+**The door crates stay [MIT](doors/doorkit/LICENSE)** — [`doorkit`](doors/doorkit) and
+[`loid`](doors/loid) are independent workspace members that don't link bbs-rs (they talk to any BBS via
+a drop file + the terminal), and a door SDK should stay permissive for third-party authors.
