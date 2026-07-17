@@ -54,6 +54,7 @@ pub struct Settings {
     pub theme: ThemeConfig,
     pub art: Art,
     pub web: Web,
+    pub federation: Federation,
     pub oneliners: Oneliners,
     pub seed: Seed,
     /// External "door" programs launchable per session (classic BBS doors).
@@ -223,6 +224,119 @@ impl Default for Web {
             acme_cache: "acme-cache".into(),
             acme_staging: false,
         }
+    }
+}
+
+/// ActivityPub federation (epic #113). Off by default.
+///
+/// `origin` is deliberately **not** derived from `[web]`. `Web::connect_url()`
+/// can legitimately return `https://localhost:8088`, and an ActivityPub `id`
+/// URI is a permanent primary key across the whole network — once an actor or
+/// post has been delivered to a remote server, its URI can never be rewritten.
+/// So the origin is stated explicitly and validated fail-closed at startup: a
+/// board that can't federate correctly refuses to federate at all, rather than
+/// minting URIs it will be stuck with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Federation {
+    pub enabled: bool,
+    /// Public origin actor URIs are minted from, e.g. `https://bbs.example.com`.
+    /// Scheme + host only — no port, path, or query (see [`Federation::origin`]).
+    pub origin: String,
+    /// Only federate with domains explicitly allowed in `ap_blocks`. On by
+    /// default: open federation means volunteering to moderate the internet.
+    pub allowlist_only: bool,
+    /// How often the durable outbound delivery queue drains.
+    pub delivery_interval_secs: u64,
+    /// Give up on an activity after this many failed delivery attempts.
+    pub delivery_max_attempts: u32,
+    /// **Local testing only.** Permits `http://`, `localhost`, IP literals, and
+    /// non-default ports in `origin` so two instances can federate on one
+    /// machine. Never enable on a real board: the URIs you mint are permanent.
+    pub debug_insecure: bool,
+}
+
+impl Default for Federation {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            origin: String::new(),
+            allowlist_only: true,
+            delivery_interval_secs: 30,
+            delivery_max_attempts: 10,
+            debug_insecure: false,
+        }
+    }
+}
+
+impl Federation {
+    pub fn delivery_interval(&self) -> Duration {
+        Duration::from_secs(self.delivery_interval_secs.max(1))
+    }
+
+    /// Validate `origin` and return it normalized (scheme + host, no trailing
+    /// slash) — the string every actor/object URI is built from.
+    ///
+    /// Fail-closed by design. Every rejection here is something that would
+    /// either break interop outright or permanently poison our URIs.
+    pub fn origin(&self) -> anyhow::Result<String> {
+        let raw = self.origin.trim();
+        anyhow::ensure!(
+            !raw.is_empty(),
+            "[federation] origin must be set when federation is enabled — it's the \
+             permanent base of every actor URI (e.g. \"https://bbs.example.com\")"
+        );
+        let url = url::Url::parse(raw)
+            .with_context(|| format!("[federation] origin {raw:?} is not a valid URL"))?;
+
+        match url.scheme() {
+            "https" => {}
+            "http" if self.debug_insecure => {}
+            other => anyhow::bail!(
+                "[federation] origin must use https (got {other:?}). Remote servers fetch us \
+                 with ordinary HTTPS clients, so a plaintext or self-signed origin cannot \
+                 interop. Set debug_insecure = true only for local testing."
+            ),
+        }
+
+        let host = url
+            .host()
+            .context("[federation] origin must include a host")?;
+        if !self.debug_insecure {
+            // An IP literal can't be the subject of an `acct:` URI, so WebFinger
+            // discovery — how @user@host is resolved — could never work.
+            anyhow::ensure!(
+                matches!(host, url::Host::Domain(_)),
+                "[federation] origin must be a domain name, not an IP address — WebFinger \
+                 acct: URIs are built on the DNS name"
+            );
+            let domain = url.host_str().unwrap_or_default();
+            anyhow::ensure!(
+                domain != "localhost" && !domain.ends_with(".localhost") && domain.contains('.'),
+                "[federation] origin host {domain:?} is not reachable from other servers. \
+                 Actor URIs are permanent, so a localhost origin would poison every URI \
+                 this board ever mints."
+            );
+            // `Url::port()` is None for the scheme's default, so this only fires
+            // on a genuinely non-standard port.
+            if let Some(port) = url.port() {
+                anyhow::bail!(
+                    "[federation] origin must not include a port (got {port}). RFC 7565 \
+                     acct: URIs have no port component, so `acct:user@{}:{port}` is invalid \
+                     and WebFinger discovery would fail. Serve on 443 ([web] port = 443 \
+                     with acme_domains), or put a reverse proxy in front.",
+                    url.host_str().unwrap_or_default()
+                );
+            }
+        }
+
+        anyhow::ensure!(
+            url.path() == "/" && url.query().is_none() && url.fragment().is_none(),
+            "[federation] origin must be scheme + host only, with no path or query \
+             (got {raw:?})"
+        );
+
+        Ok(raw.trim_end_matches('/').to_string())
     }
 }
 
@@ -770,6 +884,30 @@ tls = true
 # acme_cache   = \"acme-cache\"
 # acme_staging = false   # true = Let's Encrypt staging (untrusted, for testing)
 
+[federation]
+# ActivityPub federation: syndicate boards across bbs-rs instances, and make
+# users user@host — followable from Mastodon. Off by default. See
+# docs/FEDERATION.md.
+enabled = false
+# The public origin every actor URI is minted from, e.g.
+# \"https://bbs.example.com\". Scheme + host only: no port, no path.
+#
+# THIS IS PERMANENT. ActivityPub ids are primary keys across the whole network;
+# once delivered to a remote server they can never be rewritten, so changing
+# the origin later orphans every remote follow. It is validated fail-closed at
+# startup (https, a real domain, no port) — a board that can't federate
+# correctly refuses to federate at all.
+#
+# Note RFC 7565 acct: URIs have no port component, so the frontend must be
+# reachable on 443: set [web] port = 443 with acme_domains, or reverse-proxy.
+origin = \"\"
+# Only federate with domains explicitly allowed (bbsctl). On by default: open
+# federation means volunteering to moderate the entire internet.
+allowlist_only = true
+delivery_interval_secs = 30   # how often the outbound delivery queue drains
+delivery_max_attempts = 10    # give up on an activity after this many failures
+# debug_insecure = false      # LOCAL TESTING ONLY: allows http/localhost/ports
+
 [oneliners]
 # Graffiti-wall policy (separate from the [features] oneliners on/off toggle).
 # After each post the wall is trimmed to the most recent max_entries rows.
@@ -841,6 +979,16 @@ mod tests {
         assert_eq!(parsed.web.tls, def.web.tls);
         assert_eq!(parsed.web.acme_cache, def.web.acme_cache);
         assert_eq!(parsed.web.hostname, def.web.hostname);
+        assert_eq!(parsed.federation.enabled, def.federation.enabled);
+        assert_eq!(parsed.federation.origin, def.federation.origin);
+        assert_eq!(
+            parsed.federation.allowlist_only,
+            def.federation.allowlist_only
+        );
+        assert_eq!(
+            parsed.federation.delivery_interval_secs,
+            def.federation.delivery_interval_secs
+        );
         assert_eq!(
             parsed.features.advertise_transports,
             def.features.advertise_transports
@@ -952,6 +1100,73 @@ boards = [
 
         web.hostname = "  ".into(); // blank falls back down the chain
         assert_eq!(web.connect_host(), "acme.example.com");
+    }
+
+    #[test]
+    fn federation_origin_is_validated_fail_closed() {
+        // Every rejection below is permanent damage if it slipped through: an
+        // AP id URI can never be rewritten once it's been delivered.
+        let fed = |origin: &str| Federation {
+            origin: origin.into(),
+            ..Federation::default()
+        };
+
+        // The happy path, normalized (trailing slash trimmed).
+        assert_eq!(
+            fed("https://bbs.example.com").origin().unwrap(),
+            "https://bbs.example.com"
+        );
+        assert_eq!(
+            fed("https://bbs.example.com/").origin().unwrap(),
+            "https://bbs.example.com"
+        );
+        // An explicit :443 is the https default, so it isn't a "port".
+        assert_eq!(
+            fed("https://bbs.example.com:443").origin().unwrap(),
+            "https://bbs.example.com:443"
+        );
+
+        for bad in [
+            "", // unset
+            "   ",
+            "bbs.example.com",        // no scheme
+            "http://bbs.example.com", // plaintext can't interop
+            "https://localhost",      // unreachable + permanent
+            "https://bbs.localhost",
+            "https://127.0.0.1", // IP can't back an acct: URI
+            "https://[::1]",
+            "https://bbs.example.com:8088", // RFC 7565: acct: has no port
+            "https://example",              // not a real domain
+            "https://bbs.example.com/ap",   // path
+            "https://bbs.example.com/?x=1",
+            "https://bbs.example.com/#f",
+            "not a url",
+        ] {
+            assert!(
+                fed(bad).origin().is_err(),
+                "origin {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn federation_debug_insecure_permits_local_two_instance_testing() {
+        // The escape hatch exists so two instances can federate on one machine
+        // (the AP crate's local_federation example does this). It must never be
+        // required for, or usable as, a real deployment.
+        let dev = |origin: &str| Federation {
+            origin: origin.into(),
+            debug_insecure: true,
+            ..Federation::default()
+        };
+        assert_eq!(
+            dev("http://localhost:8088").origin().unwrap(),
+            "http://localhost:8088"
+        );
+        assert!(dev("http://127.0.0.1:8089").origin().is_ok());
+        // Still not a free-for-all: structural rules hold.
+        assert!(dev("").origin().is_err());
+        assert!(dev("https://x.example/path").origin().is_err());
     }
 
     #[test]

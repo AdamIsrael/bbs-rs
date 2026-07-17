@@ -108,9 +108,10 @@ pub async fn find_authorized(
     fingerprint: &str,
 ) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
-        "SELECT u.id, u.username, u.password_hash, u.role, u.created_at, u.banned_at \
+        "SELECT u.id, u.username, u.password_hash, u.role, u.created_at, u.banned_at, \
+         u.is_remote \
          FROM users u JOIN user_keys k ON k.user_id = u.id \
-         WHERE u.username = ? AND k.fingerprint = ?",
+         WHERE u.username = ? AND k.fingerprint = ? AND u.is_remote = 0",
     )
     .bind(username)
     .bind(fingerprint)

@@ -399,6 +399,7 @@ mod tests {
             role: "user".into(),
             created_at: 0,
             banned_at: None,
+            is_remote: false,
         };
         let body = dorinfo1(&user, "My BBS", "Jane Sysop", 30, 30);
         let lines: Vec<&str> = body.lines().collect();

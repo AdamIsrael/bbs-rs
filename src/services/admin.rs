@@ -16,11 +16,14 @@ use crate::util::now_unix;
 /// Valid access levels.
 pub const ROLES: [&str; 3] = ["guest", "user", "admin"];
 
-/// All registered users, oldest first.
+/// All registered *local* users, oldest first. Discovered ActivityPub actors
+/// also live in `users` (see docs/FEDERATION.md) but they aren't members of
+/// this board — they'd swamp the admin list and can't be banned or promoted
+/// meaningfully.
 pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>> {
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at \
-         FROM users ORDER BY id",
+        "SELECT id, username, password_hash, role, created_at, banned_at, is_remote \
+         FROM users WHERE is_remote = 0 ORDER BY id",
     )
     .fetch_all(pool)
     .await?;

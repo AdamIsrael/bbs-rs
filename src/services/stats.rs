@@ -36,7 +36,10 @@ pub struct Stats {
 
 /// Gather all stats in one shot. `limit` bounds the leaderboard / caller lists.
 pub async fn gather(pool: &SqlitePool, limit: i64) -> Result<Stats> {
-    let total_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+    // Members of *this* board. Discovered ActivityPub actors are stored in
+    // `users` as well (see docs/FEDERATION.md), but counting them here would
+    // inflate the board's membership with strangers it merely follows.
+    let total_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_remote = 0")
         .fetch_one(pool)
         .await?;
     let total_posts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")

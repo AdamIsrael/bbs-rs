@@ -38,6 +38,7 @@ use crate::services::presence::Presence;
 use crate::services::{admin, auth};
 use crate::transport::{Event, Transport};
 
+pub mod activitypub;
 mod terminal;
 pub mod tls;
 use terminal::WebTerminalHandle;
@@ -124,6 +125,10 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
+        // ActivityPub (#107). Both 404 unless [federation] is enabled with a
+        // validated origin, so a non-federating board looks like one.
+        .route("/.well-known/webfinger", get(activitypub::webfinger))
+        .route("/u/{username}", get(activitypub::person))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
 }

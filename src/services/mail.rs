@@ -91,8 +91,13 @@ pub async fn send_mail(
         let count = recent_sent_count(pool, from.id, since).await?;
         enforce_rate(count, limits.max_mail)?;
     }
+    // Mail is local-only for now. Discovered ActivityPub actors live in `users`
+    // too, so an unqualified lookup could otherwise address one — and fediverse
+    // DMs are plaintext on every server they touch. Remote addressing is a
+    // deliberate, labeled opt-in (#110), not something to fall into.
     let to = auth::find_user(pool, to_username)
         .await?
+        .filter(|u| !u.is_remote)
         .ok_or(AppError::RecipientNotFound)?;
     sqlx::query(
         "INSERT INTO mail (from_id, to_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",

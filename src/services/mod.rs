@@ -6,6 +6,7 @@ pub mod archive;
 pub mod auth;
 pub mod boards;
 pub mod bulletins;
+pub mod federation;
 pub mod files;
 pub mod keys;
 pub mod mail;
