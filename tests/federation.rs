@@ -200,6 +200,87 @@ async fn remote_actors_stay_out_of_local_surfaces() {
     ));
 }
 
+/// Minting an actor is lazy and **idempotent**. Re-minting would hand the same
+/// user a new URI and a new keypair, orphaning every remote follow and breaking
+/// signature verification for everything already delivered — so a second call
+/// must return the first result byte-for-byte.
+#[tokio::test]
+async fn person_keys_are_minted_once_and_reused() {
+    use bbs_rs::services::federation::{Origin, ensure_person_keys};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    let first = ensure_person_keys(&pool, &origin, &alice).await.unwrap();
+    assert_eq!(first.actor_uri, "https://bbs.example.com/u/alice");
+    assert!(first.private_key.contains("BEGIN PRIVATE KEY"));
+    assert!(first.public_key.contains("BEGIN PUBLIC KEY"));
+
+    let second = ensure_person_keys(&pool, &origin, &alice).await.unwrap();
+    assert_eq!(first.actor_uri, second.actor_uri);
+    assert_eq!(
+        first.private_key, second.private_key,
+        "the keypair must never be regenerated"
+    );
+
+    // Even if the configured origin later changes, an existing actor keeps its
+    // URI — the old one is already out in the world.
+    let moved = Origin::new("https://elsewhere.example.net");
+    let third = ensure_person_keys(&pool, &moved, &alice).await.unwrap();
+    assert_eq!(
+        third.actor_uri, "https://bbs.example.com/u/alice",
+        "a minted actor_uri is permanent, even if the origin config moves"
+    );
+
+    // The inbox was recorded alongside it.
+    let inbox: Option<String> =
+        sqlx::query_scalar("SELECT inbox_url FROM users WHERE username = 'alice'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        inbox.as_deref(),
+        Some("https://bbs.example.com/u/alice/inbox")
+    );
+}
+
+/// Only real local members get actors: `guest` is shared (one keypair for many
+/// humans), and remote rows belong to other servers.
+#[tokio::test]
+async fn guest_and_remote_actors_are_not_federatable() {
+    use bbs_rs::services::federation::{Origin, ensure_person_keys, find_local_actor};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    insert_remote_actor(&pool, "eve@remote.social", "remote.social").await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // WebFinger resolves only local, non-guest accounts.
+    assert!(find_local_actor(&pool, "alice").await.unwrap().is_some());
+    assert!(
+        find_local_actor(&pool, "guest").await.unwrap().is_none(),
+        "the shared guest account must not be federatable"
+    );
+    assert!(
+        find_local_actor(&pool, "eve@remote.social")
+            .await
+            .unwrap()
+            .is_none(),
+        "a remote actor is not one of ours to publish"
+    );
+    assert!(find_local_actor(&pool, "nobody").await.unwrap().is_none());
+
+    // We never mint keys for someone else's actor.
+    let eve = auth::find_user(&pool, "eve@remote.social")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ensure_person_keys(&pool, &origin, &eve).await.is_err());
+}
+
 /// `actor_uri` is globally unique, but NULLs stay distinct — so any number of
 /// not-yet-federated local rows can coexist.
 #[tokio::test]
