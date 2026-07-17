@@ -36,7 +36,7 @@ use crate::config::Settings;
 use crate::input;
 use crate::services::presence::Presence;
 use crate::services::{admin, auth};
-use crate::transport::Event;
+use crate::transport::{Event, Transport};
 
 mod terminal;
 pub mod tls;
@@ -313,6 +313,7 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
         config.clone(),
         user,
         id,
+        Transport::Web,
     );
     let mut app_task = tokio::spawn(app::run(app, terminal, ev_rx, raw_out));
 

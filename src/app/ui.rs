@@ -8,7 +8,35 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::App;
 use crate::app::state::{MenuItem, Screen};
+use crate::transport::Transport;
 use crate::util::fmt_time;
+
+/// The "other way in" for this session: browser users get the SSH command, SSH
+/// users get the web URL. `None` when the operator opted out, or when the other
+/// transport isn't available (the web frontend is off).
+///
+/// Addresses come from the configured public hostnames — with a stock config
+/// (blank `hostname`, wildcard bind) these resolve to `localhost`, which is
+/// only useful locally.
+fn other_transport_hint(app: &App) -> Option<String> {
+    if !app.config.features.advertise_transports {
+        return None;
+    }
+    match app.transport {
+        // Mirrors the SFTP hint's shape: omit -p on the default SSH port.
+        Transport::Web => {
+            let net = &app.config.network;
+            let host = net.connect_host();
+            let user = &app.user.username;
+            Some(if net.port == 22 {
+                format!("ssh {user}@{host}")
+            } else {
+                format!("ssh -p {} {user}@{host}", net.port)
+            })
+        }
+        Transport::Ssh => app.config.web.enabled.then(|| app.config.web.connect_url()),
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
@@ -159,6 +187,17 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
         if !bbs.welcome.is_empty() {
             banner.push(Line::from(""));
             banner.push(Line::from(bbs.welcome.clone()));
+        }
+        // Point users at the other way in (browser ↔ SSH).
+        if let Some(hint) = other_transport_hint(app) {
+            let label = match app.transport {
+                Transport::Web => "Also on SSH:",
+                Transport::Ssh => "Also in a browser:",
+            };
+            banner.push(Line::from(Span::styled(
+                format!("{label} {hint}"),
+                Style::default().fg(app.theme.dim),
+            )));
         }
         let banner_h = banner.len() as u16 + 2; // + borders
         let rows = Layout::vertical([Constraint::Length(banner_h), Constraint::Min(1)]).split(area);
@@ -800,9 +839,18 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
-  • SSH Keys       : register public keys to log in without a password
-  • Register       : create an account, then reconnect over SSH with it
-
+  • SSH Keys       : register public keys to log in over SSH without a password
+",
+    );
+    // How you get back in after registering depends on how you got here.
+    text.push_str(match app.transport {
+        Transport::Ssh => {
+            "  • Register       : create an account, then reconnect over SSH with it\n"
+        }
+        Transport::Web => "  • Register       : create an account, then sign in again with it\n",
+    });
+    text.push_str(
+        "
 Navigation
   ↑/↓ move    Enter select/open    Esc or ← go back    q quit
   In forms: Tab/↑/↓ switch fields, Enter submits on the last field.
@@ -810,6 +858,13 @@ Navigation
 The guest account is read-only: it can browse boards and see who's online,
 but cannot post or use mail. Register an account for the full experience.",
     );
+    if let Some(hint) = other_transport_hint(app) {
+        let label = match app.transport {
+            Transport::Web => "This board is also reachable over SSH:",
+            Transport::Ssh => "This board is also reachable in a browser:",
+        };
+        text.push_str(&format!("\n\n{label}\n  {hint}"));
+    }
     if !bbs.sysop.is_empty() {
         text.push_str(&format!("\n\nSysop: {}", bbs.sysop));
     }

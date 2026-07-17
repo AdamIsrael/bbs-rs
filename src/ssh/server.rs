@@ -27,7 +27,7 @@ use crate::services::{admin, auth, keys};
 use crate::ssh::pubkey;
 use crate::ssh::sftp::SftpSession;
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
-use crate::transport::Event;
+use crate::transport::{Event, Transport};
 
 /// Shared server state; cloned into each per-connection handler.
 #[derive(Clone)]
@@ -221,6 +221,7 @@ impl Handler for SessionHandler {
                     self.config.clone(),
                     user,
                     self.id,
+                    Transport::Ssh,
                 );
                 let id = self.id;
                 // The app loop is transport-agnostic; when it returns (user quit
