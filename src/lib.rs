@@ -32,6 +32,10 @@ use services::presence::Presence;
 /// when enabled, the browser frontend). Both transports share one presence
 /// registry and session-id counter, so who's-online and kicks span them.
 pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
+    // Install a process-wide rustls crypto provider for the web TLS stack
+    // (idempotent — ignore the error if one is already installed).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let pool = db::connect(&settings.network.database_url).await?;
     db::run_migrations(&pool).await?;
     services::seed(&pool, &settings.seed).await?;
@@ -50,27 +54,48 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
     if boot.web.enabled {
         // Bind the web port eagerly so a conflict (port already in use) fails
         // startup with a clear error, rather than being lost in a background
-        // task while the process keeps running SSH-only.
+        // task while the process keeps running SSH-only. A std listener lets the
+        // TLS path hand it to axum-server; the plain path converts it to tokio.
         let addr = format!("{}:{}", boot.web.host, boot.web.port);
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .with_context(|| {
-                format!("binding web frontend to {addr} — is the port already in use?")
-            })?;
-        tracing::info!("web frontend listening on http://{addr}");
+        let std_listener = std::net::TcpListener::bind(&addr).with_context(|| {
+            format!("binding web frontend to {addr} — is the port already in use?")
+        })?;
+        std_listener
+            .set_nonblocking(true)
+            .context("making the web listener non-blocking")?;
+        let scheme = if boot.web.tls { "https" } else { "http" };
+        tracing::info!("web frontend listening on {scheme}://{addr}");
         let state = web::WebState::new(
             pool.clone(),
             config.clone(),
             presence.clone(),
             next_id.clone(),
         );
-        tokio::spawn(async move {
-            if let Err(e) = web::serve(listener, state).await {
-                tracing::error!("web frontend stopped: {e}");
-            }
-        });
+        if boot.web.tls {
+            // Resolve TLS on the main task so cert errors fail startup.
+            let tls = web::tls::resolve(&boot.web)
+                .await
+                .context("setting up web TLS")?;
+            tokio::spawn(async move {
+                if let Err(e) = web::serve_tls(std_listener, state, tls).await {
+                    tracing::error!("web frontend stopped: {e}");
+                }
+            });
+        } else {
+            let listener =
+                tokio::net::TcpListener::from_std(std_listener).context("web listener")?;
+            tokio::spawn(async move {
+                if let Err(e) = web::serve(listener, state).await {
+                    tracing::error!("web frontend stopped: {e}");
+                }
+            });
+        }
         // Best-effort: warn if something other than us answers on the port.
-        tokio::spawn(web::self_check(boot.web.host.clone(), boot.web.port));
+        tokio::spawn(web::self_check(
+            boot.web.host.clone(),
+            boot.web.port,
+            boot.web.tls,
+        ));
     }
 
     tracing::info!(
