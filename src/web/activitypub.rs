@@ -208,38 +208,6 @@ struct PublicKeyJson {
     public_key_pem: String,
 }
 
-/// A status: one oneliner, as an ActivityStreams `Note`.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Note {
-    #[serde(rename = "@context")]
-    context: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    id: String,
-    attributed_to: String,
-    content: String,
-    published: String,
-    to: Vec<String>,
-    cc: Vec<String>,
-}
-
-/// A `Create` activity wrapping a `Note`, as it appears in an outbox.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateNote {
-    #[serde(rename = "@context")]
-    context: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    id: String,
-    actor: String,
-    published: String,
-    to: Vec<String>,
-    cc: Vec<String>,
-    object: Note,
-}
-
 /// An `OrderedCollection` of activities — the outbox.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -250,38 +218,7 @@ struct OrderedCollection {
     kind: &'static str,
     id: String,
     total_items: i64,
-    ordered_items: Vec<CreateNote>,
-}
-
-/// Build the `Note` for a status, minting its permanent `ap_id` on first use.
-async fn note_for(
-    state: &WebState,
-    origin: &Origin,
-    o: &crate::db::models::Oneliner,
-) -> Result<Note, crate::error::AppError> {
-    let ap_id = federation::ensure_status_ap_id(&state.pool, origin, o.id).await?;
-    Ok(Note {
-        context: "https://www.w3.org/ns/activitystreams",
-        kind: "Note",
-        id: ap_id,
-        attributed_to: origin.person(&o.author_name),
-        // Statuses are plain text; AP content is HTML, so escape rather than
-        // let a body inject markup into every reader's timeline.
-        content: format!("<p>{}</p>", html_escape(&o.body)),
-        published: crate::util::fmt_rfc3339(o.created_at),
-        // The full Public URI, never the `as:Public` CURIE — the short form is a
-        // known interop bug that hides posts on some servers.
-        to: vec![federation::PUBLIC.to_string()],
-        cc: vec![origin.person_followers(&o.author_name)],
-    })
-}
-
-/// Minimal HTML escaping for status bodies.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    ordered_items: Vec<federation::objects::CreateNote>,
 }
 
 /// `GET /s/{id}` — a status as a `Note`.
@@ -297,7 +234,7 @@ pub async fn status(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
         Ok(Some(_)) => {}
         _ => return StatusCode::NOT_FOUND.into_response(),
     }
-    match note_for(&state, &origin, &o).await {
+    match federation::objects::note_for(&state.pool, &origin, &o).await {
         Ok(note) => ApJson(AP_CONTENT_TYPE, note).into_response(),
         Err(e) => {
             tracing::error!("building note {id}: {e}");
@@ -341,17 +278,8 @@ pub async fn outbox(State(state): State<WebState>, Path(username): Path<String>)
 
     let mut items = Vec::with_capacity(rows.len());
     for o in &rows {
-        match note_for(&state, &origin, o).await {
-            Ok(note) => items.push(CreateNote {
-                context: "https://www.w3.org/ns/activitystreams",
-                kind: "Create",
-                id: origin.status_activity(o.id),
-                actor: origin.person(&user.username),
-                published: note.published.clone(),
-                to: note.to.clone(),
-                cc: note.cc.clone(),
-                object: note,
-            }),
+        match federation::objects::create_for(&state.pool, &origin, o).await {
+            Ok(create) => items.push(create),
             Err(e) => {
                 tracing::error!("building note {}: {e}", o.id);
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();

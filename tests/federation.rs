@@ -912,3 +912,272 @@ async fn actor_uri_is_unique_but_nulls_coexist() {
         .await;
     assert!(dup.is_err(), "actor_uri must be globally unique");
 }
+
+// ---- Slice B: follows, delivery fan-out, inbound Follow/Undo (#109) --------
+
+/// Mint a local actor (registered + keypair) so it can be followed and can
+/// sign. Returns the `User`; its actor URI is `{origin}/u/{name}`.
+async fn mint_local(pool: &SqlitePool, name: &str) -> bbs_rs::db::models::User {
+    use bbs_rs::services::federation::{Origin, ensure_person_keys};
+    let origin = Origin::new("https://bbs.example.com");
+    let user = auth::register_user(pool, name, "pw", &Default::default())
+        .await
+        .unwrap();
+    ensure_person_keys(pool, &origin, &user).await.unwrap();
+    user
+}
+
+/// Insert a remote follower complete enough to dereference as an actor (inbox +
+/// public key). `shared_inbox` collapses many followers on one server onto a
+/// single delivery. Returns the follower's actor URI.
+async fn insert_follower(
+    pool: &SqlitePool,
+    handle: &str,
+    domain: &str,
+    shared_inbox: Option<&str>,
+) -> String {
+    let user = handle.split('@').next().unwrap();
+    let actor_uri = format!("https://{domain}/users/{user}");
+    let inbox = format!("https://{domain}/users/{user}/inbox");
+    sqlx::query(
+        "INSERT INTO users (username, password_hash, role, created_at, domain, is_remote, \
+         actor_uri, inbox_url, shared_inbox_url, public_key) \
+         VALUES (?, '!', 'user', 0, ?, 1, ?, ?, ?, 'PUBKEY')",
+    )
+    .bind(handle)
+    .bind(domain)
+    .bind(&actor_uri)
+    .bind(&inbox)
+    .bind(shared_inbox)
+    .execute(pool)
+    .await
+    .unwrap();
+    actor_uri
+}
+
+/// The follower graph: follows are stored idempotently and unfollowing drops a
+/// single edge.
+#[tokio::test]
+async fn follows_are_stored_idempotently_and_removable() {
+    use bbs_rs::services::federation::follows;
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+
+    follows::accept(&pool, &bob, &alice, "https://remote.social/f/1")
+        .await
+        .unwrap();
+    follows::accept(&pool, &carol, &alice, "https://other.example/f/1")
+        .await
+        .unwrap();
+    assert_eq!(follows::count(&pool, &alice).await.unwrap(), 2);
+
+    // A repeat Follow from the same actor doesn't double-count.
+    follows::accept(&pool, &bob, &alice, "https://remote.social/f/1b")
+        .await
+        .unwrap();
+    assert_eq!(follows::count(&pool, &alice).await.unwrap(), 2);
+
+    let inboxes = follows::follower_inboxes(&pool, &alice).await.unwrap();
+    assert_eq!(inboxes.len(), 2);
+    assert!(inboxes.contains(&"https://remote.social/users/bob/inbox".to_string()));
+
+    assert!(follows::remove(&pool, &bob, &alice).await.unwrap());
+    assert_eq!(follows::count(&pool, &alice).await.unwrap(), 1);
+    assert!(
+        !follows::remove(&pool, &bob, &alice).await.unwrap(),
+        "removing a follow that's already gone is harmless"
+    );
+}
+
+/// Many followers behind one shared inbox collapse into a single delivery —
+/// that's the whole point of a shared inbox.
+#[tokio::test]
+async fn a_shared_inbox_collapses_followers_into_one_delivery() {
+    use bbs_rs::services::federation::follows;
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let shared = "https://big.instance/inbox";
+    let x = insert_follower(&pool, "x@big.instance", "big.instance", Some(shared)).await;
+    let y = insert_follower(&pool, "y@big.instance", "big.instance", Some(shared)).await;
+    follows::accept(&pool, &x, &alice, "https://big.instance/f/x")
+        .await
+        .unwrap();
+    follows::accept(&pool, &y, &alice, "https://big.instance/f/y")
+        .await
+        .unwrap();
+
+    let inboxes = follows::follower_inboxes(&pool, &alice).await.unwrap();
+    assert_eq!(
+        inboxes,
+        vec![shared.to_string()],
+        "two followers, one shared inbox, one delivery"
+    );
+}
+
+/// Posting a status enqueues one `Create{Note}` per distinct follower inbox,
+/// signed by the author and carrying the escaped status body.
+#[tokio::test]
+async fn posting_a_status_fans_out_to_followers() {
+    use bbs_rs::services::federation::{Origin, follows, outbound, queue};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    let alice = mint_local(&pool, "alice").await;
+    let alice_uri = origin.person("alice");
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+    follows::accept(&pool, &bob, &alice_uri, "f1").await.unwrap();
+    follows::accept(&pool, &carol, &alice_uri, "f2").await.unwrap();
+
+    post_statuses(&pool, &alice, &["hello <followers>"]).await; // oneliner id 1
+    let queued = outbound::deliver_status(&pool, &origin, 1).await.unwrap();
+    assert_eq!(queued, 2, "one delivery per follower inbox");
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 2);
+    for d in &due {
+        assert_eq!(d.actor_uri, alice_uri, "the author signs the delivery");
+        let v: serde_json::Value = serde_json::from_str(&d.activity).unwrap();
+        assert_eq!(v["type"], "Create");
+        assert_eq!(v["actor"], alice_uri);
+        assert_eq!(v["object"]["type"], "Note");
+        assert_eq!(
+            v["object"]["content"], "<p>hello &lt;followers&gt;</p>",
+            "the delivered body is HTML-escaped, same as the published Note"
+        );
+    }
+    let inboxes: std::collections::HashSet<String> =
+        due.iter().map(|d| d.inbox_url.clone()).collect();
+    assert!(inboxes.contains("https://remote.social/users/bob/inbox"));
+    assert!(inboxes.contains("https://other.example/users/carol/inbox"));
+}
+
+/// With no remote followers, a post queues nothing — the common case, and not
+/// an error.
+#[tokio::test]
+async fn posting_a_status_with_no_followers_queues_nothing() {
+    use bbs_rs::services::federation::{Origin, outbound, queue};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    let alice = mint_local(&pool, "alice").await;
+    post_statuses(&pool, &alice, &["into the void"]).await;
+
+    assert_eq!(outbound::deliver_status(&pool, &origin, 1).await.unwrap(), 0);
+    assert_eq!(queue::pending(&pool).await.unwrap(), 0);
+}
+
+/// An inbound `Follow` (whose signature `receive_activity` has already checked)
+/// is stored and answered with a queued `Accept` addressed to the follower and
+/// signed by the followed local actor. This is what makes a bbs-rs user
+/// followable from real Mastodon.
+#[tokio::test]
+async fn inbound_follow_is_stored_and_accepted() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{Origin, follows, queue};
+    use bbs_rs::web::ap_object::{Follow, build_config};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+
+    let fed = enabled_fed();
+    let origin = Origin::from_config(&fed).unwrap();
+    let config = build_config(pool.clone(), origin, &fed).await.unwrap();
+    let data = config.to_request_data();
+
+    let follow: Follow = serde_json::from_value(serde_json::json!({
+        "type": "Follow",
+        "id": "https://remote.social/f/1",
+        "actor": bob,
+        "object": alice_uri,
+    }))
+    .unwrap();
+    follow.receive(&data).await.unwrap();
+
+    assert_eq!(follows::count(&pool, &alice_uri).await.unwrap(), 1);
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 1, "an Accept must be queued back to the follower");
+    assert_eq!(due[0].inbox_url, "https://remote.social/users/bob/inbox");
+    assert_eq!(due[0].actor_uri, alice_uri, "we sign the Accept as alice");
+    let v: serde_json::Value = serde_json::from_str(&due[0].activity).unwrap();
+    assert_eq!(v["type"], "Accept");
+    assert_eq!(v["actor"], alice_uri);
+    assert_eq!(v["object"]["type"], "Follow", "the Accept echoes the Follow");
+    assert_eq!(v["object"]["id"], "https://remote.social/f/1");
+}
+
+/// A `Follow` of a non-local actor (e.g. a remote row we happen to know) is
+/// ignored — we only accept follows of our own users.
+#[tokio::test]
+async fn inbound_follow_of_a_remote_actor_is_ignored() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{Origin, follows, queue};
+    use bbs_rs::web::ap_object::{Follow, build_config};
+
+    let pool = setup().await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+
+    let fed = enabled_fed();
+    let origin = Origin::from_config(&fed).unwrap();
+    let config = build_config(pool.clone(), origin, &fed).await.unwrap();
+    let data = config.to_request_data();
+
+    let follow: Follow = serde_json::from_value(serde_json::json!({
+        "type": "Follow",
+        "id": "https://remote.social/f/9",
+        "actor": bob,
+        "object": carol,
+    }))
+    .unwrap();
+    follow.receive(&data).await.unwrap();
+
+    assert_eq!(follows::count(&pool, &carol).await.unwrap(), 0);
+    assert_eq!(queue::pending(&pool).await.unwrap(), 0, "no Accept for a follow that isn't ours");
+}
+
+/// An inbound `Undo{Follow}` removes the follow — an unfollow from Mastodon.
+#[tokio::test]
+async fn inbound_undo_follow_removes_the_follow() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{Origin, follows};
+    use bbs_rs::web::ap_object::{Undo, build_config};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &bob, &alice_uri, "https://remote.social/f/1")
+        .await
+        .unwrap();
+    assert_eq!(follows::count(&pool, &alice_uri).await.unwrap(), 1);
+
+    let fed = enabled_fed();
+    let origin = Origin::from_config(&fed).unwrap();
+    let config = build_config(pool.clone(), origin, &fed).await.unwrap();
+    let data = config.to_request_data();
+
+    let undo: Undo = serde_json::from_value(serde_json::json!({
+        "type": "Undo",
+        "id": "https://remote.social/u/1",
+        "actor": bob,
+        "object": {
+            "type": "Follow",
+            "id": "https://remote.social/f/1",
+            "actor": bob,
+            "object": alice_uri,
+        }
+    }))
+    .unwrap();
+    undo.receive(&data).await.unwrap();
+
+    assert_eq!(
+        follows::count(&pool, &alice_uri).await.unwrap(),
+        0,
+        "the unfollow must drop the edge"
+    );
+}

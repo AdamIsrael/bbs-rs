@@ -462,7 +462,8 @@ impl App {
         )
         .await
         {
-            Ok(()) => {
+            Ok(id) => {
+                self.fanout_status(id).await;
                 self.open_oneliners().await;
                 self.status = "Posted to the wall.".into();
             }
@@ -473,6 +474,31 @@ impl App {
                 self.status = "You're posting too quickly — please slow down.".into()
             }
             Err(e) => self.status = format!("Could not post: {e}"),
+        }
+    }
+
+    /// Queue a freshly-posted status for delivery to the author's remote
+    /// followers, when federation is on. Best-effort: this only enqueues (a
+    /// background task signs and sends), and a failure here must never block the
+    /// post from reaching the local wall.
+    async fn fanout_status(&self, oneliner_id: i64) {
+        let fed = &self.config.federation;
+        if !fed.enabled {
+            return;
+        }
+        let origin = match crate::services::federation::Origin::from_config(fed) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("federation enabled but origin invalid, not delivering: {e:#}");
+                return;
+            }
+        };
+        match crate::services::federation::outbound::deliver_status(&self.pool, &origin, oneliner_id)
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("queued status {oneliner_id} to {n} follower inbox(es)"),
+            Err(e) => tracing::warn!("could not queue status {oneliner_id} for delivery: {e:#}"),
         }
     }
 

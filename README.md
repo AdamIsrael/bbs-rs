@@ -310,6 +310,12 @@ instance's local timeline. That's why the wall no longer auto-trims to a fixed s
 has a permanent URI, and deleting one out from under remote servers would orphan their references. Use
 `[limits] max_oneliners` and `bbsctl rm-oneliner` to keep it in hand.
 
+When `[federation]` is enabled, a bbs-rs user is **followable from Mastodon** and friends: the inbox
+accepts a signed `Follow` and replies with an `Accept`, and posting an oneliner then delivers it to that
+follower's inbox (an `Undo{Follow}` unfollows). Delivery is a durable, backing-off queue drained by a
+background task, so a restart never drops an outbound post. Which servers may federate is governed by the
+allowlist (`bbsctl ap-peers`, `ap-allow`, `ap-block`; allowlist-only by default).
+
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details
 (size, uploader, description, download count). This first phase is a **catalog with operator-managed

@@ -176,8 +176,8 @@ async fn inbox(
 ) -> impl IntoResponse {
     use activitypub_federation::axum::inbox::receive_activity;
     use activitypub_federation::protocol::context::WithContext;
-    use ap_object::{AnyActivity, AppData, FedActor};
-    receive_activity::<WithContext<AnyActivity>, FedActor, AppData>(activity_data, &data).await
+    use ap_object::{AppData, FedActor, InboundActivity};
+    receive_activity::<WithContext<InboundActivity>, FedActor, AppData>(activity_data, &data).await
 }
 
 /// Body of the health endpoint — a marker the startup self-check looks for to
