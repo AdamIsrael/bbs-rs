@@ -323,6 +323,12 @@ WebFinger and sends a signed `Follow`. Once the remote accepts, their statuses a
 Timeline. Sysops can also manage follows from the CLI with `bbsctl ap-follow <user> <name@host>`
 (and `ap-unfollow` / `ap-following`).
 
+**Remote mail is off by default, and deliberately so.** Local private mail stays local and private. If an
+operator sets `[federation] allow_remote_dms = true`, addressing a message to a `user@host` recipient sends
+it to that fediverse account instead — but **fediverse DMs are not private** (they sit in plaintext on
+every server they pass through), so the compose screen labels a remote recipient in bold as leaving the
+BBS and not being private. It's sent as a Mastodon-style direct message.
+
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details
 (size, uploader, description, download count). This first phase is a **catalog with operator-managed

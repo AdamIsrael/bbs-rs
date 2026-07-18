@@ -807,7 +807,7 @@ fn render_keys(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
-    let lines: Vec<Line> = app
+    let mut lines: Vec<Line> = app
         .form
         .fields
         .iter()
@@ -827,6 +827,18 @@ fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
             }
         })
         .collect();
+    // Composing mail to a `user@host` recipient is a remote fediverse DM — warn,
+    // loudly, that it leaves the BBS and is not private (fediverse DMs are
+    // plaintext on every server they touch).
+    if app.screen == Screen::ComposeMail && app.form.fields[0].value.contains('@') {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "⚠  Remote recipient: this message LEAVES the BBS and is NOT private.",
+            Style::default()
+                .fg(app.theme.warning_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
     // Wrap so long field input (subject/body/username) stays visible instead of
     // running off the right edge while typing.
     let p = Paragraph::new(Text::from(lines))

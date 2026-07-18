@@ -70,12 +70,11 @@ async fn recent_sent_count(pool: &SqlitePool, from_id: i64, since: i64) -> Resul
     )
 }
 
-/// Send mail to a named recipient. Guests are rejected; non-admin senders are
-/// subject to the per-user mail rate limit.
-pub async fn send_mail(
+/// Shared sender-side gate: guest rejection, length caps, and the per-user rate
+/// limit. Both local and remote sends run this before touching the table.
+async fn check_sender(
     pool: &SqlitePool,
     from: &User,
-    to_username: &str,
     subject: &str,
     body: &str,
     limits: &Limits,
@@ -91,23 +90,66 @@ pub async fn send_mail(
         let count = recent_sent_count(pool, from.id, since).await?;
         enforce_rate(count, limits.max_mail)?;
     }
-    // Mail is local-only for now. Discovered ActivityPub actors live in `users`
-    // too, so an unqualified lookup could otherwise address one — and fediverse
-    // DMs are plaintext on every server they touch. Remote addressing is a
-    // deliberate, labeled opt-in (#110), not something to fall into.
-    let to = auth::find_user(pool, to_username)
-        .await?
-        .filter(|u| !u.is_remote)
-        .ok_or(AppError::RecipientNotFound)?;
-    sqlx::query(
+    Ok(())
+}
+
+/// Insert a mail row and return its id.
+async fn insert(
+    pool: &SqlitePool,
+    from_id: i64,
+    to_id: i64,
+    subject: &str,
+    body: &str,
+) -> Result<i64> {
+    let id = sqlx::query(
         "INSERT INTO mail (from_id, to_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(from.id)
-    .bind(to.id)
+    .bind(from_id)
+    .bind(to_id)
     .bind(subject)
     .bind(body)
     .bind(now_unix())
     .execute(pool)
-    .await?;
+    .await?
+    .last_insert_rowid();
+    Ok(id)
+}
+
+/// Send mail to a named **local** recipient. Guests are rejected; non-admin
+/// senders are subject to the per-user mail rate limit.
+///
+/// Remote actors live in `users` too, but an unqualified lookup must never
+/// address one — fediverse DMs are plaintext on every server they touch, so
+/// remote addressing is a deliberate, labeled opt-in ([`send_remote`], #110).
+pub async fn send_mail(
+    pool: &SqlitePool,
+    from: &User,
+    to_username: &str,
+    subject: &str,
+    body: &str,
+    limits: &Limits,
+) -> Result<()> {
+    check_sender(pool, from, subject, body, limits).await?;
+    let to = auth::find_user(pool, to_username)
+        .await?
+        .filter(|u| !u.is_remote)
+        .ok_or(AppError::RecipientNotFound)?;
+    insert(pool, from.id, to.id, subject, body).await?;
     Ok(())
+}
+
+/// Record an outbound **remote** DM to an already-resolved remote actor, and
+/// return the new row's id (used to mint the message's ActivityPub URI). The
+/// caller ([`crate::web::ap_object::send_remote_dm`]) owns the opt-in gate and
+/// the actual delivery; this is the local record + shared sender checks.
+pub async fn send_remote(
+    pool: &SqlitePool,
+    from: &User,
+    to_remote: &User,
+    subject: &str,
+    body: &str,
+    limits: &Limits,
+) -> Result<i64> {
+    check_sender(pool, from, subject, body, limits).await?;
+    insert(pool, from.id, to_remote.id, subject, body).await
 }

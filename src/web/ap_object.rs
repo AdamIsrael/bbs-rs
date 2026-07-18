@@ -919,6 +919,71 @@ pub async fn unfollow(
     Ok(true)
 }
 
+/// Send a private message to a remote fediverse account.
+///
+/// **Not private.** Fediverse DMs are plaintext on every server they touch; this
+/// path exists only behind the `[federation] allow_remote_dms` opt-in, and the
+/// compose UI labels it. Resolves the recipient over WebFinger, records a local
+/// copy, and queues a Mastodon-compatible direct `Create{Note}` (addressed to
+/// the actor, with a matching `Mention`). Returns the resolved recipient handle.
+pub async fn send_remote_dm(
+    pool: &SqlitePool,
+    fed: &Federation,
+    from: &crate::db::models::User,
+    handle: &str,
+    subject: &str,
+    body: &str,
+    limits: &crate::config::Limits,
+) -> anyhow::Result<String> {
+    use activitypub_federation::fetch::webfinger::webfinger_resolve_actor;
+    anyhow::ensure!(
+        fed.enabled && fed.allow_remote_dms,
+        "remote mail is disabled on this board"
+    );
+    let origin = Origin::from_config(fed)?;
+    let (user, domain) = split_handle(handle)
+        .ok_or_else(|| anyhow::anyhow!("{handle:?} is not a user@host handle"))?;
+    let config = build_config(pool.clone(), origin.clone(), fed).await?;
+    let data = config.to_request_data();
+
+    // Sign as the sender; mint their actor if this is their first federated act.
+    let keys = ensure_person_keys(pool, &origin, from).await?;
+
+    let recipient: FedActor =
+        webfinger_resolve_actor::<AppData, FedActor>(&format!("{user}@{domain}"), &data)
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving {handle}: {}", e.0))?;
+    let recipient_uri = recipient.ap_id.inner().to_string();
+    // The resolved actor was persisted; load its row for the local mail record.
+    let to_row = crate::services::auth::find_user(pool, &recipient.username)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("resolved actor {handle} was not stored"))?;
+
+    // Local record first — its id mints the message's permanent URI.
+    let mail_id =
+        crate::services::mail::send_remote(pool, from, &to_row, subject, body, limits).await?;
+
+    let create = crate::services::federation::objects::direct_message(
+        &origin.dm(mail_id),
+        &keys.actor_uri,
+        &recipient_uri,
+        &recipient.username,
+        subject,
+        body,
+        now_unix(),
+    );
+    let activity = serde_json::to_string(&create)?;
+    queue::enqueue(
+        pool,
+        &keys.actor_uri,
+        recipient.inbox.as_str(),
+        &activity,
+        Some(&create.id),
+    )
+    .await?;
+    Ok(recipient.username)
+}
+
 /// Follow a remote account, building the federation config from settings.
 ///
 /// The convenience entry point for callers that hold `[federation]` settings but

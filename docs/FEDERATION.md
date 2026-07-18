@@ -169,6 +169,17 @@ Phase 3 (#109) is sliced into reviewable PRs:
 | 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
 | 6 | Inbound board posts + moderation | L | #112 |
 
+Phase 4 (#110) is sliced:
+
+- **110a — outbound remote DM** (this slice): a `[federation] allow_remote_dms` opt-in (**off by default**);
+  addressing mail to a `user@host` recipient sends a Mastodon-compatible **direct** `Create{Note}` —
+  `to: [actor]`, `cc: []`, and a matching `Mention` in `tag` (without the Mention, Mastodon treats it as
+  *limited*, not direct). The compose screen labels a remote recipient as leaving the BBS and not private;
+  a local copy is recorded (`mail` row to the recipient's shadow actor). Local mail is untouched and stays
+  private.
+- **110b — inbound remote DM**: a direct `Create{Note}` addressed to one of our local actors (not Public)
+  lands in that user's mailbox, visibly tagged as a non-private fediverse message.
+
 Phase 2 leads because it pays off against live Mastodon sooner than board syndication, which needs a
 second bbs-rs instance to exist before it means anything.
 

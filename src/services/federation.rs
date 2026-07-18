@@ -87,6 +87,12 @@ impl Origin {
         format!("{}/s/{id}", self.0)
     }
 
+    /// A private-message `Note` (#110). Its own path so a DM is never confused
+    /// with a public status.
+    pub fn dm(&self, id: i64) -> String {
+        format!("{}/dm/{id}", self.0)
+    }
+
     /// The `Create` activity that wraps a status in an outbox.
     pub fn status_activity(&self, id: i64) -> String {
         format!("{}/s/{id}/activity", self.0)
@@ -263,6 +269,100 @@ pub mod objects {
             cc: note.cc.clone(),
             object: note,
         })
+    }
+
+    /// A `Mention` tag. Mastodon derives *direct* visibility from every
+    /// addressed actor also appearing as a Mention in `tag` — omit it and the
+    /// message is treated as *limited*, not a DM. (#110)
+    #[derive(Debug, Clone, Serialize)]
+    pub struct Mention {
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub href: String,
+        pub name: String,
+    }
+
+    /// A private message as an ActivityStreams `Note`: addressed to one actor,
+    /// `cc` empty, and that actor mentioned in `tag`.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DirectNote {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub attributed_to: String,
+        pub content: String,
+        pub published: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub tag: Vec<Mention>,
+    }
+
+    /// A `Create` wrapping a [`DirectNote`], as delivered to the recipient's inbox.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DirectCreate {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub actor: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub object: DirectNote,
+    }
+
+    /// Build the `Create{Note}` for a private message from a local user to a
+    /// remote actor. `note_id` is this message's permanent URI (minted by the
+    /// caller from the stored mail row). A non-empty subject becomes a bold
+    /// first line — fediverse Notes have no subject field.
+    pub fn direct_message(
+        note_id: &str,
+        sender_actor: &str,
+        recipient_actor: &str,
+        recipient_handle: &str,
+        subject: &str,
+        body: &str,
+        published_unix: i64,
+    ) -> DirectCreate {
+        let subject = subject.trim();
+        let content = if subject.is_empty() {
+            format!("<p>{}</p>", html_escape(body))
+        } else {
+            format!(
+                "<p><b>{}</b></p><p>{}</p>",
+                html_escape(subject),
+                html_escape(body)
+            )
+        };
+        let note = DirectNote {
+            context: AS_CONTEXT,
+            kind: "Note",
+            id: note_id.to_string(),
+            attributed_to: sender_actor.to_string(),
+            content,
+            published: crate::util::fmt_rfc3339(published_unix),
+            // Direct: addressed to the one recipient, never Public or followers.
+            to: vec![recipient_actor.to_string()],
+            cc: Vec::new(),
+            tag: vec![Mention {
+                kind: "Mention",
+                href: recipient_actor.to_string(),
+                name: format!("@{}", recipient_handle.trim_start_matches('@')),
+            }],
+        };
+        DirectCreate {
+            context: AS_CONTEXT,
+            kind: "Create",
+            id: format!("{note_id}/activity"),
+            actor: sender_actor.to_string(),
+            to: note.to.clone(),
+            cc: note.cc.clone(),
+            object: note,
+        }
     }
 }
 
@@ -1032,6 +1132,62 @@ mod tests {
         for bad in ["alice", "", "@", "alice@", "@remote.social", "acct:"] {
             assert_eq!(split_handle(bad), None, "{bad:?} is not a handle");
         }
+    }
+
+    #[test]
+    fn a_direct_message_is_addressed_and_mentioned_for_mastodon() {
+        // Mastodon treats a Note as a DM only when every addressed actor is also
+        // in `tag` as a Mention; `to` carries just the recipient, `cc` is empty.
+        let create = super::objects::direct_message(
+            "https://bbs.example.com/dm/7",
+            "https://bbs.example.com/u/alice",
+            "https://remote.social/users/bob",
+            "bob@remote.social",
+            "hi & bye",
+            "the <body>",
+            0,
+        );
+        let v = serde_json::to_value(&create).unwrap();
+        assert_eq!(v["type"], "Create");
+        assert_eq!(v["id"], "https://bbs.example.com/dm/7/activity");
+        assert_eq!(v["actor"], "https://bbs.example.com/u/alice");
+        assert_eq!(v["to"][0], "https://remote.social/users/bob");
+        assert!(v["cc"].as_array().unwrap().is_empty(), "a DM is not public");
+
+        let note = &v["object"];
+        assert_eq!(note["type"], "Note");
+        assert_eq!(note["id"], "https://bbs.example.com/dm/7");
+        assert_eq!(note["to"][0], "https://remote.social/users/bob");
+        assert!(
+            note["cc"].as_array().unwrap().is_empty(),
+            "never Public or followers"
+        );
+        // The Mention is what makes it 'direct' rather than 'limited'.
+        assert_eq!(note["tag"][0]["type"], "Mention");
+        assert_eq!(note["tag"][0]["href"], "https://remote.social/users/bob");
+        assert_eq!(note["tag"][0]["name"], "@bob@remote.social");
+        // Subject becomes a bold first line; both subject and body are escaped.
+        assert_eq!(
+            note["content"],
+            "<p><b>hi &amp; bye</b></p><p>the &lt;body&gt;</p>"
+        );
+    }
+
+    #[test]
+    fn a_direct_message_without_a_subject_is_just_the_body() {
+        let create = super::objects::direct_message(
+            "https://bbs.example.com/dm/1",
+            "https://bbs.example.com/u/alice",
+            "https://remote.social/users/bob",
+            "@bob@remote.social",
+            "   ",
+            "hello",
+            0,
+        );
+        let v = serde_json::to_value(&create).unwrap();
+        assert_eq!(v["object"]["content"], "<p>hello</p>");
+        // A leading @ in the handle isn't doubled in the Mention name.
+        assert_eq!(v["object"]["tag"][0]["name"], "@bob@remote.social");
     }
 
     mod content {
