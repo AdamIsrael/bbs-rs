@@ -180,6 +180,18 @@ enum Cmd {
     ApUnallow { domain: String },
     /// Remove a domain's block entry.
     ApUnblock { domain: String },
+    /// Follow a remote account (`user@host`) on behalf of a local user. Resolves
+    /// the handle over WebFinger and sends a signed `Follow`.
+    ApFollow {
+        /// The local user doing the following.
+        user: String,
+        /// The remote handle, e.g. `alice@mastodon.social`.
+        handle: String,
+    },
+    /// Unfollow a remote account a local user follows.
+    ApUnfollow { user: String, handle: String },
+    /// List the remote accounts a local user follows, with each follow's state.
+    ApFollowing { user: String },
     /// Show recent login attempts.
     Logins {
         /// Filter to a single username.
@@ -202,6 +214,45 @@ enum Cmd {
         #[arg(long)]
         files: bool,
     },
+}
+
+/// Build the federation library `Data` for network operations (follow/unfollow).
+/// Fails clearly when federation isn't enabled/valid, since these commands can't
+/// work without a validated origin.
+async fn federation_data(
+    pool: &sqlx::SqlitePool,
+    settings: &Settings,
+) -> anyhow::Result<(
+    bbs_rs::services::federation::Origin,
+    activitypub_federation::config::Data<bbs_rs::web::ap_object::AppData>,
+)> {
+    use bbs_rs::services::federation::Origin;
+    anyhow::ensure!(
+        settings.federation.enabled,
+        "[federation] is not enabled in the config"
+    );
+    let origin = Origin::from_config(&settings.federation)
+        .context("[federation] origin is invalid — cannot federate")?;
+    let config =
+        bbs_rs::web::ap_object::build_config(pool.clone(), origin.clone(), &settings.federation)
+            .await?;
+    Ok((origin, config.to_request_data()))
+}
+
+/// Resolve a local user that is allowed to federate (exists, not remote, not the
+/// shared guest).
+async fn local_federatable_user(
+    pool: &sqlx::SqlitePool,
+    username: &str,
+) -> anyhow::Result<bbs_rs::db::models::User> {
+    let user = auth::find_user(pool, username)
+        .await?
+        .with_context(|| format!("no such user {username:?}"))?;
+    anyhow::ensure!(
+        !user.is_remote && !user.is_guest(),
+        "{username} cannot federate (guests and remote actors don't have follows)"
+    );
+    Ok(user)
 }
 
 #[tokio::main]
@@ -549,6 +600,41 @@ async fn main() -> anyhow::Result<()> {
                     format!("no block entry for {domain}")
                 }
             );
+        }
+        Cmd::ApFollow { user, handle } => {
+            let (origin, data) = federation_data(&pool, &settings).await?;
+            let local = local_federatable_user(&pool, &user).await?;
+            let remote = bbs_rs::web::ap_object::follow(&data, &origin, &local, &handle).await?;
+            println!(
+                "{user} → follow request sent to {remote}; it stays pending until they Accept"
+            );
+        }
+        Cmd::ApUnfollow { user, handle } => {
+            let (origin, data) = federation_data(&pool, &settings).await?;
+            let local = local_federatable_user(&pool, &user).await?;
+            let removed = bbs_rs::web::ap_object::unfollow(&data, &origin, &local, &handle).await?;
+            println!(
+                "{}",
+                if removed {
+                    format!("{user} unfollowed {handle}")
+                } else {
+                    format!("{user} was not following {handle}")
+                }
+            );
+        }
+        Cmd::ApFollowing { user } => {
+            use bbs_rs::services::federation::{Origin, follows};
+            let local = local_federatable_user(&pool, &user).await?;
+            let origin = Origin::from_config(&settings.federation)?;
+            let uri = origin.person(&local.username);
+            let rows = follows::following(&pool, &uri).await?;
+            if rows.is_empty() {
+                println!("{user} follows no remote accounts");
+            } else {
+                for (object, state) in rows {
+                    println!("  {state:<9} {object}");
+                }
+            }
         }
         Cmd::Logins {
             user,

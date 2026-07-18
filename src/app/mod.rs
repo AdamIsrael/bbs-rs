@@ -71,6 +71,10 @@ pub struct App {
     // Oneliners (graffiti wall)
     pub oneliners: Vec<Oneliner>,
 
+    // Federated timeline: cached statuses from followed remote accounts.
+    pub timeline: Vec<crate::services::federation::timeline::Entry>,
+    pub timeline_sel: usize,
+
     // Boards
     pub boards: Vec<Board>,
     pub board_sel: usize,
@@ -173,6 +177,11 @@ impl App {
         if f.oneliners {
             menu.push(MenuItem::Oneliners);
         }
+        // The federated timeline of followed remote accounts. Only when
+        // federation is on — otherwise there's nothing to show.
+        if config.federation.enabled {
+            menu.push(MenuItem::Timeline);
+        }
         if f.private_mail {
             menu.push(MenuItem::Mail);
         }
@@ -224,6 +233,8 @@ impl App {
             bulletin_sel: 0,
             current_bulletin: None,
             oneliners: Vec::new(),
+            timeline: Vec::new(),
+            timeline_sel: 0,
             boards: Vec::new(),
             board_sel: 0,
             current_board: None,
@@ -287,6 +298,7 @@ impl App {
             Screen::ReadBulletin => self.on_reader(key, Screen::Bulletins),
             Screen::Oneliners => self.on_oneliners(key).await,
             Screen::ComposeOneliner => self.on_compose_oneliner(key).await,
+            Screen::Timeline => self.on_timeline(key).await,
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
             Screen::ReadMessage => self.on_read_message(key).await,
@@ -335,6 +347,7 @@ impl App {
             MenuItem::Bulletins => self.open_bulletins().await,
             MenuItem::Boards => self.open_boards().await,
             MenuItem::Oneliners => self.open_oneliners().await,
+            MenuItem::Timeline => self.open_timeline().await,
             MenuItem::Mail => {
                 if self.user.is_guest() {
                     self.status =
@@ -503,6 +516,35 @@ impl App {
             Ok(0) => {}
             Ok(n) => tracing::info!("queued status {oneliner_id} to {n} follower inbox(es)"),
             Err(e) => tracing::warn!("could not queue status {oneliner_id} for delivery: {e:#}"),
+        }
+    }
+
+    // ---- Timeline --------------------------------------------------------
+
+    async fn open_timeline(&mut self) {
+        match crate::services::federation::timeline::recent(&self.pool, 100).await {
+            Ok(list) => {
+                self.timeline = list;
+                self.timeline_sel = 0;
+                self.screen = Screen::Timeline;
+            }
+            Err(e) => self.status = format!("Error loading timeline: {e}"),
+        }
+    }
+
+    async fn on_timeline(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.timeline_sel = self.timeline_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.timeline_sel + 1 < self.timeline.len() {
+                    self.timeline_sel += 1;
+                }
+            }
+            KeyCode::Char('r') => self.open_timeline().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
         }
     }
 

@@ -581,7 +581,61 @@ pub mod follows {
         Ok(id)
     }
 
-    /// Drop a follow (an inbound `Undo{Follow}`). Returns whether a row existed.
+    /// Record an *outbound* follow request (a local user following a remote
+    /// account) as `pending`, before we've heard back. Idempotent: a repeat
+    /// refreshes the `Follow` id but never downgrades an already-`accepted` edge.
+    pub async fn request(
+        pool: &SqlitePool,
+        follower_uri: &str,
+        followed_uri: &str,
+        follow_uri: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO ap_follows (actor_uri, object_uri, state, follow_uri, created_at) \
+             VALUES (?, ?, 'pending', ?, ?) \
+             ON CONFLICT(actor_uri, object_uri) DO UPDATE SET follow_uri = excluded.follow_uri",
+        )
+        .bind(follower_uri)
+        .bind(followed_uri)
+        .bind(follow_uri)
+        .bind(now_unix())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark an outbound follow `accepted` — a remote server answered our
+    /// `Follow` with an `Accept`. Returns whether a matching pending edge existed.
+    pub async fn mark_accepted(
+        pool: &SqlitePool,
+        follower_uri: &str,
+        followed_uri: &str,
+    ) -> Result<bool> {
+        let n = sqlx::query(
+            "UPDATE ap_follows SET state = 'accepted' WHERE actor_uri = ? AND object_uri = ?",
+        )
+        .bind(follower_uri)
+        .bind(followed_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// The remote accounts a local actor follows, for display. Each row is
+    /// `(followed actor URI, state)`.
+    pub async fn following(pool: &SqlitePool, follower_uri: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT object_uri, state FROM ap_follows WHERE actor_uri = ? ORDER BY object_uri",
+        )
+        .bind(follower_uri)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Drop a follow (an inbound `Undo{Follow}`, or a local unfollow). Returns
+    /// whether a row existed.
     pub async fn remove(pool: &SqlitePool, follower_uri: &str, followed_uri: &str) -> Result<bool> {
         let n = sqlx::query("DELETE FROM ap_follows WHERE actor_uri = ? AND object_uri = ?")
             .bind(follower_uri)
