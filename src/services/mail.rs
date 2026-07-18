@@ -153,3 +153,31 @@ pub async fn send_remote(
     check_sender(pool, from, subject, body, limits).await?;
     insert(pool, from.id, to_remote.id, subject, body).await
 }
+
+/// Store an inbound **remote** DM: a direct message from a remote actor to a
+/// local user (#110). No sender checks apply — a remote server enforces its
+/// own — and it's idempotent on the message's `ap_id`, so a redelivery stores
+/// once. Returns whether a new row was created.
+pub async fn store_inbound_remote(
+    pool: &SqlitePool,
+    from_remote_id: i64,
+    to_local_id: i64,
+    subject: &str,
+    body: &str,
+    ap_id: &str,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        "INSERT INTO mail (from_id, to_id, subject, body, created_at, ap_id) \
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
+    )
+    .bind(from_remote_id)
+    .bind(to_local_id)
+    .bind(subject)
+    .bind(body)
+    .bind(now_unix())
+    .bind(ap_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}

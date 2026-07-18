@@ -327,7 +327,9 @@ Timeline. Sysops can also manage follows from the CLI with `bbsctl ap-follow <us
 operator sets `[federation] allow_remote_dms = true`, addressing a message to a `user@host` recipient sends
 it to that fediverse account instead — but **fediverse DMs are not private** (they sit in plaintext on
 every server they pass through), so the compose screen labels a remote recipient in bold as leaving the
-BBS and not being private. It's sent as a Mastodon-style direct message.
+BBS and not being private. It's sent as a Mastodon-style direct message. Incoming direct messages from the
+fediverse land in the mailbox the same way, tagged `[fedi · not private]` in the list and with a bold
+warning when read.
 
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details
