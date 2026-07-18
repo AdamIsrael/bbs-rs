@@ -310,6 +310,10 @@ instance's local timeline. That's why the wall no longer auto-trims to a fixed s
 has a permanent URI, and deleting one out from under remote servers would orphan their references. Use
 `[limits] max_oneliners` and `bbsctl rm-oneliner` to keep it in hand.
 
+> **Turning it on?** See the [federation operator guide](docs/FEDERATION-SETUP.md) for the hard
+> requirements (a permanent domain, port 443, a CA-trusted cert) and the exact steps to connect with
+> Mastodon.
+
 When `[federation]` is enabled, a bbs-rs user is **followable from Mastodon** and friends: the inbox
 accepts a signed `Follow` and replies with an `Accept`, and posting an oneliner then delivers it to that
 follower's inbox (an `Undo{Follow}` unfollows). Delivery is a durable, backing-off queue drained by a
