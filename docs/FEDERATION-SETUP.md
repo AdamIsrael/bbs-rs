@@ -1,8 +1,9 @@
 # Enabling federation — operator guide
 
 This is the hands-on guide to turning on ActivityPub federation for a bbs-rs
-board: what you must have first, how to configure it, and the exact steps to
-connect with Mastodon. For the *why* and the design, see
+board: what you must have first, how to configure it, the exact steps to connect
+with Mastodon, and how to syndicate boards between instances. For the *why* and
+the design, see
 [FEDERATION.md](FEDERATION.md).
 
 > **Read this first: the domain is permanent.** An ActivityPub actor URI (e.g.
@@ -30,7 +31,7 @@ mint permanent broken URIs.
 
 The origin you configure must be **scheme + host only** — no port, no path, no
 query. Valid: `https://bbs.example.com`. Rejected: `https://bbs.example.com:8088`,
-`http://…` (unless `debug_insecure`, see §7), `https://1.2.3.4`,
+`http://…` (unless `debug_insecure`, see §8), `https://1.2.3.4`,
 `https://localhost`, `https://host/bbs`.
 
 ---
@@ -82,7 +83,8 @@ hostname = "bbs.example.com"
 
 The proxy must forward these paths to `127.0.0.1:8088` (forwarding `/` is
 simplest): `/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.1`,
-`/u/…`, `/s/…`, and `/inbox`. Preserve the `Host` header and the request path.
+`/u/…`, `/s/…`, `/c/…` (board Groups), and `/inbox`. Preserve the `Host` header
+and the request path.
 
 Either way, `[federation] origin` is the same:
 
@@ -111,7 +113,7 @@ acme_email   = "sysop@example.com"
 enabled = true
 origin  = "https://bbs.example.com"
 # allowlist_only = true      # default — see §5
-# allow_remote_dms = false   # default — see §6
+# allow_remote_dms = false   # default — see §5d
 # delivery_interval_secs = 30
 # delivery_max_attempts = 10
 ```
@@ -220,7 +222,55 @@ being private. Incoming fediverse DMs land in the mailbox tagged
 
 ---
 
-## 6. `bbsctl` federation commands
+## 6. Syndicating boards (bbs-rs ↔ bbs-rs)
+
+Every board is also a **`Group` actor**
+([FEP-1b12](https://codeberg.org/fediverse/fep/src/branch/main/fep/1b12/fep-1b12.md)),
+so boards can be followed and shared between instances — and with Lemmy/Mbin,
+which speak the same shape.
+
+Each board gets a URI-safe **slug** derived from its name (assigned at startup
+when federation is on), and lives at `https://your.host/c/{slug}` with the
+handle `@{slug}@your.host`. Check yours:
+
+```bash
+curl -s -H 'Accept: application/activity+json' https://bbs.example.com/c/general
+curl -s 'https://bbs.example.com/.well-known/webfinger?resource=acct:general@bbs.example.com'
+```
+
+### Letting others follow your boards
+
+Nothing to configure — it works once federation is on. A remote instance follows
+`@general@bbs.example.com`; your board auto-accepts (`manuallyApprovesFollowers:
+false`), and from then on every **top-level** post is `Announce`d to that
+subscriber, signed by the board and attributed to its author. Replies don't
+syndicate yet.
+
+Remember the peer's domain still has to be allowed (§5a) in the default
+allowlist posture.
+
+### Subscribing to a remote board
+
+Subscribing *is* following the board's Group, so the same command does it:
+
+```bash
+bbsctl ap-allow peer.example              # allow the peer first
+bbsctl ap-follow alice general@peer.example
+bbsctl ap-board-posts general@peer.example   # cached posts from that board
+```
+
+Announced posts arrive at your inbox, are degraded from HTML to plain text, and
+are cached locally. `ap-board-posts` also accepts the board's actor URI
+(`https://peer.example/c/general`) if the handle doesn't resolve.
+
+> Mirrored posts are currently an operator-visible cache (`bbsctl`), not yet a
+> browsable in-BBS screen, and inbound *posting* into a remote board (a user here
+> writing to a followed board) is not implemented — that's the remaining
+> federation work.
+
+---
+
+## 7. `bbsctl` federation commands
 
 | Command | What it does |
 |---|---|
@@ -231,12 +281,13 @@ being private. Incoming fediverse DMs land in the mailbox tagged
 | `ap-follow <user> <name@host>` | Follow a remote account on a local user's behalf |
 | `ap-unfollow <user> <name@host>` | Unfollow |
 | `ap-following <user>` | List the remote accounts a user follows, with follow state |
+| `ap-board-posts <board>` | Show cached posts from a followed remote board (handle or actor URI) |
 
 Point `bbsctl` at the same config the server uses: `bbsctl --config /path/to/bbs.toml <cmd>`.
 
 ---
 
-## 7. Testing locally without a public domain
+## 8. Testing locally without a public domain
 
 To exercise the machinery on your workstation — or to test bbs-rs ↔ bbs-rs — use
 **`debug_insecure = true`**, which relaxes the origin rules to permit `http://`,
@@ -266,7 +317,7 @@ post, and DM between them locally.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -274,6 +325,7 @@ post, and DM between them locally.
 | `ActivityPub federation enabled` never logged | `[federation] enabled` is false, or `[web] enabled` is false (the endpoints live on the web frontend). |
 | Mastodon can't find `@alice@yourdomain` | WebFinger unreachable (check §4 curl), the domain in the handle doesn't match `origin`'s host, or `alice` is the guest / an unregistered name. |
 | A follow or post never arrives | The peer's domain isn't allowed (`bbsctl ap-peers`), or the cert isn't CA-trusted (self-signed can't interop), or 443 isn't publicly reachable. |
+| A followed board's posts never appear | The follow isn't `accepted` yet (`bbsctl ap-following <user>`), the peer's domain isn't allowed, or the post was a **reply** — only top-level posts syndicate. |
 | Config change had no effect | `[federation]` is restart-only — restart the server. (Allow/block entries via `bbsctl` are the exception and apply immediately.) |
 | ACME cert never issues | Port 443 not reachable from the internet, DNS not pointing at the box, or you hit the rate limit — retry with `acme_staging = true`. |
 
