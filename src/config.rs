@@ -252,6 +252,12 @@ pub struct Federation {
     pub delivery_interval_secs: u64,
     /// Give up on an activity after this many failed delivery attempts.
     pub delivery_max_attempts: u32,
+    /// Allow addressing private mail to remote fediverse accounts. **Off by
+    /// default, and deliberately so:** fediverse DMs are *not* private — they
+    /// sit in plaintext on every server they touch. When on, addressing a
+    /// `user@host` recipient sends a non-private message off the BBS, which the
+    /// compose UI labels as such. Local mail is always private and unaffected.
+    pub allow_remote_dms: bool,
     /// **Local testing only.** Permits `http://`, `localhost`, IP literals, and
     /// non-default ports in `origin` so two instances can federate on one
     /// machine. Never enable on a real board: the URIs you mint are permanent.
@@ -266,6 +272,7 @@ impl Default for Federation {
             allowlist_only: true,
             delivery_interval_secs: 30,
             delivery_max_attempts: 10,
+            allow_remote_dms: false,
             debug_insecure: false,
         }
     }
@@ -908,6 +915,10 @@ origin = \"\"
 allowlist_only = true
 delivery_interval_secs = 30   # how often the outbound delivery queue drains
 delivery_max_attempts = 10    # give up on an activity after this many failures
+# Allow private mail to remote fediverse accounts. OFF by default: fediverse DMs
+# are NOT private (plaintext on every server they touch). When on, the compose
+# UI labels remote mail as leaving the BBS. Local mail is always private.
+allow_remote_dms = false
 # debug_insecure = false      # LOCAL TESTING ONLY: allows http/localhost/ports
 
 [oneliners]

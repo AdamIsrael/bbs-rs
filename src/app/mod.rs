@@ -1094,6 +1094,13 @@ impl App {
             self.status = "Recipient and subject are required.".into();
             return;
         }
+        // A `@` in the recipient means a remote fediverse account — local
+        // usernames can't contain one. Route it to the (opt-in, non-private)
+        // remote-DM path instead of the local mailbox.
+        if to.contains('@') {
+            self.submit_remote_mail(&to, &subject, &body).await;
+            return;
+        }
         match mail::send_mail(
             &self.pool,
             &self.user,
@@ -1115,6 +1122,32 @@ impl App {
                 self.status = "You're sending mail too quickly — please slow down.".into()
             }
             Err(e) => self.status = format!("Could not send: {e}"),
+        }
+    }
+
+    /// Send a private message to a remote fediverse account (opt-in, not
+    /// private). Resolving the handle hits the network, so this is its own path.
+    async fn submit_remote_mail(&mut self, to: &str, subject: &str, body: &str) {
+        self.status = format!("Sending to {to} over the fediverse…");
+        match crate::web::ap_object::send_remote_dm(
+            &self.pool,
+            &self.config.federation,
+            &self.user,
+            to,
+            subject,
+            body,
+            &self.config.limits,
+        )
+        .await
+        {
+            Ok(handle) => {
+                self.open_mailbox().await;
+                self.status = format!("Sent to {handle} — left the BBS, and was NOT private.");
+            }
+            Err(e) => {
+                self.status = format!("Could not send to {to}: {e}");
+                self.screen = Screen::Mailbox;
+            }
         }
     }
 

@@ -1458,3 +1458,109 @@ async fn an_accept_from_the_wrong_signer_is_ignored() {
         "the follow stays pending"
     );
 }
+
+// ---- #110a: outbound remote DMs (opt-in, not private) ----------------------
+
+/// The opt-in gate is checked before anything touches the network, so a board
+/// with `allow_remote_dms = false` refuses remote mail up front — and records
+/// nothing locally.
+#[tokio::test]
+async fn remote_dm_requires_the_opt_in() {
+    use bbs_rs::config::{Federation, Limits};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let limits = Limits {
+        window_secs: 0,
+        ..Default::default()
+    };
+
+    // Federation on, but remote DMs off (the default).
+    let fed = Federation {
+        enabled: true,
+        origin: "https://bbs.example.com".into(),
+        allow_remote_dms: false,
+        ..Default::default()
+    };
+    let err = bbs_rs::web::ap_object::send_remote_dm(
+        &pool,
+        &fed,
+        &alice,
+        "bob@remote.social",
+        "s",
+        "b",
+        &limits,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("disabled"),
+        "off by default: {err}"
+    );
+
+    // Federation entirely off: also refused.
+    assert!(
+        bbs_rs::web::ap_object::send_remote_dm(
+            &pool,
+            &Federation::default(),
+            &alice,
+            "bob@remote.social",
+            "s",
+            "b",
+            &limits,
+        )
+        .await
+        .is_err()
+    );
+
+    // Nothing was recorded either way.
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+/// The local record of an outbound remote DM: a mail row from the sender to the
+/// (remote) recipient, subject to the same guest/rate checks as local mail.
+#[tokio::test]
+async fn send_remote_records_a_local_copy() {
+    use bbs_rs::config::Limits;
+    use bbs_rs::services::mail;
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let bob = auth::find_user(&pool, "bob@remote.social")
+        .await
+        .unwrap()
+        .unwrap();
+    let limits = Limits {
+        window_secs: 0,
+        ..Default::default()
+    };
+
+    let id = mail::send_remote(&pool, &alice, &bob, "hi", "there", &limits)
+        .await
+        .unwrap();
+    assert!(id > 0);
+    let (from_id, to_id, subject): (i64, i64, String) =
+        sqlx::query_as("SELECT from_id, to_id, subject FROM mail WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(from_id, alice.id);
+    assert_eq!(to_id, bob.id, "addressed to the remote actor's shadow row");
+    assert_eq!(subject, "hi");
+
+    // Guests can't send, remote or otherwise.
+    let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+    assert!(matches!(
+        mail::send_remote(&pool, &guest, &bob, "s", "b", &limits).await,
+        Err(bbs_rs::error::AppError::GuestNotAllowed)
+    ));
+}
