@@ -316,12 +316,12 @@ follower's inbox (an `Undo{Follow}` unfollows). Delivery is a durable, backing-o
 background task, so a restart never drops an outbound post. Which servers may federate is governed by the
 allowlist (`bbsctl ap-peers`, `ap-allow`, `ap-block`; allowlist-only by default).
 
-It works the other way too: a user can **follow remote accounts** and read their posts. A sysop runs
-`bbsctl ap-follow <user> <name@host>` (with `ap-unfollow` and `ap-following` alongside), which resolves the
-handle over WebFinger and sends a signed `Follow`. Once the remote accepts, their statuses arrive at our
-inbox, get **degraded from HTML to plain text** (links kept, images shown as `[img: alt]`), and appear on
-the user's **Timeline** screen in the menu. (Following is a `bbsctl` action for now because the network
-fetch needs machinery that lives in the web layer; an in-BBS follow prompt is a planned follow-up.)
+It works the other way too: a user can **follow remote accounts** and read their posts. From the
+**Timeline** screen, press `f` and enter a handle (`alice@mastodon.social`) — bbs-rs resolves it over
+WebFinger and sends a signed `Follow`. Once the remote accepts, their statuses arrive at our inbox, get
+**degraded from HTML to plain text** (links kept, images shown as `[img: alt]`), and appear on the
+Timeline. Sysops can also manage follows from the CLI with `bbsctl ap-follow <user> <name@host>`
+(and `ap-unfollow` / `ap-following`).
 
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details

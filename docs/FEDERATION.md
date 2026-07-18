@@ -154,15 +154,17 @@ Phase 3 (#109) is sliced into reviewable PRs:
   `[img: alt] (src)`, entities decoded, other tags stripped. Storage is idempotent on the Note's `ap_id`.
   This is the ingestion engine; nothing yet *creates* the outbound follows that make statuses arrive, so
   (like Slice A before B) it's inert in production until C2 wires it up.
-- **C2 — outbound follow + `Accept` handling + the timeline screen** (this slice): following a remote
-  account (`ap_object::follow` — WebFinger-resolve the handle, mint the local actor, store a `pending`
-  edge, queue a signed `Follow`), the inbound `Accept` arm that flips the edge to `accepted` (guarded so
-  only the followed account can accept), `Undo{Follow}` to unfollow, and a read-only **Timeline** TUI
-  screen that shows the cached `ap_timeline` statuses. The follow/unfollow entrypoint is `bbsctl ap-follow`
-  / `ap-unfollow` / `ap-following` rather than in-BBS: the follow needs a `FederationConfig` for the
-  network fetch, which lives in `web` — and `web` depends on `app`, so calling it from the TUI would be a
-  dependency cycle. Moving the federation trait impls down into `services` (so the app can follow directly)
-  is a deliberate follow-up, not part of this slice.
+- **C2 — outbound follow + `Accept` handling + the timeline screen**: following a remote account
+  (`ap_object::follow` — WebFinger-resolve the handle, mint the local actor, store a `pending` edge, queue a
+  signed `Follow`), the inbound `Accept` arm that flips the edge to `accepted` (guarded so only the followed
+  account can accept), `Undo{Follow}` to unfollow, and a read-only **Timeline** TUI screen that shows the
+  cached `ap_timeline` statuses. Follow/unfollow shipped through `bbsctl ap-follow` / `ap-unfollow` /
+  `ap-following`.
+- **C3 — in-BBS follow**: the Timeline screen's `f` key opens a "follow `user@host`" prompt that calls the
+  same `follow` path. (C2 deferred this on the belief that the app calling `web` — where the
+  `FederationConfig` builder lives — would be a dependency cycle. That was wrong: bbs-rs is a single crate,
+  and Rust allows mutual `use` between its modules, so `app` calls `web::ap_object::follow_handle`
+  directly. No refactor was needed; the "move the trait impls into `services`" follow-up is moot.)
 | 4 | Remote DMs — opt-in, labeled not-private | M | #110 |
 | 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
 | 6 | Inbound board posts + moderation | L | #112 |

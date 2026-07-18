@@ -216,29 +216,6 @@ enum Cmd {
     },
 }
 
-/// Build the federation library `Data` for network operations (follow/unfollow).
-/// Fails clearly when federation isn't enabled/valid, since these commands can't
-/// work without a validated origin.
-async fn federation_data(
-    pool: &sqlx::SqlitePool,
-    settings: &Settings,
-) -> anyhow::Result<(
-    bbs_rs::services::federation::Origin,
-    activitypub_federation::config::Data<bbs_rs::web::ap_object::AppData>,
-)> {
-    use bbs_rs::services::federation::Origin;
-    anyhow::ensure!(
-        settings.federation.enabled,
-        "[federation] is not enabled in the config"
-    );
-    let origin = Origin::from_config(&settings.federation)
-        .context("[federation] origin is invalid — cannot federate")?;
-    let config =
-        bbs_rs::web::ap_object::build_config(pool.clone(), origin.clone(), &settings.federation)
-            .await?;
-    Ok((origin, config.to_request_data()))
-}
-
 /// Resolve a local user that is allowed to federate (exists, not remote, not the
 /// shared guest).
 async fn local_federatable_user(
@@ -602,17 +579,23 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Cmd::ApFollow { user, handle } => {
-            let (origin, data) = federation_data(&pool, &settings).await?;
             let local = local_federatable_user(&pool, &user).await?;
-            let remote = bbs_rs::web::ap_object::follow(&data, &origin, &local, &handle).await?;
+            let remote =
+                bbs_rs::web::ap_object::follow_handle(&pool, &settings.federation, &local, &handle)
+                    .await?;
             println!(
                 "{user} → follow request sent to {remote}; it stays pending until they Accept"
             );
         }
         Cmd::ApUnfollow { user, handle } => {
-            let (origin, data) = federation_data(&pool, &settings).await?;
             let local = local_federatable_user(&pool, &user).await?;
-            let removed = bbs_rs::web::ap_object::unfollow(&data, &origin, &local, &handle).await?;
+            let removed = bbs_rs::web::ap_object::unfollow_handle(
+                &pool,
+                &settings.federation,
+                &local,
+                &handle,
+            )
+            .await?;
             println!(
                 "{}",
                 if removed {

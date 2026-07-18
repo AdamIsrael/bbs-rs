@@ -10,6 +10,7 @@ pub enum Screen {
     Oneliners,
     ComposeOneliner,
     Timeline,
+    FollowRemote,
     BoardList,
     MessageList,
     ReadMessage,

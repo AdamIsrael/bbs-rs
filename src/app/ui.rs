@@ -57,6 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ReadBulletin => render_read_bulletin(f, body, app),
         Screen::Oneliners => render_oneliners(f, body, app),
         Screen::Timeline => render_timeline(f, body, app),
+        Screen::FollowRemote => render_form(f, body, " Follow Remote Account ", app),
         Screen::ComposeOneliner => render_form(f, body, " New Oneliner ", app),
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
@@ -296,7 +297,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
             f,
             area,
             " Timeline ",
-            "No statuses yet. Follow accounts with `bbsctl ap-follow <user> <@name@host>`.",
+            "No statuses yet. Press 'f' to follow an account (e.g. alice@mastodon.social).",
         );
     }
     // Each status is a header line (handle · time) followed by its wrapped,
@@ -937,6 +938,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Oneliners => "Oneliners",
         Screen::ComposeOneliner => "New Oneliner",
         Screen::Timeline => "Timeline",
+        Screen::FollowRemote => "Follow",
         Screen::BoardList => "Boards",
         Screen::MessageList => "Messages",
         Screen::ReadMessage => "Reading",
@@ -972,7 +974,8 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
         Screen::Oneliners => " n new · Esc back ",
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
-        Screen::Timeline => " ↑/↓ scroll · r refresh · Esc back ",
+        Screen::Timeline => " ↑/↓ scroll · f follow · r refresh · Esc back ",
+        Screen::FollowRemote => " type user@host · Enter follow · Esc cancel ",
         Screen::BoardList => {
             if is_admin {
                 " ↑/↓ move · Enter open · l lock/unlock · Esc back "
