@@ -169,6 +169,19 @@ Phase 3 (#109) is sliced into reviewable PRs:
 | 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
 | 6 | Inbound board posts + moderation | L | #112 |
 
+Phase 5 (#111) is sliced:
+
+- **111a — boards as `Group` actors** (this slice): the read/discovery surface. Each board lazily mints a
+  URI-safe **slug** (from its name, collision-suffixed) + a Group keypair, minted eagerly at startup since
+  a Group's slug is *derived*, not a natural key like a username. Served at `/c/{slug}` as a FEP-1b12
+  `Group` (`manuallyApprovesFollowers: false`), with a WebFinger handle (`acct:slug@host`) and an outbox of
+  the board's root posts as `Announce{Create{Page}}` — a root post is a `Page` (`name` = subject),
+  attributed to its author's `Person`, `audience` = the Group. No delivery or inbound yet.
+- **111b — Group follow + `Announce` fan-out**: a remote instance `Follow`s the Group (→ `ap_follows` +
+  `Accept`); a local board post is wrapped and `Announce`d from the Group to its followers.
+- **111c — inbound `Announce` → local mirror**: follow a remote board, receive its `Announce`d posts into a
+  mirrored local board.
+
 Phase 4 (#110) is sliced:
 
 - **110a — outbound remote DM** (this slice): a `[federation] allow_remote_dms` opt-in (**off by default**);

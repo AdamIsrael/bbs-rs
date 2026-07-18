@@ -1744,3 +1744,180 @@ async fn a_redelivered_dm_is_stored_once() {
 
     assert_eq!(mail::inbox(&pool, alice.id).await.unwrap().len(), 1);
 }
+
+// ---- #111a: boards as Group actors (FEP-1b12) ------------------------------
+
+/// A board's Group identity is minted once and reused; colliding slugs are
+/// disambiguated with an id suffix.
+#[tokio::test]
+async fn group_keys_are_minted_once_and_slugs_stay_unique() {
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{Origin, ensure_group_keys};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+
+    let k1 = ensure_group_keys(&pool, &origin, general.id).await.unwrap();
+    assert_eq!(k1.slug, "general");
+    assert_eq!(k1.actor_uri, "https://bbs.example.com/c/general");
+    assert!(k1.private_key.contains("BEGIN PRIVATE KEY"));
+    let k2 = ensure_group_keys(&pool, &origin, general.id).await.unwrap();
+    assert_eq!(k1.private_key, k2.private_key, "keypair never regenerated");
+
+    // Two boards whose names slugify identically get distinct slugs.
+    for name in ["Rust", "Rust!"] {
+        sqlx::query(
+            "INSERT INTO boards (name, description, min_read_role, min_write_role, locked) \
+             VALUES (?, '', 'guest', 'user', 0)",
+        )
+        .bind(name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let boards_ = boards::list_boards(&pool).await.unwrap();
+    let rust: Vec<_> = boards_
+        .iter()
+        .filter(|b| b.name.starts_with("Rust"))
+        .collect();
+    let s1 = ensure_group_keys(&pool, &origin, rust[0].id)
+        .await
+        .unwrap()
+        .slug;
+    let s2 = ensure_group_keys(&pool, &origin, rust[1].id)
+        .await
+        .unwrap()
+        .slug;
+    assert_ne!(s1, s2, "colliding slugs must be disambiguated");
+    assert!(s1 == "rust" || s2 == "rust");
+}
+
+/// A board is served as a `Group` actor at `/c/{slug}`.
+#[tokio::test]
+async fn a_board_is_served_as_a_group_actor() {
+    use bbs_rs::services::federation::{Origin, ensure_all_group_keys};
+    let pool = setup().await;
+    ensure_all_group_keys(&pool, &Origin::new("https://bbs.example.com"))
+        .await
+        .unwrap();
+    let base = serve_ap(pool.clone(), enabled_fed()).await;
+
+    let res = reqwest::get(format!("{base}/c/general")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "application/activity+json");
+    let b: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(b["type"], "Group");
+    assert_eq!(b["id"], "https://bbs.example.com/c/general");
+    assert_eq!(b["preferredUsername"], "general");
+    assert_eq!(b["name"], "General");
+    assert_eq!(b["inbox"], "https://bbs.example.com/c/general/inbox");
+    assert_eq!(b["outbox"], "https://bbs.example.com/c/general/outbox");
+    assert_eq!(
+        b["followers"],
+        "https://bbs.example.com/c/general/followers"
+    );
+    assert_eq!(
+        b["manuallyApprovesFollowers"], false,
+        "a board auto-accepts subscribers"
+    );
+    assert!(
+        b["publicKey"]["publicKeyPem"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN PUBLIC KEY")
+    );
+
+    assert_eq!(
+        reqwest::get(format!("{base}/c/nope"))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+/// WebFinger resolves a board handle (`acct:general@host`) to its Group actor.
+#[tokio::test]
+async fn webfinger_resolves_a_board_group() {
+    use bbs_rs::services::federation::{Origin, ensure_all_group_keys};
+    let pool = setup().await;
+    ensure_all_group_keys(&pool, &Origin::new("https://bbs.example.com"))
+        .await
+        .unwrap();
+    let base = serve_ap(pool.clone(), enabled_fed()).await;
+
+    let res = reqwest::get(format!(
+        "{base}/.well-known/webfinger?resource=acct:general@bbs.example.com"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(res.status(), 200);
+    let b: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(b["subject"], "acct:general@bbs.example.com");
+    let hrefs: Vec<&str> = b["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["href"].as_str())
+        .collect();
+    assert!(
+        hrefs.contains(&"https://bbs.example.com/c/general"),
+        "self link points at the Group: {hrefs:?}"
+    );
+}
+
+/// The Group outbox lists the board's root posts as `Announce{Create{Page}}`.
+#[tokio::test]
+async fn a_group_outbox_announces_board_posts() {
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{Origin, ensure_all_group_keys};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Hello board",
+        "first post & only",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    ensure_all_group_keys(&pool, &Origin::new("https://bbs.example.com"))
+        .await
+        .unwrap();
+    let base = serve_ap(pool.clone(), enabled_fed()).await;
+
+    let res = reqwest::get(format!("{base}/c/general/outbox"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let b: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(b["type"], "OrderedCollection");
+    assert_eq!(b["totalItems"], 1);
+    let ann = &b["orderedItems"][0];
+    assert_eq!(ann["type"], "Announce");
+    assert_eq!(ann["actor"], "https://bbs.example.com/c/general");
+    let create = &ann["object"];
+    assert_eq!(create["type"], "Create");
+    assert_eq!(create["actor"], "https://bbs.example.com/u/alice");
+    let page = &create["object"];
+    assert_eq!(page["type"], "Page");
+    assert_eq!(page["name"], "Hello board");
+    assert_eq!(page["content"], "<p>first post &amp; only</p>");
+    assert_eq!(page["audience"], "https://bbs.example.com/c/general");
+}

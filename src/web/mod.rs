@@ -148,7 +148,10 @@ pub fn router(state: WebState) -> Router {
         .route("/nodeinfo/2.1", get(activitypub::nodeinfo))
         .route("/u/{username}", get(activitypub::person))
         .route("/u/{username}/outbox", get(activitypub::outbox))
-        .route("/s/{id}", get(activitypub::status));
+        .route("/s/{id}", get(activitypub::status))
+        // Boards as Group actors (FEP-1b12, #111).
+        .route("/c/{slug}", get(activitypub::group))
+        .route("/c/{slug}/outbox", get(activitypub::group_outbox));
 
     // Inbound (#109). The inbox only exists when federation is configured, and
     // the FederationMiddleware is what makes `Data<AppData>` available to the

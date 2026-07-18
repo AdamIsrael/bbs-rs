@@ -78,6 +78,12 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
         if boot.federation.enabled {
             let origin = services::federation::Origin::from_config(&boot.federation)
                 .context("[federation] enabled but the origin is invalid")?;
+            // Assign each board a Group slug + keypair so `/c/{slug}` and its
+            // WebFinger handle are discoverable (a Group's slug is derived, not a
+            // natural key like a username).
+            services::federation::ensure_all_group_keys(&pool, &origin)
+                .await
+                .context("minting board Group identities")?;
             let fed = web::ap_object::build_config(pool.clone(), origin, &boot.federation)
                 .await
                 .context("building the federation config")?;

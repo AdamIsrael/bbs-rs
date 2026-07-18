@@ -82,9 +82,26 @@ impl Origin {
         format!("{}/c/{slug}", self.0)
     }
 
+    pub fn group_inbox(&self, slug: &str) -> String {
+        format!("{}/c/{slug}/inbox", self.0)
+    }
+
+    pub fn group_outbox(&self, slug: &str) -> String {
+        format!("{}/c/{slug}/outbox", self.0)
+    }
+
+    pub fn group_followers(&self, slug: &str) -> String {
+        format!("{}/c/{slug}/followers", self.0)
+    }
+
     /// A status (oneliner) `Note`.
     pub fn status(&self, id: i64) -> String {
         format!("{}/s/{id}", self.0)
+    }
+
+    /// A board post (`Page` for a root, `Note` for a reply).
+    pub fn post(&self, id: i64) -> String {
+        format!("{}/p/{id}", self.0)
     }
 
     /// A private-message `Note` (#110). Its own path so a DM is never confused
@@ -170,6 +187,164 @@ pub async fn ensure_person_keys(
         public_key: keypair.public_key,
         private_key: keypair.private_key,
     })
+}
+
+/// A board's stored `Group` identity (#111).
+#[derive(Debug, Clone)]
+pub struct GroupKeys {
+    pub actor_uri: String,
+    pub slug: String,
+    pub public_key: String,
+    pub private_key: String,
+}
+
+/// A URI-safe slug from a board's free-text name: lowercase, non-alphanumerics
+/// collapsed to single `-`, trimmed. Empty results (a name of only symbols) fall
+/// back to `board-{id}` — the caller passes the board id for that.
+pub fn slugify(name: &str, board_id: i64) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        format!("board-{board_id}")
+    } else {
+        slug.to_string()
+    }
+}
+
+/// Fetch a board's `Group` identity, generating slug + keypair on first use.
+///
+/// Lazy and idempotent, exactly like [`ensure_person_keys`]: a board that never
+/// federates mints nothing, and once a Group has a slug/URI they are permanent
+/// (re-slugging would orphan every remote subscriber). Slug collisions get a
+/// `-{id}` suffix so each board's Group URI is unique.
+pub async fn ensure_group_keys(
+    pool: &SqlitePool,
+    origin: &Origin,
+    board_id: i64,
+) -> Result<GroupKeys> {
+    let (name, slug, actor_uri, public_key, private_key): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT name, slug, actor_uri, public_key, private_key FROM boards WHERE id = ?",
+    )
+    .bind(board_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    if let (Some(slug), Some(actor_uri), Some(public_key), Some(private_key)) =
+        (slug.clone(), actor_uri, public_key, private_key)
+    {
+        return Ok(GroupKeys {
+            actor_uri,
+            slug,
+            public_key,
+            private_key,
+        });
+    }
+
+    // Pick a slug (keep any existing one), avoiding collisions.
+    let slug = match slug {
+        Some(s) => s,
+        None => {
+            let base = slugify(&name, board_id);
+            let taken: bool =
+                sqlx::query_scalar("SELECT COUNT(*) FROM boards WHERE slug = ? AND id != ?")
+                    .bind(&base)
+                    .bind(board_id)
+                    .fetch_one(pool)
+                    .await
+                    .map(|n: i64| n > 0)?;
+            if taken {
+                format!("{base}-{board_id}")
+            } else {
+                base
+            }
+        }
+    };
+
+    let keypair = generate_actor_keypair()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("generating group keypair: {e}")))?;
+    let actor_uri = origin.group(&slug);
+    sqlx::query(
+        "UPDATE boards SET slug = ?, actor_uri = ?, public_key = ?, private_key = ? WHERE id = ?",
+    )
+    .bind(&slug)
+    .bind(&actor_uri)
+    .bind(&keypair.public_key)
+    .bind(&keypair.private_key)
+    .bind(board_id)
+    .execute(pool)
+    .await?;
+
+    tracing::info!("minted ActivityPub Group {actor_uri} for board {board_id}");
+    Ok(GroupKeys {
+        actor_uri,
+        slug,
+        public_key: keypair.public_key,
+        private_key: keypair.private_key,
+    })
+}
+
+/// Resolve a board by its Group slug — the `boards.id` behind `/c/{slug}`.
+pub async fn find_board_by_slug(pool: &SqlitePool, slug: &str) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar("SELECT id FROM boards WHERE slug = ?")
+        .bind(slug)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// Mint Group slugs + keypairs for every board that lacks them.
+///
+/// Unlike a `Person` (fetched at its natural `/u/{username}`), a Group lives at
+/// `/c/{slug}` where the slug is *derived* from the board name — so a board must
+/// have its slug assigned before it's discoverable at all. Run once at startup
+/// when federation is enabled; boards are few and operator-created.
+pub async fn ensure_all_group_keys(pool: &SqlitePool, origin: &Origin) -> Result<()> {
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM boards WHERE slug IS NULL")
+        .fetch_all(pool)
+        .await?;
+    for id in ids {
+        ensure_group_keys(pool, origin, id).await?;
+    }
+    Ok(())
+}
+
+/// Record a board message's permanent `ap_id`, minting it on first use. Lazy,
+/// like [`ensure_status_ap_id`] — a board that never federates mints no URIs.
+pub async fn ensure_message_ap_id(pool: &SqlitePool, origin: &Origin, id: i64) -> Result<String> {
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT ap_id FROM messages WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    match existing {
+        None => Err(AppError::NotFound),
+        Some(Some(ap_id)) => Ok(ap_id),
+        Some(None) => {
+            let ap_id = origin.post(id);
+            sqlx::query("UPDATE messages SET ap_id = ? WHERE id = ?")
+                .bind(&ap_id)
+                .bind(id)
+                .execute(pool)
+                .await?;
+            Ok(ap_id)
+        }
+    }
 }
 
 /// The ActivityStreams "public" collection. **Emit the full URI, not the
@@ -362,6 +537,113 @@ pub mod objects {
             to: note.to.clone(),
             cc: note.cc.clone(),
             object: note,
+        }
+    }
+
+    // ---- Boards as Group actors (FEP-1b12, #111) --------------------------
+
+    /// A board root post as a `Page` (`name` = subject). A reply would be a
+    /// `Note` with `inReplyTo` — added with threaded delivery in a later slice.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Page {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub attributed_to: String,
+        pub name: String,
+        pub content: String,
+        pub published: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        /// The board this belongs to — FEP-1b12 uses `audience` for the Group.
+        pub audience: String,
+    }
+
+    /// A `Create` wrapping a board `Page`, authored by the poster.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CreatePage {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub actor: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub audience: String,
+        pub object: Page,
+    }
+
+    /// The Group's `Announce` of a post to its followers — the FEP-1b12 fan-out.
+    /// The Group (not the author) is the actor; the `Create` rides embedded.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Announce {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub actor: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub object: CreatePage,
+    }
+
+    /// Build the `Page` for a board root post. `ap_id` is its permanent URI
+    /// (minted by the caller); `author_uri` is the poster's `Person`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn board_page(
+        origin: &Origin,
+        slug: &str,
+        ap_id: &str,
+        author_uri: &str,
+        subject: &str,
+        body: &str,
+        published_unix: i64,
+    ) -> Page {
+        Page {
+            context: AS_CONTEXT,
+            kind: "Page",
+            id: ap_id.to_string(),
+            attributed_to: author_uri.to_string(),
+            name: subject.to_string(),
+            content: format!("<p>{}</p>", html_escape(body)),
+            published: crate::util::fmt_rfc3339(published_unix),
+            to: vec![PUBLIC.to_string()],
+            cc: vec![origin.group_followers(slug)],
+            audience: origin.group(slug),
+        }
+    }
+
+    /// Wrap a board `Page` in the Group's `Announce{Create{Page}}` — the object a
+    /// subscriber receives (and the outbox item). The Group signs and owns the
+    /// Announce; the inner Create keeps the author's attribution intact.
+    pub fn board_announce(origin: &Origin, slug: &str, author_uri: &str, page: Page) -> Announce {
+        let group_uri = origin.group(slug);
+        let followers = origin.group_followers(slug);
+        let create = CreatePage {
+            context: AS_CONTEXT,
+            kind: "Create",
+            id: format!("{}/activity", page.id),
+            actor: author_uri.to_string(),
+            to: page.to.clone(),
+            cc: page.cc.clone(),
+            audience: group_uri.clone(),
+            object: page,
+        };
+        Announce {
+            context: AS_CONTEXT,
+            kind: "Announce",
+            id: format!("{}/announce", create.id),
+            actor: group_uri,
+            to: vec![PUBLIC.to_string()],
+            cc: vec![followers],
+            object: create,
         }
     }
 }
@@ -1170,6 +1452,55 @@ mod tests {
         assert_eq!(
             note["content"],
             "<p><b>hi &amp; bye</b></p><p>the &lt;body&gt;</p>"
+        );
+    }
+
+    #[test]
+    fn slugs_are_uri_safe() {
+        assert_eq!(slugify("General", 1), "general");
+        assert_eq!(slugify("Rust  &  Cargo!", 1), "rust-cargo");
+        assert_eq!(slugify("  Off-Topic  ", 1), "off-topic");
+        assert_eq!(slugify("日本語", 1), "board-1"); // no ASCII → id fallback
+        assert_eq!(slugify("", 42), "board-42");
+        assert_eq!(slugify("!!!", 5), "board-5");
+    }
+
+    #[test]
+    fn a_board_post_announces_as_a_group_page() {
+        let o = Origin::new("https://bbs.example.com");
+        let page = super::objects::board_page(
+            &o,
+            "rust",
+            "https://bbs.example.com/p/9",
+            "https://bbs.example.com/u/alice",
+            "Hello & <world>",
+            "the body & more",
+            0,
+        );
+        let author = page.attributed_to.clone();
+        let announce = super::objects::board_announce(&o, "rust", &author, page);
+        let v = serde_json::to_value(&announce).unwrap();
+
+        // The Group is the actor of the Announce; the inner Create keeps the author.
+        assert_eq!(v["type"], "Announce");
+        assert_eq!(v["actor"], "https://bbs.example.com/c/rust");
+        assert_eq!(v["cc"][0], "https://bbs.example.com/c/rust/followers");
+        assert_eq!(v["object"]["type"], "Create");
+        assert_eq!(v["object"]["actor"], "https://bbs.example.com/u/alice");
+        assert_eq!(v["object"]["audience"], "https://bbs.example.com/c/rust");
+
+        let page = &v["object"]["object"];
+        assert_eq!(page["type"], "Page");
+        assert_eq!(page["id"], "https://bbs.example.com/p/9");
+        assert_eq!(page["name"], "Hello & <world>", "subject is plain text");
+        assert_eq!(
+            page["content"], "<p>the body &amp; more</p>",
+            "body is HTML-escaped"
+        );
+        assert_eq!(page["audience"], "https://bbs.example.com/c/rust");
+        assert_eq!(
+            page["to"][0],
+            "https://www.w3.org/ns/activitystreams#Public"
         );
     }
 
