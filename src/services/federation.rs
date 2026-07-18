@@ -555,13 +555,12 @@ pub mod follows {
         .await?;
         // last_insert_rowid isn't reliable across an upsert that took the UPDATE
         // path, so read the id back by its unique key.
-        let id: i64 = sqlx::query_scalar(
-            "SELECT id FROM ap_follows WHERE actor_uri = ? AND object_uri = ?",
-        )
-        .bind(follower_uri)
-        .bind(followed_uri)
-        .fetch_one(pool)
-        .await?;
+        let id: i64 =
+            sqlx::query_scalar("SELECT id FROM ap_follows WHERE actor_uri = ? AND object_uri = ?")
+                .bind(follower_uri)
+                .bind(followed_uri)
+                .fetch_one(pool)
+                .await?;
         Ok(id)
     }
 
@@ -615,7 +614,11 @@ pub mod outbound {
     /// This only *enqueues*; the [`queue`] drain signs and POSTs. It needs no
     /// federation library handle, just the pool and a validated origin, so it's
     /// safe to call straight from the post path.
-    pub async fn deliver_status(pool: &SqlitePool, origin: &Origin, oneliner_id: i64) -> Result<usize> {
+    pub async fn deliver_status(
+        pool: &SqlitePool,
+        origin: &Origin,
+        oneliner_id: i64,
+    ) -> Result<usize> {
         let Some(o) = crate::services::oneliners::get(pool, oneliner_id).await? else {
             return Ok(0);
         };

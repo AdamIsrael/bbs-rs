@@ -433,7 +433,10 @@ impl Activity for Undo {
 
     async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
         let UndoObject::Follow(follow) = self.object else {
-            tracing::info!("ignoring Undo of a non-Follow activity from {}", self.actor.inner());
+            tracing::info!(
+                "ignoring Undo of a non-Follow activity from {}",
+                self.actor.inner()
+            );
             return Ok(());
         };
         // The unfollow's authority is the Undo's own (signed) actor; only let it
@@ -443,10 +446,12 @@ impl Activity for Undo {
             tracing::warn!("Undo actor {follower} does not match inner Follow actor; ignoring");
             return Ok(());
         }
-        let removed =
-            follows::remove(&data.pool, follower, follow.object.inner().as_str()).await?;
+        let removed = follows::remove(&data.pool, follower, follow.object.inner().as_str()).await?;
         if removed {
-            tracing::info!("removed follow: {follower} unfollowed {}", follow.object.inner());
+            tracing::info!(
+                "removed follow: {follower} unfollowed {}",
+                follow.object.inner()
+            );
         }
         Ok(())
     }

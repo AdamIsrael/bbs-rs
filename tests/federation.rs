@@ -1029,8 +1029,12 @@ async fn posting_a_status_fans_out_to_followers() {
     let alice_uri = origin.person("alice");
     let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
     let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
-    follows::accept(&pool, &bob, &alice_uri, "f1").await.unwrap();
-    follows::accept(&pool, &carol, &alice_uri, "f2").await.unwrap();
+    follows::accept(&pool, &bob, &alice_uri, "f1")
+        .await
+        .unwrap();
+    follows::accept(&pool, &carol, &alice_uri, "f2")
+        .await
+        .unwrap();
 
     post_statuses(&pool, &alice, &["hello <followers>"]).await; // oneliner id 1
     let queued = outbound::deliver_status(&pool, &origin, 1).await.unwrap();
@@ -1065,7 +1069,10 @@ async fn posting_a_status_with_no_followers_queues_nothing() {
     let alice = mint_local(&pool, "alice").await;
     post_statuses(&pool, &alice, &["into the void"]).await;
 
-    assert_eq!(outbound::deliver_status(&pool, &origin, 1).await.unwrap(), 0);
+    assert_eq!(
+        outbound::deliver_status(&pool, &origin, 1).await.unwrap(),
+        0
+    );
     assert_eq!(queue::pending(&pool).await.unwrap(), 0);
 }
 
@@ -1100,13 +1107,20 @@ async fn inbound_follow_is_stored_and_accepted() {
 
     assert_eq!(follows::count(&pool, &alice_uri).await.unwrap(), 1);
     let due = queue::due(&pool, 10).await.unwrap();
-    assert_eq!(due.len(), 1, "an Accept must be queued back to the follower");
+    assert_eq!(
+        due.len(),
+        1,
+        "an Accept must be queued back to the follower"
+    );
     assert_eq!(due[0].inbox_url, "https://remote.social/users/bob/inbox");
     assert_eq!(due[0].actor_uri, alice_uri, "we sign the Accept as alice");
     let v: serde_json::Value = serde_json::from_str(&due[0].activity).unwrap();
     assert_eq!(v["type"], "Accept");
     assert_eq!(v["actor"], alice_uri);
-    assert_eq!(v["object"]["type"], "Follow", "the Accept echoes the Follow");
+    assert_eq!(
+        v["object"]["type"], "Follow",
+        "the Accept echoes the Follow"
+    );
     assert_eq!(v["object"]["id"], "https://remote.social/f/1");
 }
 
@@ -1137,7 +1151,11 @@ async fn inbound_follow_of_a_remote_actor_is_ignored() {
     follow.receive(&data).await.unwrap();
 
     assert_eq!(follows::count(&pool, &carol).await.unwrap(), 0);
-    assert_eq!(queue::pending(&pool).await.unwrap(), 0, "no Accept for a follow that isn't ours");
+    assert_eq!(
+        queue::pending(&pool).await.unwrap(),
+        0,
+        "no Accept for a follow that isn't ours"
+    );
 }
 
 /// An inbound `Undo{Follow}` removes the follow — an unfollow from Mastodon.

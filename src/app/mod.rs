@@ -493,8 +493,12 @@ impl App {
                 return;
             }
         };
-        match crate::services::federation::outbound::deliver_status(&self.pool, &origin, oneliner_id)
-            .await
+        match crate::services::federation::outbound::deliver_status(
+            &self.pool,
+            &origin,
+            oneliner_id,
+        )
+        .await
         {
             Ok(0) => {}
             Ok(n) => tracing::info!("queued status {oneliner_id} to {n} follower inbox(es)"),
