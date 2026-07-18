@@ -335,7 +335,12 @@ warning when read.
 so a board can be **followed from the fediverse** (Lemmy/Mbin, or another bbs-rs): a board lives at
 `/c/{slug}` with a `@slug@host` WebFinger handle. When a remote actor follows the Group and a local user
 posts a top-level message, the board `Announce`s it to every subscriber — signed by the board, attributed
-to the author. (Subscribing to a *remote* board from within bbs-rs, and mirroring its posts, comes next.)
+to the author.
+
+And the reverse: a bbs-rs instance can **subscribe to a remote board** — `bbsctl ap-follow <user> <slug@host>`
+follows another instance's (or Lemmy's) board Group, and its announced posts are degraded to text and cached
+locally; `bbsctl ap-board-posts <slug@host>` lists them. This closes the loop the project set out to build:
+**board syndication between bbs-rs instances**, verified end-to-end.
 
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details

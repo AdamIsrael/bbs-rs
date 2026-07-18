@@ -15,8 +15,9 @@
 use activitypub_federation::config::{Data, FederationConfig, UrlVerifier};
 use activitypub_federation::error::Error as ApFederationError;
 use activitypub_federation::fetch::object_id::ObjectId;
-use activitypub_federation::kinds::activity::{AcceptType, CreateType, FollowType, UndoType};
-use activitypub_federation::kinds::actor::PersonType;
+use activitypub_federation::kinds::activity::{
+    AcceptType, AnnounceType, CreateType, FollowType, UndoType,
+};
 use activitypub_federation::protocol::public_key::PublicKey;
 use activitypub_federation::protocol::verification::verify_domains_match;
 use activitypub_federation::traits::{Activity, Actor, Object};
@@ -30,8 +31,8 @@ use url::Url;
 
 use crate::config::Federation;
 use crate::services::federation::{
-    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, policy, queue, split_handle,
-    timeline,
+    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, mirror, policy, queue,
+    split_handle, timeline,
 };
 use crate::util::now_unix;
 
@@ -113,12 +114,14 @@ pub struct FedActor {
     pub local: bool,
 }
 
-/// The wire form of a `Person` actor. camelCase, like every AS2 object.
+/// The wire form of an actor we fetch. Named `Person` for history, but `kind`
+/// is a lenient `String` so a **`Group`** (a remote board, #111) deserializes
+/// through the same path — both carry `preferredUsername`, `inbox`, `publicKey`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Person {
     #[serde(rename = "type")]
-    kind: PersonType,
+    kind: String,
     id: ObjectId<FedActor>,
     preferred_username: String,
     inbox: Url,
@@ -206,7 +209,7 @@ impl Object for FedActor {
 
     async fn into_json(self, _data: &Data<Self::DataType>) -> Result<Self::Kind, Self::Error> {
         Ok(Person {
-            kind: PersonType::Person,
+            kind: "Person".to_string(),
             preferred_username: self
                 .username
                 .split('@')
@@ -411,6 +414,44 @@ pub struct AcceptFollow {
     object: Follow,
 }
 
+/// A board post as a remote instance sent it: a `Page` inside a `Create`. Only
+/// the fields the mirror displays; lenient about the rest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnouncedPage {
+    id: Url,
+    attributed_to: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    published: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnouncedCreate {
+    #[serde(rename = "type")]
+    kind: CreateType,
+    object: AnnouncedPage,
+}
+
+/// A remote board Group's `Announce{Create{Page}}` — how a followed board
+/// syndicates a post to us (FEP-1b12, #111). The Group's signature is the
+/// authority; the inner author rides along attributed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Announce {
+    #[serde(rename = "type")]
+    kind: AnnounceType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    object: AnnouncedCreate,
+}
+
 /// The catch-all for any activity we don't model yet — every well-formed one.
 /// [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
 /// still fetches the signing actor and verifies the HTTP signature before this
@@ -440,6 +481,7 @@ pub enum InboundActivity {
     Undo(Undo),
     Create(Create),
     Accept(AcceptFollow),
+    Announce(Announce),
     Other(AnyActivity),
 }
 
@@ -768,6 +810,63 @@ impl Activity for AcceptFollow {
 }
 
 #[async_trait::async_trait]
+impl Activity for Announce {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Mirror a post from a followed remote board. The **Group's** signature is
+    /// the authority (it's the signer, `self.actor`), so we gate on following
+    /// that Group — not on the inner author, whom the Group vouches for.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let group_uri = self.actor.inner().as_str();
+        if !follows::is_followed_locally(&data.pool, group_uri).await? {
+            tracing::debug!("dropping Announce from un-followed board {group_uri}");
+            return Ok(());
+        }
+        let page = self.object.object;
+        let group_handle = author_handle(&data.pool, group_uri).await;
+        let author_handle = author_handle(&data.pool, page.attributed_to.trim()).await;
+        let content = content::html_to_text(&page.content);
+        let subject = page.name.unwrap_or_else(|| "(untitled)".to_string());
+        let published = page
+            .published
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
+            .unwrap_or_else(now_unix);
+
+        let fresh = mirror::insert(
+            &data.pool,
+            page.id.as_str(),
+            group_uri,
+            &group_handle,
+            &author_handle,
+            &subject,
+            &content,
+            page.url.as_deref(),
+            published,
+        )
+        .await?;
+        if fresh {
+            tracing::info!("mirror: cached board post {} from {group_handle}", page.id);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl Activity for AnyActivity {
     type DataType = AppData;
     type Error = ApError;
@@ -809,6 +908,7 @@ impl Activity for InboundActivity {
             InboundActivity::Undo(a) => a.id(),
             InboundActivity::Create(a) => a.id(),
             InboundActivity::Accept(a) => a.id(),
+            InboundActivity::Announce(a) => a.id(),
             InboundActivity::Other(a) => a.id(),
         }
     }
@@ -819,6 +919,7 @@ impl Activity for InboundActivity {
             InboundActivity::Undo(a) => a.actor(),
             InboundActivity::Create(a) => a.actor(),
             InboundActivity::Accept(a) => a.actor(),
+            InboundActivity::Announce(a) => a.actor(),
             InboundActivity::Other(a) => a.actor(),
         }
     }
@@ -829,6 +930,7 @@ impl Activity for InboundActivity {
             InboundActivity::Undo(a) => a.verify(data).await,
             InboundActivity::Create(a) => a.verify(data).await,
             InboundActivity::Accept(a) => a.verify(data).await,
+            InboundActivity::Announce(a) => a.verify(data).await,
             InboundActivity::Other(a) => a.verify(data).await,
         }
     }
@@ -839,6 +941,7 @@ impl Activity for InboundActivity {
             InboundActivity::Undo(a) => a.receive(data).await,
             InboundActivity::Create(a) => a.receive(data).await,
             InboundActivity::Accept(a) => a.receive(data).await,
+            InboundActivity::Announce(a) => a.receive(data).await,
             InboundActivity::Other(a) => a.receive(data).await,
         }
     }

@@ -1390,6 +1390,87 @@ pub mod timeline {
     }
 }
 
+/// Mirrored posts from followed remote boards (`ap_board_posts`), the read model
+/// behind a subscribed remote board (#111 Slice C).
+pub mod mirror {
+    use super::*;
+    use crate::util::now_unix;
+
+    /// A cached post from a remote board, shaped for display.
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct Post {
+        pub id: i64,
+        pub ap_id: String,
+        pub group_uri: String,
+        pub group_handle: String,
+        pub author_handle: String,
+        pub subject: String,
+        pub content: String,
+        pub url: Option<String>,
+        pub published: i64,
+    }
+
+    /// Store a mirrored board post. Idempotent on the Page's `ap_id`: a
+    /// redelivery (or a post reaching us via two paths) inserts once. Returns
+    /// whether a new row was created.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert(
+        pool: &SqlitePool,
+        ap_id: &str,
+        group_uri: &str,
+        group_handle: &str,
+        author_handle: &str,
+        subject: &str,
+        content: &str,
+        url: Option<&str>,
+        published: i64,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "INSERT INTO ap_board_posts \
+               (ap_id, group_uri, group_handle, author_handle, subject, content, url, \
+                published, received_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
+        )
+        .bind(ap_id)
+        .bind(group_uri)
+        .bind(group_handle)
+        .bind(author_handle)
+        .bind(subject)
+        .bind(content)
+        .bind(url)
+        .bind(published)
+        .bind(now_unix())
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Recent posts from a subscribed remote board, newest first.
+    pub async fn recent(pool: &SqlitePool, group_uri: &str, limit: i64) -> Result<Vec<Post>> {
+        let rows = sqlx::query_as::<_, Post>(
+            "SELECT id, ap_id, group_uri, group_handle, author_handle, subject, content, url, \
+             published FROM ap_board_posts WHERE group_uri = ? \
+             ORDER BY published DESC, id DESC LIMIT ?",
+        )
+        .bind(group_uri)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// How many mirrored posts a board has (operator visibility / tests).
+    pub async fn count(pool: &SqlitePool, group_uri: &str) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM ap_board_posts WHERE group_uri = ?")
+                .bind(group_uri)
+                .fetch_one(pool)
+                .await?,
+        )
+    }
+}
+
 /// Split a fediverse handle into `(user, domain)`. Accepts `alice@host`,
 /// `@alice@host`, and `acct:alice@host`.
 pub fn split_handle(handle: &str) -> Option<(&str, &str)> {

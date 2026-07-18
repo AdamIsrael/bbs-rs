@@ -192,6 +192,14 @@ enum Cmd {
     ApUnfollow { user: String, handle: String },
     /// List the remote accounts a local user follows, with each follow's state.
     ApFollowing { user: String },
+    /// Show cached posts from a followed remote board. Pass the board's handle
+    /// (`slug@host`) or its Group actor URI. Follow a board first with
+    /// `ap-follow <user> <slug@host>`.
+    ApBoardPosts {
+        board: String,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
     /// Show recent login attempts.
     Logins {
         /// Filter to a single username.
@@ -616,6 +624,36 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 for (object, state) in rows {
                     println!("  {state:<9} {object}");
+                }
+            }
+        }
+        Cmd::ApBoardPosts { board, limit } => {
+            use bbs_rs::services::federation::mirror;
+            // Accept a Group actor URI directly, or resolve a `slug@host` handle
+            // through the actor row we stored when the board was followed.
+            let group_uri = if board.contains("://") {
+                board.clone()
+            } else {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT actor_uri FROM users WHERE username = ? AND actor_uri IS NOT NULL",
+                )
+                .bind(&board)
+                .fetch_optional(&pool)
+                .await?
+                .with_context(|| format!("no followed board {board:?} — follow it first"))?
+            };
+            let posts = mirror::recent(&pool, &group_uri, limit).await?;
+            if posts.is_empty() {
+                println!("no mirrored posts from {board}");
+            } else {
+                for p in posts {
+                    println!(
+                        "  {}  {} — {}\n      {}",
+                        fmt_time(p.published),
+                        p.author_handle,
+                        p.subject,
+                        p.content.replace('\n', "\n      ")
+                    );
                 }
             }
         }

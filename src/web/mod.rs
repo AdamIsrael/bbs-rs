@@ -160,6 +160,9 @@ pub fn router(state: WebState) -> Router {
         app = app
             .route("/inbox", post(inbox))
             .route("/u/{username}/inbox", post(inbox))
+            // A board Group's inbox (#111) — same handler; the activity, not the
+            // path, decides what happens.
+            .route("/c/{slug}/inbox", post(inbox))
             .layer(activitypub_federation::config::FederationMiddleware::new(
                 fed,
             ));
