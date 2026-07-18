@@ -15,6 +15,7 @@
 use activitypub_federation::config::{Data, FederationConfig, UrlVerifier};
 use activitypub_federation::error::Error as ApFederationError;
 use activitypub_federation::fetch::object_id::ObjectId;
+use activitypub_federation::kinds::activity::{AcceptType, FollowType, UndoType};
 use activitypub_federation::kinds::actor::PersonType;
 use activitypub_federation::protocol::public_key::PublicKey;
 use activitypub_federation::protocol::verification::verify_domains_match;
@@ -24,10 +25,11 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
+use std::time::Duration;
 use url::Url;
 
 use crate::config::Federation;
-use crate::services::federation::{Origin, policy};
+use crate::services::federation::{AS_CONTEXT, Origin, follows, policy, queue};
 use crate::util::now_unix;
 
 /// App state handed to the federation library. `Data<AppData>` derefs to this
@@ -71,6 +73,12 @@ impl From<sqlx::Error> for ApError {
 }
 impl From<url::ParseError> for ApError {
     fn from(e: url::ParseError) -> Self {
+        ApError(e.into())
+    }
+}
+// Our own service error, for `?` on `services::federation` calls in receive().
+impl From<crate::error::AppError> for ApError {
+    fn from(e: crate::error::AppError) -> Self {
         ApError(e.into())
     }
 }
@@ -255,12 +263,59 @@ impl Actor for FedActor {
     }
 }
 
-/// Every activity we're willing to receive — which for this phase is *any*
-/// well-formed one. [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
+/// A remote actor's `Follow` of one of our local users.
+///
+/// `actor` is the remote follower; `object` is the local actor being followed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Follow {
+    #[serde(rename = "type")]
+    kind: FollowType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    object: ObjectId<FedActor>,
+}
+
+/// Our `Accept` of a remote `Follow` — sent back through the delivery queue so
+/// the remote server marks the follow relationship established.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Accept {
+    #[serde(rename = "@context")]
+    context: &'static str,
+    #[serde(rename = "type")]
+    kind: AcceptType,
+    id: String,
+    actor: String,
+    object: Follow,
+}
+
+/// An `Undo` of a prior activity. We only act on `Undo{Follow}` (an unfollow);
+/// any other inner activity is accepted and ignored.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Undo {
+    #[serde(rename = "type")]
+    kind: UndoType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    /// Mastodon embeds the full inner activity. We only understand a `Follow`
+    /// here; anything else deserializes into the catch-all and is a no-op.
+    object: UndoObject,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum UndoObject {
+    Follow(Follow),
+    Other(serde_json::Value),
+}
+
+/// The catch-all for any activity we don't model yet — every well-formed one.
+/// [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
 /// still fetches the signing actor and verifies the HTTP signature before this
-/// runs; we just don't *act* on the activity yet. Follow/Accept (Slice B) and
-/// remote statuses (Slice C) fill in [`Activity::receive`] by narrowing this
-/// into a typed enum.
+/// runs; we simply don't act on activities outside [`InboundActivity`]'s typed
+/// arms. Remote statuses (`Create{Note}`) get a real arm in Slice C.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnyActivity {
     id: Url,
@@ -270,6 +325,136 @@ pub struct AnyActivity {
     /// Keep unmodeled fields so nothing is silently dropped on the way through.
     #[serde(flatten)]
     rest: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Everything we're willing to receive at an inbox. `untagged` picks the first
+/// variant whose shape matches: the typed activities have a fixed `type`
+/// (`FollowType` only deserializes from `"Follow"`), so a `Follow` lands in
+/// [`InboundActivity::Follow`] and anything unrecognized falls through to
+/// [`InboundActivity::Other`]. New activity types are added as arms *above*
+/// `Other`, never by touching the catch-all.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum InboundActivity {
+    Follow(Follow),
+    Undo(Undo),
+    Other(AnyActivity),
+}
+
+#[async_trait::async_trait]
+impl Activity for Follow {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Store the follow and queue an `Accept`. The signing actor (`actor`) and
+    /// the followed actor (`object`) are already in the DB — the follower was
+    /// persisted while verifying the signature, and the followed local user was
+    /// minted when Mastodon fetched them before sending this. So both resolve
+    /// from the local DB without a network round-trip.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let follower = self.actor.dereference_local(data).await?;
+        let followed = self.object.dereference_local(data).await?;
+
+        // Only local users can be followed. `read_from_id` returns remote rows
+        // too, so guard here rather than trust the URI shape.
+        if !followed.local {
+            tracing::info!(
+                "ignoring Follow of non-local actor {} from {}",
+                followed.ap_id.inner(),
+                follower.ap_id.inner()
+            );
+            return Ok(());
+        }
+
+        let row_id = follows::accept(
+            &data.pool,
+            follower.ap_id.inner().as_str(),
+            followed.ap_id.inner().as_str(),
+            self.id.as_str(),
+        )
+        .await?;
+
+        // Echo the original Follow back inside the Accept, per convention.
+        let accept = Accept {
+            context: AS_CONTEXT,
+            kind: AcceptType::Accept,
+            id: format!("{}#accept/{row_id}", followed.ap_id.inner()),
+            actor: followed.ap_id.inner().to_string(),
+            object: self.clone(),
+        };
+        let activity = serde_json::to_string(&accept)
+            .map_err(|e| ApError(anyhow::anyhow!("serializing Accept: {e}")))?;
+        queue::enqueue(
+            &data.pool,
+            followed.ap_id.inner().as_str(),
+            follower.inbox.as_str(),
+            &activity,
+            Some(&accept.id),
+        )
+        .await?;
+
+        tracing::info!(
+            "accepted Follow: {} now follows {}",
+            follower.ap_id.inner(),
+            followed.ap_id.inner()
+        );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Activity for Undo {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let UndoObject::Follow(follow) = self.object else {
+            tracing::info!(
+                "ignoring Undo of a non-Follow activity from {}",
+                self.actor.inner()
+            );
+            return Ok(());
+        };
+        // The unfollow's authority is the Undo's own (signed) actor; only let it
+        // undo its *own* follow, not someone else's.
+        let follower = self.actor.inner().as_str();
+        if follow.actor.inner().as_str() != follower {
+            tracing::warn!("Undo actor {follower} does not match inner Follow actor; ignoring");
+            return Ok(());
+        }
+        let removed = follows::remove(&data.pool, follower, follow.object.inner().as_str()).await?;
+        if removed {
+            tracing::info!(
+                "removed follow: {follower} unfollowed {}",
+                follow.object.inner()
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -290,14 +475,54 @@ impl Activity for AnyActivity {
     }
 
     async fn receive(self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
-        // The signature is already verified by the time we get here. Acting on
-        // the activity is deferred; log it so the wiring is observable.
+        // The signature is already verified by the time we get here. We accept
+        // the activity but take no action on types we don't model yet.
         tracing::info!(
-            "inbound {} from {} — signature verified, accepted (handling lands in #109 Slice B/C)",
+            "inbound {} from {} — signature verified, accepted (no handler)",
             self.kind,
             self.actor.inner()
         );
         Ok(())
+    }
+}
+
+/// Delegate to whichever typed activity matched. Hand-written rather than macro
+/// so the dispatch is explicit and greppable.
+#[async_trait::async_trait]
+impl Activity for InboundActivity {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        match self {
+            InboundActivity::Follow(a) => a.id(),
+            InboundActivity::Undo(a) => a.id(),
+            InboundActivity::Other(a) => a.id(),
+        }
+    }
+
+    fn actor(&self) -> &Url {
+        match self {
+            InboundActivity::Follow(a) => a.actor(),
+            InboundActivity::Undo(a) => a.actor(),
+            InboundActivity::Other(a) => a.actor(),
+        }
+    }
+
+    async fn verify(&self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        match self {
+            InboundActivity::Follow(a) => a.verify(data).await,
+            InboundActivity::Undo(a) => a.verify(data).await,
+            InboundActivity::Other(a) => a.verify(data).await,
+        }
+    }
+
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        match self {
+            InboundActivity::Follow(a) => a.receive(data).await,
+            InboundActivity::Undo(a) => a.receive(data).await,
+            InboundActivity::Other(a) => a.receive(data).await,
+        }
     }
 }
 
@@ -328,6 +553,85 @@ impl UrlVerifier for AllowlistVerifier {
             )))
         }
     }
+}
+
+/// The delivery-queue drain — the outbound half of federation.
+///
+/// The crate ships an in-memory sender; we persist instead
+/// ([`queue`](crate::services::federation::queue)) so a restart never silently
+/// drops deliveries. This loop is the piece deferred from #108: it signs each
+/// stored activity with its actor's key and POSTs it. Modeled on `ban_sweeper`
+/// — a fixed tick, spawned once at startup.
+pub async fn run_delivery_queue(
+    config: FederationConfig<AppData>,
+    interval: Duration,
+    max_attempts: u32,
+) {
+    // A bounded batch keeps one slow tick from monopolizing the process; leftover
+    // due rows are picked up on the next tick.
+    const BATCH: i64 = 32;
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        if let Err(e) = drain_once(&config, max_attempts, BATCH).await {
+            tracing::warn!("delivery queue drain failed: {e:#}");
+        }
+    }
+}
+
+/// One drain pass: attempt every due delivery and update the queue for each.
+/// Split from the loop so a test can drive a single deterministic pass.
+pub async fn drain_once(
+    config: &FederationConfig<AppData>,
+    max_attempts: u32,
+    batch: i64,
+) -> anyhow::Result<()> {
+    let data = config.to_request_data();
+    let pool = data.pool.clone();
+    for d in queue::due(&pool, batch).await? {
+        match deliver_one(&data, &d).await {
+            Ok(()) => queue::mark_delivered(&pool, d.id).await?,
+            Err(e) => {
+                let dropped =
+                    queue::mark_failed(&pool, d.id, &format!("{e:#}"), max_attempts).await?;
+                if !dropped {
+                    tracing::debug!("delivery {} deferred after error: {e:#}", d.id);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Sign and POST one queued delivery. The stored JSON is parsed back through
+/// [`AnyActivity`] (its top-level `id`/`actor`/`type` are all the signer needs);
+/// the crate builds the HTTP signature from the actor's key and the exact bytes
+/// it re-serializes. An empty task list means the inbox was local or blocked by
+/// the allowlist — treated as delivered, not retried forever.
+async fn deliver_one(data: &Data<AppData>, d: &queue::Delivery) -> anyhow::Result<()> {
+    use activitypub_federation::activity_sending::SendActivityTask;
+
+    let actor_id = Url::parse(&d.actor_uri)?;
+    let actor = FedActor::read_from_id(actor_id, data)
+        .await
+        .map_err(|e| anyhow::anyhow!("loading signing actor {}: {}", d.actor_uri, e.0))?
+        .ok_or_else(|| anyhow::anyhow!("signing actor {} not found or unminted", d.actor_uri))?;
+    if actor.private_key.is_none() {
+        anyhow::bail!("signing actor {} has no private key", d.actor_uri);
+    }
+
+    let activity: AnyActivity = serde_json::from_str(&d.activity)
+        .map_err(|e| anyhow::anyhow!("parsing queued activity {}: {e}", d.id))?;
+    let inbox = Url::parse(&d.inbox_url)?;
+    let tasks = SendActivityTask::prepare(&activity, &actor, vec![inbox], data)
+        .await
+        .map_err(|e| anyhow::anyhow!("preparing delivery {}: {e}", d.id))?;
+    for task in tasks {
+        task.sign_and_send(data)
+            .await
+            .map_err(|e| anyhow::anyhow!("delivering {}: {e}", d.id))?;
+    }
+    Ok(())
 }
 
 /// Build the federation library config from our validated settings.

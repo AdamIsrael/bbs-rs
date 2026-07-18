@@ -102,6 +102,9 @@ async fn recent_count(pool: &SqlitePool, author_id: i64, since: i64) -> Result<i
 /// be 1..=`cfg.max_length` characters (0 disables the cap); non-admins are
 /// subject to the per-user oneliner rate limit.
 ///
+/// Returns the new oneliner's id, which the caller uses to fan the status out
+/// to the author's remote followers (#109).
+///
 /// The wall is **not** trimmed — see the module docs. With no ring buffer the
 /// rate limit (`[limits] max_oneliners`) is what keeps the wall sane.
 pub async fn add(
@@ -110,7 +113,7 @@ pub async fn add(
     body: &str,
     limits: &Limits,
     cfg: &Oneliners,
-) -> Result<()> {
+) -> Result<i64> {
     if author.is_guest() {
         return Err(AppError::GuestNotAllowed);
     }
@@ -124,13 +127,14 @@ pub async fn add(
         let count = recent_count(pool, author.id, since).await?;
         enforce_rate(count, limits.max_oneliners)?;
     }
-    sqlx::query("INSERT INTO oneliners (author_id, body, created_at) VALUES (?, ?, ?)")
+    let id = sqlx::query("INSERT INTO oneliners (author_id, body, created_at) VALUES (?, ?, ?)")
         .bind(author.id)
         .bind(body)
         .bind(now_unix())
         .execute(pool)
-        .await?;
-    Ok(())
+        .await?
+        .last_insert_rowid();
+    Ok(id)
 }
 
 /// Delete a oneliner by id (operator moderation). Returns whether a row was

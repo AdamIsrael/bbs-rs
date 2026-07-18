@@ -133,13 +133,19 @@ it is the load-bearing assumption of the whole approach.
 
 Phase 3 (#109) is sliced into reviewable PRs:
 
-- **A — inbound plumbing + signature verification** (this slice): the inbox as a POST endpoint, the
+- **A — inbound plumbing + signature verification** (**done**, #117): the inbox as a POST endpoint, the
   `Object`/`Actor` impls that let the crate fetch a sender's key, HTTP-signature verification via
   `receive_activity`, remote actors persisted as `is_remote` shadow rows, and the domain **allowlist**
   (`ap_blocks` + `bbsctl ap-*`, enforced through the crate's `UrlVerifier`). Signatures are *verified* but
   activities are not yet *acted on* — a permissive `AnyActivity` accepts-and-logs.
-- **B — Follow/Accept + the queue drain**: record inbound follows, reply `Accept`, and turn on delivery
-  (sign + POST). This is where a user becomes *followable* from real Mastodon.
+- **B — Follow/Accept + the queue drain** (this slice): typed `Follow`/`Undo` activities behind an
+  `InboundActivity` enum (the `AnyActivity` catch-all stays as the fallback arm). An inbound `Follow` of a
+  local user is recorded in `ap_follows` and answered with a queued `Accept`; an `Undo{Follow}` removes it.
+  The delivery queue's **drain** — the sign-and-POST loop deferred from phase 2 — is spawned at startup
+  like `ban_sweeper`, using the crate's `SendActivityTask` so we don't hand-roll HTTP signatures. Posting a
+  status now fans a `Create{Note}` out to the author's follower inboxes. This is where a user becomes
+  *followable* from real Mastodon. The `Note`/`Create{Note}` wire shape moved to
+  `services::federation::objects` so the read surface and the delivery fan-out can't drift.
 - **C — remote statuses + timeline + content degradation**: receive `Create{Note}`, degrade HTML→text and
   images→`[img: alt]`, and show a timeline.
 | 4 | Remote DMs — opt-in, labeled not-private | M | #110 |

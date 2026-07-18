@@ -171,6 +171,101 @@ pub async fn ensure_person_keys(
 /// invisible on some servers.
 pub const PUBLIC: &str = "https://www.w3.org/ns/activitystreams#Public";
 
+/// The ActivityStreams `@context` every object and activity carries on the wire.
+pub const AS_CONTEXT: &str = "https://www.w3.org/ns/activitystreams";
+
+/// The `Note`/`Create{Note}` wire shapes for a status.
+///
+/// Single source of truth: the read surface (`GET /s/{id}`, the outbox) and the
+/// outbound delivery fan-out (#109) both build statuses here, so a change to the
+/// wire shape can't drift between what we publish and what we deliver.
+pub mod objects {
+    use super::*;
+    use crate::db::models::Oneliner;
+    use serde::Serialize;
+
+    /// A status: one oneliner, as an ActivityStreams `Note`.
+    // ActivityStreams is camelCase on the wire; getting a field name wrong
+    // doesn't error, it silently fails to interop.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Note {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub attributed_to: String,
+        pub content: String,
+        pub published: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+    }
+
+    /// A `Create` activity wrapping a `Note`, as delivered and as it appears in
+    /// an outbox.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CreateNote {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub actor: String,
+        pub published: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub object: Note,
+    }
+
+    /// Minimal HTML escaping for status bodies. Statuses are plain text, but AP
+    /// content is HTML, so a body must not be able to inject markup into every
+    /// reader's timeline.
+    pub fn html_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    /// Build the `Note` for a status, minting its permanent `ap_id` on first use.
+    pub async fn note_for(pool: &SqlitePool, origin: &Origin, o: &Oneliner) -> Result<Note> {
+        let ap_id = ensure_status_ap_id(pool, origin, o.id).await?;
+        Ok(Note {
+            context: AS_CONTEXT,
+            kind: "Note",
+            id: ap_id,
+            attributed_to: origin.person(&o.author_name),
+            content: format!("<p>{}</p>", html_escape(&o.body)),
+            published: crate::util::fmt_rfc3339(o.created_at),
+            // The full Public URI, never the `as:Public` CURIE.
+            to: vec![PUBLIC.to_string()],
+            cc: vec![origin.person_followers(&o.author_name)],
+        })
+    }
+
+    /// Build the `Create{Note}` for a status — the outbox item and the delivered
+    /// activity are the same object.
+    pub async fn create_for(
+        pool: &SqlitePool,
+        origin: &Origin,
+        o: &Oneliner,
+    ) -> Result<CreateNote> {
+        let note = note_for(pool, origin, o).await?;
+        Ok(CreateNote {
+            context: AS_CONTEXT,
+            kind: "Create",
+            id: origin.status_activity(o.id),
+            actor: origin.person(&o.author_name),
+            published: note.published.clone(),
+            to: note.to.clone(),
+            cc: note.cc.clone(),
+            object: note,
+        })
+    }
+}
+
 /// Record a status's permanent `ap_id`, if it doesn't have one yet.
 ///
 /// Lazy, like actor keys: a board that never federates mints no URIs. The value
@@ -424,6 +519,129 @@ pub mod policy {
         .fetch_all(pool)
         .await?;
         Ok(rows)
+    }
+}
+
+/// The follower graph, over the `ap_follows` table.
+///
+/// This slice only handles *inbound* follows — a remote actor following one of
+/// our local users. `actor_uri` is the remote follower; `object_uri` is the
+/// local actor being followed. Outbound follows (us following a remote account)
+/// arrive with the timeline in Slice C.
+pub mod follows {
+    use super::*;
+    use crate::util::now_unix;
+
+    /// Record a remote actor's accepted follow of a local actor. Idempotent on
+    /// `(follower, followed)`; refreshes the stored `Follow` id on a repeat.
+    /// Returns the row id, which seeds a stable `Accept` activity id.
+    pub async fn accept(
+        pool: &SqlitePool,
+        follower_uri: &str,
+        followed_uri: &str,
+        follow_uri: &str,
+    ) -> Result<i64> {
+        sqlx::query(
+            "INSERT INTO ap_follows (actor_uri, object_uri, state, follow_uri, created_at) \
+             VALUES (?, ?, 'accepted', ?, ?) \
+             ON CONFLICT(actor_uri, object_uri) DO UPDATE SET \
+               state = 'accepted', follow_uri = excluded.follow_uri",
+        )
+        .bind(follower_uri)
+        .bind(followed_uri)
+        .bind(follow_uri)
+        .bind(now_unix())
+        .execute(pool)
+        .await?;
+        // last_insert_rowid isn't reliable across an upsert that took the UPDATE
+        // path, so read the id back by its unique key.
+        let id: i64 =
+            sqlx::query_scalar("SELECT id FROM ap_follows WHERE actor_uri = ? AND object_uri = ?")
+                .bind(follower_uri)
+                .bind(followed_uri)
+                .fetch_one(pool)
+                .await?;
+        Ok(id)
+    }
+
+    /// Drop a follow (an inbound `Undo{Follow}`). Returns whether a row existed.
+    pub async fn remove(pool: &SqlitePool, follower_uri: &str, followed_uri: &str) -> Result<bool> {
+        let n = sqlx::query("DELETE FROM ap_follows WHERE actor_uri = ? AND object_uri = ?")
+            .bind(follower_uri)
+            .bind(followed_uri)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Distinct inboxes to deliver a local actor's status to: one per remote
+    /// follower, collapsed onto shared inboxes where a server offers one.
+    pub async fn follower_inboxes(pool: &SqlitePool, followed_uri: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT COALESCE(u.shared_inbox_url, u.inbox_url) AS inbox \
+             FROM ap_follows f JOIN users u ON u.actor_uri = f.actor_uri \
+             WHERE f.object_uri = ? AND f.state = 'accepted' AND u.inbox_url IS NOT NULL",
+        )
+        .bind(followed_uri)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|(i,)| i).collect())
+    }
+
+    /// How many remote followers a local actor has (operator visibility / tests).
+    pub async fn count(pool: &SqlitePool, followed_uri: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ap_follows WHERE object_uri = ? AND state = 'accepted'",
+        )
+        .bind(followed_uri)
+        .fetch_one(pool)
+        .await?)
+    }
+}
+
+/// Outbound delivery: turning a local event into queued activities.
+pub mod outbound {
+    use super::*;
+
+    /// Fan a freshly-posted status out to its author's remote followers.
+    ///
+    /// Builds the `Create{Note}` once and enqueues one delivery per distinct
+    /// follower inbox (see [`queue::enqueue`] for why one row per inbox). Returns
+    /// the number of deliveries queued — `0` when the author has no remote
+    /// followers, which is the common case and not an error.
+    ///
+    /// This only *enqueues*; the [`queue`] drain signs and POSTs. It needs no
+    /// federation library handle, just the pool and a validated origin, so it's
+    /// safe to call straight from the post path.
+    pub async fn deliver_status(
+        pool: &SqlitePool,
+        origin: &Origin,
+        oneliner_id: i64,
+    ) -> Result<usize> {
+        let Some(o) = crate::services::oneliners::get(pool, oneliner_id).await? else {
+            return Ok(0);
+        };
+        // Only local, federatable authors have followers to deliver to.
+        let Some(author) = find_local_actor(pool, &o.author_name).await? else {
+            return Ok(0);
+        };
+        let actor_uri = origin.person(&author.username);
+        let inboxes = follows::follower_inboxes(pool, &actor_uri).await?;
+        if inboxes.is_empty() {
+            return Ok(0);
+        }
+
+        let create = objects::create_for(pool, origin, &o).await?;
+        let activity = serde_json::to_string(&create)
+            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Create{{Note}}: {e}")))?;
+
+        let mut queued = 0;
+        for inbox in inboxes {
+            queue::enqueue(pool, &actor_uri, &inbox, &activity, Some(&create.id)).await?;
+            queued += 1;
+        }
+        Ok(queued)
     }
 }
 

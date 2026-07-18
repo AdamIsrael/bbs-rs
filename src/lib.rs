@@ -81,6 +81,18 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
             let fed = web::ap_object::build_config(pool.clone(), origin, &boot.federation)
                 .await
                 .context("building the federation config")?;
+            // Drain the durable delivery queue in the background: sign each
+            // outbound activity with its actor's key and POST it. The config is
+            // cheap to clone (it's Arc-backed); one copy drives the drain, the
+            // other powers the inbox.
+            let interval = boot.federation.delivery_interval();
+            let max_attempts = boot.federation.delivery_max_attempts;
+            let drain_cfg = fed.clone();
+            tokio::spawn(web::ap_object::run_delivery_queue(
+                drain_cfg,
+                interval,
+                max_attempts,
+            ));
             state = state.with_federation(fed);
             tracing::info!("ActivityPub federation enabled");
         }
