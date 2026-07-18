@@ -1096,6 +1096,52 @@ pub mod outbound {
         }
         Ok(queued)
     }
+
+    /// Fan a board root post out to the board's Group followers as the Group's
+    /// `Announce{Create{Page}}` (FEP-1b12, #111).
+    ///
+    /// Only top-level posts syndicate for now (a reply is a `Note` with
+    /// `inReplyTo`, added later). Signed by the **Group**, not the author, when
+    /// the drain picks it up. Returns the number of deliveries queued — `0` when
+    /// the board has no remote subscribers (the common case), or the message is
+    /// a reply, or federation can't build the Group.
+    pub async fn deliver_board_post(
+        pool: &SqlitePool,
+        origin: &Origin,
+        message_id: i64,
+    ) -> Result<usize> {
+        let msg = crate::services::boards::get_message(pool, message_id).await?;
+        if msg.parent_id.is_some() {
+            return Ok(0); // replies don't syndicate yet
+        }
+        let keys = ensure_group_keys(pool, origin, msg.board_id).await?;
+        let inboxes = follows::follower_inboxes(pool, &keys.actor_uri).await?;
+        if inboxes.is_empty() {
+            return Ok(0);
+        }
+
+        let ap_id = ensure_message_ap_id(pool, origin, msg.id).await?;
+        let author_uri = origin.person(&msg.author_name);
+        let page = objects::board_page(
+            origin,
+            &keys.slug,
+            &ap_id,
+            &author_uri,
+            &msg.subject,
+            &msg.body,
+            msg.created_at,
+        );
+        let announce = objects::board_announce(origin, &keys.slug, &author_uri, page);
+        let activity = serde_json::to_string(&announce)
+            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce: {e}")))?;
+
+        let mut queued = 0;
+        for inbox in inboxes {
+            queue::enqueue(pool, &keys.actor_uri, &inbox, &activity, Some(&announce.id)).await?;
+            queued += 1;
+        }
+        Ok(queued)
+    }
 }
 
 /// Content degradation: fediverse content is HTML, a terminal is not.

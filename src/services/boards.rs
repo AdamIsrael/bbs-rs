@@ -219,7 +219,7 @@ pub async fn post_message(
     body: &str,
     parent_id: Option<i64>,
     limits: &Limits,
-) -> Result<()> {
+) -> Result<i64> {
     if author.is_guest() {
         return Err(AppError::GuestNotAllowed);
     }
@@ -245,7 +245,7 @@ pub async fn post_message(
         let count = recent_post_count(pool, author.id, since).await?;
         enforce_rate(count, limits.max_posts)?;
     }
-    sqlx::query(
+    let id = sqlx::query(
         "INSERT INTO messages (board_id, author_id, subject, body, created_at, parent_id) \
          VALUES (?, ?, ?, ?, ?, ?)",
     )
@@ -256,8 +256,9 @@ pub async fn post_message(
     .bind(now_unix())
     .bind(parent_id)
     .execute(pool)
-    .await?;
-    Ok(())
+    .await?
+    .last_insert_rowid();
+    Ok(id)
 }
 
 // ---- Moderation (ungated; callers must be admins) -----------------------

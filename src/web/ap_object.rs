@@ -164,22 +164,43 @@ impl Object for FedActor {
         .bind(object_id.as_str())
         .fetch_optional(&data.pool)
         .await?;
-        let Some((username, inbox, public_key, private_key, is_remote, refreshed)) = row else {
-            return Ok(None);
-        };
-        // A row with no key or inbox can't act as an actor yet (a local user
-        // whose keys haven't been minted). Treat it as not-yet-an-actor.
-        let (Some(inbox), Some(public_key)) = (inbox, public_key) else {
+        if let Some((username, inbox, public_key, private_key, is_remote, refreshed)) = row {
+            // A row with no key or inbox can't act as an actor yet (a local user
+            // whose keys haven't been minted). Treat it as not-yet-an-actor.
+            let (Some(inbox), Some(public_key)) = (inbox, public_key) else {
+                return Ok(None);
+            };
+            return Ok(Some(FedActor {
+                username,
+                ap_id: object_id.into(),
+                inbox: Url::parse(&inbox)?,
+                public_key,
+                private_key,
+                refreshed_at: ts(refreshed),
+                local: !is_remote,
+            }));
+        }
+
+        // Not a user — try a board `Group` (#111). Its keys live in `boards`;
+        // the inbox URL is derived from the slug, not stored. Groups are always
+        // local, so this both signs their outbound Announce/Accept and lets an
+        // inbound `Follow` of a board resolve its target.
+        let board: Option<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT slug, public_key, private_key FROM boards WHERE actor_uri = ?")
+                .bind(object_id.as_str())
+                .fetch_optional(&data.pool)
+                .await?;
+        let Some((slug, Some(public_key), private_key)) = board else {
             return Ok(None);
         };
         Ok(Some(FedActor {
-            username,
+            username: slug.clone(),
+            inbox: Url::parse(&data.origin.group_inbox(&slug))?,
             ap_id: object_id.into(),
-            inbox: Url::parse(&inbox)?,
             public_key,
             private_key,
-            refreshed_at: ts(refreshed),
-            local: !is_remote,
+            refreshed_at: Utc::now(),
+            local: true,
         }))
     }
 

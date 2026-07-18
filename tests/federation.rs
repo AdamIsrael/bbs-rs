@@ -1921,3 +1921,149 @@ async fn a_group_outbox_announces_board_posts() {
     assert_eq!(page["content"], "<p>first post &amp; only</p>");
     assert_eq!(page["audience"], "https://bbs.example.com/c/general");
 }
+
+// ---- #111b: Group follow + Announce fan-out --------------------------------
+
+/// The General board, minted as a Group. Returns its GroupKeys.
+async fn mint_general_group(pool: &SqlitePool) -> bbs_rs::services::federation::GroupKeys {
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{Origin, ensure_group_keys};
+    let general = boards::list_boards(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    ensure_group_keys(pool, &Origin::new("https://bbs.example.com"), general.id)
+        .await
+        .unwrap()
+}
+
+/// A board Group is a first-class signing actor: its keys resolve out of the
+/// `boards` table so the drain can sign its Announce/Accept.
+#[tokio::test]
+async fn a_board_group_is_a_signing_actor() {
+    use activitypub_federation::traits::Object;
+    use bbs_rs::web::ap_object::FedActor;
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let data = fed_data(&pool).await;
+
+    let actor = FedActor::read_from_id(url::Url::parse(&keys.actor_uri).unwrap(), &data)
+        .await
+        .unwrap()
+        .expect("group resolves as an actor");
+    assert!(actor.local, "our own board Group is local");
+    assert_eq!(actor.username, "general");
+    assert!(actor.private_key.is_some(), "a Group can sign");
+    assert_eq!(
+        actor.inbox.as_str(),
+        "https://bbs.example.com/c/general/inbox"
+    );
+}
+
+/// An inbound `Follow` of a board Group is stored and answered with an `Accept`
+/// signed by the Group.
+#[tokio::test]
+async fn inbound_follow_of_a_board_is_accepted() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, queue};
+    use bbs_rs::web::ap_object::Follow;
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let peer = insert_follower(&pool, "peer@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+
+    let follow: Follow = serde_json::from_value(serde_json::json!({
+        "type": "Follow",
+        "id": "https://remote.social/f/1",
+        "actor": peer,
+        "object": keys.actor_uri,
+    }))
+    .unwrap();
+    follow.receive(&data).await.unwrap();
+
+    assert_eq!(follows::count(&pool, &keys.actor_uri).await.unwrap(), 1);
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 1, "an Accept is queued to the subscriber");
+    assert_eq!(due[0].actor_uri, keys.actor_uri, "signed by the Group");
+    assert_eq!(due[0].inbox_url, "https://remote.social/users/peer/inbox");
+    let v: serde_json::Value = serde_json::from_str(&due[0].activity).unwrap();
+    assert_eq!(v["type"], "Accept");
+    assert_eq!(v["actor"], keys.actor_uri);
+    assert_eq!(v["object"]["type"], "Follow");
+}
+
+/// Posting a board root post announces it (as the Group) to every subscriber
+/// inbox; a reply does not syndicate yet.
+#[tokio::test]
+async fn a_board_post_announces_to_subscribers() {
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{Origin, follows, outbound, queue};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let keys = mint_general_group(&pool).await;
+    let peer = insert_follower(&pool, "peer@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &peer, &keys.actor_uri, "f1")
+        .await
+        .unwrap();
+
+    let mid = boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Hello board",
+        "world & <friends>",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let n = outbound::deliver_board_post(&pool, &origin, mid)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].actor_uri, keys.actor_uri, "the Group signs it");
+    assert_eq!(due[0].inbox_url, "https://remote.social/users/peer/inbox");
+    let v: serde_json::Value = serde_json::from_str(&due[0].activity).unwrap();
+    assert_eq!(v["type"], "Announce");
+    assert_eq!(v["actor"], keys.actor_uri);
+    assert_eq!(v["object"]["type"], "Create");
+    let page = &v["object"]["object"];
+    assert_eq!(page["type"], "Page");
+    assert_eq!(page["name"], "Hello board");
+    assert_eq!(page["content"], "<p>world &amp; &lt;friends&gt;</p>");
+    assert_eq!(page["attributedTo"], "https://bbs.example.com/u/alice");
+
+    // A reply is a Note, not a Page — it doesn't syndicate in this slice.
+    let rid = boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "re",
+        "a reply",
+        Some(mid),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outbound::deliver_board_post(&pool, &origin, rid)
+            .await
+            .unwrap(),
+        0,
+        "replies don't syndicate yet"
+    );
+}
