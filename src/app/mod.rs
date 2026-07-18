@@ -299,6 +299,7 @@ impl App {
             Screen::Oneliners => self.on_oneliners(key).await,
             Screen::ComposeOneliner => self.on_compose_oneliner(key).await,
             Screen::Timeline => self.on_timeline(key).await,
+            Screen::FollowRemote => self.on_follow_remote(key).await,
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
             Screen::ReadMessage => self.on_read_message(key).await,
@@ -542,9 +543,53 @@ impl App {
                     self.timeline_sel += 1;
                 }
             }
+            KeyCode::Char('f') => {
+                if self.user.is_guest() {
+                    self.status = "Guests cannot follow — register an account first.".into();
+                } else {
+                    self.form = Form::new(vec![Field::new("Follow (user@host)", false)]);
+                    self.screen = Screen::FollowRemote;
+                }
+            }
             KeyCode::Char('r') => self.open_timeline().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
+        }
+    }
+
+    async fn on_follow_remote(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Timeline,
+            KeyCode::Enter => self.submit_follow().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_follow(&mut self) {
+        let handle = self.form.value(0).to_string();
+        if handle.is_empty() {
+            self.status = "Enter a handle like alice@mastodon.social.".into();
+            return;
+        }
+        self.status = format!("Resolving {handle}…");
+        match crate::web::ap_object::follow_handle(
+            &self.pool,
+            &self.config.federation,
+            &self.user,
+            &handle,
+        )
+        .await
+        {
+            Ok(remote) => {
+                self.status = format!("Follow request sent to {remote} (pending until accepted).");
+                self.open_timeline().await;
+            }
+            Err(e) => {
+                self.status = format!("Could not follow {handle}: {e}");
+                self.screen = Screen::Timeline;
+            }
         }
     }
 

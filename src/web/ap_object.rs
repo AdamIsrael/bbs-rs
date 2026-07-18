@@ -919,6 +919,38 @@ pub async fn unfollow(
     Ok(true)
 }
 
+/// Follow a remote account, building the federation config from settings.
+///
+/// The convenience entry point for callers that hold `[federation]` settings but
+/// not a live `FederationConfig` — the in-BBS follow action and `bbsctl`. It
+/// validates that federation is on, builds a short-lived config for the network
+/// fetch, and delegates to [`follow`].
+pub async fn follow_handle(
+    pool: &SqlitePool,
+    fed: &Federation,
+    local_user: &crate::db::models::User,
+    handle: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(fed.enabled, "federation is not enabled");
+    let origin = Origin::from_config(fed)?;
+    let config = build_config(pool.clone(), origin.clone(), fed).await?;
+    follow(&config.to_request_data(), &origin, local_user, handle).await
+}
+
+/// Unfollow a remote account, building the federation config from settings. The
+/// settings-holding counterpart to [`unfollow`].
+pub async fn unfollow_handle(
+    pool: &SqlitePool,
+    fed: &Federation,
+    local_user: &crate::db::models::User,
+    handle: &str,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(fed.enabled, "federation is not enabled");
+    let origin = Origin::from_config(fed)?;
+    let config = build_config(pool.clone(), origin.clone(), fed).await?;
+    unfollow(&config.to_request_data(), &origin, local_user, handle).await
+}
+
 /// Build the federation library config from our validated settings.
 ///
 /// `debug_insecure` maps to the crate's debug mode (permits http/localhost) so
