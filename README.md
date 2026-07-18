@@ -331,6 +331,12 @@ BBS and not being private. It's sent as a Mastodon-style direct message. Incomin
 fediverse land in the mailbox the same way, tagged `[fedi · not private]` in the list and with a bold
 warning when read.
 
+**Boards are `Group` actors** ([FEP-1b12](https://codeberg.org/fediverse/fep/src/branch/main/fep/1b12/fep-1b12.md)),
+so a board can be **followed from the fediverse** (Lemmy/Mbin, or another bbs-rs): a board lives at
+`/c/{slug}` with a `@slug@host` WebFinger handle. When a remote actor follows the Group and a local user
+posts a top-level message, the board `Announce`s it to every subscriber — signed by the board, attributed
+to the author. (Subscribing to a *remote* board from within bbs-rs, and mirroring its posts, comes next.)
+
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details
 (size, uploader, description, download count). This first phase is a **catalog with operator-managed

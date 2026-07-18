@@ -520,6 +520,31 @@ impl App {
         }
     }
 
+    /// Announce a freshly-posted board message to the board Group's remote
+    /// subscribers, when federation is on. Best-effort, like [`Self::fanout_status`].
+    async fn fanout_board_post(&self, message_id: i64) {
+        let fed = &self.config.federation;
+        if !fed.enabled {
+            return;
+        }
+        let origin = match crate::services::federation::Origin::from_config(fed) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("federation enabled but origin invalid, not delivering: {e:#}");
+                return;
+            }
+        };
+        match crate::services::federation::outbound::deliver_board_post(
+            &self.pool, &origin, message_id,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("announced post {message_id} to {n} subscriber inbox(es)"),
+            Err(e) => tracing::warn!("could not announce post {message_id}: {e:#}"),
+        }
+    }
+
     // ---- Timeline --------------------------------------------------------
 
     async fn open_timeline(&mut self) {
@@ -1004,8 +1029,9 @@ impl App {
         )
         .await
         {
-            Ok(()) => {
+            Ok(id) => {
                 self.reply_parent = None;
+                self.fanout_board_post(id).await;
                 self.reload_messages().await;
                 self.msg_sel = 0;
                 self.screen = Screen::MessageList;
