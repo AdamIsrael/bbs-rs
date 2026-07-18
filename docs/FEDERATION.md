@@ -138,7 +138,7 @@ Phase 3 (#109) is sliced into reviewable PRs:
   `receive_activity`, remote actors persisted as `is_remote` shadow rows, and the domain **allowlist**
   (`ap_blocks` + `bbsctl ap-*`, enforced through the crate's `UrlVerifier`). Signatures are *verified* but
   activities are not yet *acted on* — a permissive `AnyActivity` accepts-and-logs.
-- **B — Follow/Accept + the queue drain** (this slice): typed `Follow`/`Undo` activities behind an
+- **B — Follow/Accept + the queue drain** (**done**, #118): typed `Follow`/`Undo` activities behind an
   `InboundActivity` enum (the `AnyActivity` catch-all stays as the fallback arm). An inbound `Follow` of a
   local user is recorded in `ap_follows` and answered with a queued `Accept`; an `Undo{Follow}` removes it.
   The delivery queue's **drain** — the sign-and-POST loop deferred from phase 2 — is spawned at startup
@@ -146,8 +146,17 @@ Phase 3 (#109) is sliced into reviewable PRs:
   status now fans a `Create{Note}` out to the author's follower inboxes. This is where a user becomes
   *followable* from real Mastodon. The `Note`/`Create{Note}` wire shape moved to
   `services::federation::objects` so the read surface and the delivery fan-out can't drift.
-- **C — remote statuses + timeline + content degradation**: receive `Create{Note}`, degrade HTML→text and
-  images→`[img: alt]`, and show a timeline.
+- **C1 — inbound `Create{Note}` ingestion + content degradation** (this slice): a `Create` arm on
+  `InboundActivity` caches a remote status in `ap_timeline` (migration 0014) — but only if a *local* user
+  follows the author (`follows::is_followed_locally`) **and** the Note's `attributedTo` is the actor who
+  signed the delivery (no third-party injection). `content::html_to_text` degrades the HTML at ingestion:
+  `<p>`/`<br>` → lines, `<a>` keeps its text and appends the URL when it adds anything, `<img>` →
+  `[img: alt] (src)`, entities decoded, other tags stripped. Storage is idempotent on the Note's `ap_id`.
+  This is the ingestion engine; nothing yet *creates* the outbound follows that make statuses arrive, so
+  (like Slice A before B) it's inert in production until C2 wires it up.
+- **C2 — outbound follow + `Accept` handling + the timeline screen**: an in-BBS "follow `@user@host`"
+  action (WebFinger-resolve, send `Follow`, store pending), the inbound `Accept` that marks it accepted,
+  `Undo` to unfollow, and the TUI timeline screen that reads `ap_timeline`.
 | 4 | Remote DMs — opt-in, labeled not-private | M | #110 |
 | 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
 | 6 | Inbound board posts + moderation | L | #112 |

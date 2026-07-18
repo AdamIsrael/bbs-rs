@@ -524,13 +524,30 @@ pub mod policy {
 
 /// The follower graph, over the `ap_follows` table.
 ///
-/// This slice only handles *inbound* follows — a remote actor following one of
-/// our local users. `actor_uri` is the remote follower; `object_uri` is the
-/// local actor being followed. Outbound follows (us following a remote account)
-/// arrive with the timeline in Slice C.
+/// One row = one directed edge: `actor_uri` follows `object_uri`. For an
+/// *inbound* follow (a remote actor following one of our users) the local side
+/// is `object_uri`; for an *outbound* follow (a local user following a remote
+/// account, added in Slice C) the local side is `actor_uri`.
 pub mod follows {
     use super::*;
     use crate::util::now_unix;
+
+    /// Whether a *local* user follows `author_uri` with an accepted follow.
+    ///
+    /// This is the gate on inbound statuses: we cache a remote `Note` only if
+    /// someone here actually asked to see that author's posts. Since `author_uri`
+    /// is remote, only outbound edges (local → remote) can match, and the join
+    /// confirms the follower is a real local account.
+    pub async fn is_followed_locally(pool: &SqlitePool, author_uri: &str) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ap_follows f JOIN users u ON u.actor_uri = f.actor_uri \
+             WHERE f.object_uri = ? AND f.state = 'accepted' AND u.is_remote = 0",
+        )
+        .bind(author_uri)
+        .fetch_one(pool)
+        .await?;
+        Ok(n > 0)
+    }
 
     /// Record a remote actor's accepted follow of a local actor. Idempotent on
     /// `(follower, followed)`; refreshes the stored `Follow` id on a repeat.
@@ -645,6 +662,252 @@ pub mod outbound {
     }
 }
 
+/// Content degradation: fediverse content is HTML, a terminal is not.
+///
+/// Remote statuses (and, later, board posts) arrive as HTML with links, inline
+/// images, and custom emoji. A BBS renders text, so we flatten to plain text at
+/// ingestion — the timeline stores what we can actually show. This is a small
+/// hand-rolled pass, not a full HTML engine: it handles the tags Mastodon
+/// actually emits (`p`, `br`, `a`, `img`) and strips the rest, which is all
+/// status markup uses. Anything fancier would be a dependency we don't need.
+pub mod content {
+    /// Flatten a fragment of status HTML to plain text.
+    ///
+    /// - `<p>` and `<br>` become line breaks; block structure collapses to lines.
+    /// - `<a href="U">text</a>` keeps its text, appending ` (U)` when the URL
+    ///   isn't already the visible text (Mastodon often shows a truncated URL).
+    /// - `<img alt="A" src="U">` becomes `[img: A] (U)` — the image can't render,
+    ///   but its description and source survive.
+    /// - all other tags are dropped; HTML entities are decoded.
+    pub fn html_to_text(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut i = 0;
+        // An open `<a>`: its href, and where its visible text began in `out`, so
+        // the closing tag can decide whether the URL adds anything.
+        let mut open_link: Option<(String, usize)> = None;
+        while i < html.len() {
+            if html.as_bytes()[i] == b'<' {
+                let Some(close) = html[i..].find('>').map(|o| i + o) else {
+                    // Unclosed '<' — the rest is text.
+                    decode_entities_into(&html[i..], &mut out);
+                    break;
+                };
+                let tag = &html[i + 1..close];
+                let closing = tag.starts_with('/');
+                let name = tag
+                    .trim_start_matches('/')
+                    .split([' ', '\t', '\n', '/'])
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                match name.as_str() {
+                    "br" => out.push('\n'),
+                    "p" | "div" | "blockquote" | "li" | "ul" | "ol" => {
+                        if !out.is_empty() && !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                    }
+                    "a" if !closing => {
+                        open_link = Some((attr(tag, "href").unwrap_or_default(), out.len()))
+                    }
+                    "a" if closing => {
+                        if let Some((href, text_start)) = open_link.take() {
+                            let text = out[text_start..].trim().to_string();
+                            if href.is_empty() {
+                                // nothing to add
+                            } else if text.is_empty() {
+                                out.push_str(&href);
+                            } else if !same_link(&text, &href) {
+                                out.push_str(&format!(" ({href})"));
+                            }
+                        }
+                    }
+                    "img" => {
+                        let alt = attr(tag, "alt").unwrap_or_default();
+                        let src = attr(tag, "src").unwrap_or_default();
+                        if alt.is_empty() {
+                            out.push_str("[img]");
+                        } else {
+                            out.push_str(&format!("[img: {alt}]"));
+                        }
+                        if !src.is_empty() {
+                            out.push_str(&format!(" ({src})"));
+                        }
+                    }
+                    _ => {}
+                }
+                i = close + 1;
+            } else {
+                let next = html[i..].find('<').map(|o| i + o).unwrap_or(html.len());
+                decode_entities_into(&html[i..next], &mut out);
+                i = next;
+            }
+        }
+        normalize(&out)
+    }
+
+    /// Whether a link's visible text already conveys its href, so appending the
+    /// URL would just duplicate it. Compares with scheme and a trailing slash
+    /// stripped: `example.com/` matches `https://example.com`, but a *truncated*
+    /// label (`example.com` for `.../page`) does not, so the full URL is kept.
+    fn same_link(text: &str, href: &str) -> bool {
+        let norm = |s: &str| {
+            s.trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string()
+        };
+        norm(text) == norm(href)
+    }
+
+    /// Extract an attribute value (`name="..."` or `name='...'`) from a tag body.
+    fn attr(tag: &str, name: &str) -> Option<String> {
+        let lower = tag.to_ascii_lowercase();
+        let key = format!("{name}=");
+        let at = lower.find(&key)? + key.len();
+        let rest = &tag[at..];
+        let quote = rest.chars().next()?;
+        if quote == '"' || quote == '\'' {
+            let end = rest[1..].find(quote)? + 1;
+            Some(decode_entities(&rest[1..end]))
+        } else {
+            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
+            Some(decode_entities(&rest[..end]))
+        }
+    }
+
+    fn decode_entities(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        decode_entities_into(s, &mut out);
+        out
+    }
+
+    fn decode_entities_into(s: &str, out: &mut String) {
+        let mut rest = s;
+        while let Some(amp) = rest.find('&') {
+            out.push_str(&rest[..amp]);
+            let after = &rest[amp..];
+            let Some(semi) = after.find(';').filter(|&p| p <= 8) else {
+                out.push('&');
+                rest = &after[1..];
+                continue;
+            };
+            let entity = &after[1..semi];
+            let decoded = match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" | "#39" => Some('\''),
+                "nbsp" => Some(' '),
+                _ if entity.starts_with('#') => {
+                    entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+                }
+                _ => None,
+            };
+            match decoded {
+                Some(c) => out.push(c),
+                None => out.push_str(&after[..=semi]), // keep unknown entity verbatim
+            }
+            rest = &after[semi + 1..];
+        }
+        out.push_str(rest);
+    }
+
+    /// Trim per-line trailing space and squeeze runs of blank lines to one.
+    fn normalize(s: &str) -> String {
+        let lines: Vec<&str> = s.lines().map(|l| l.trim_end()).collect();
+        let mut result = String::new();
+        let mut prev_blank = true; // suppresses leading blanks
+        for line in lines {
+            let blank = line.is_empty();
+            if blank && prev_blank {
+                continue;
+            }
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+            prev_blank = blank;
+        }
+        // Drop a single trailing blank line if present.
+        while result.ends_with('\n') {
+            result.pop();
+        }
+        result
+    }
+}
+
+/// The inbound timeline: cached remote statuses (`ap_timeline`), the read model
+/// behind the timeline screen (#109 Slice C).
+pub mod timeline {
+    use super::*;
+    use crate::util::now_unix;
+
+    /// A cached remote status, shaped for display.
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct Entry {
+        pub id: i64,
+        pub ap_id: String,
+        pub author_uri: String,
+        pub author_handle: String,
+        pub content: String,
+        pub url: Option<String>,
+        pub published: i64,
+    }
+
+    /// Store a received status. Idempotent on the Note's `ap_id`: a redelivery
+    /// (or a status that reaches several of our followers) inserts once. Returns
+    /// whether a new row was created.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert(
+        pool: &SqlitePool,
+        ap_id: &str,
+        author_uri: &str,
+        author_handle: &str,
+        content: &str,
+        url: Option<&str>,
+        published: i64,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "INSERT INTO ap_timeline \
+               (ap_id, author_uri, author_handle, content, url, published, received_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(ap_id) DO NOTHING",
+        )
+        .bind(ap_id)
+        .bind(author_uri)
+        .bind(author_handle)
+        .bind(content)
+        .bind(url)
+        .bind(published)
+        .bind(now_unix())
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Recent statuses, newest first.
+    pub async fn recent(pool: &SqlitePool, limit: i64) -> Result<Vec<Entry>> {
+        let rows = sqlx::query_as::<_, Entry>(
+            "SELECT id, ap_id, author_uri, author_handle, content, url, published \
+             FROM ap_timeline ORDER BY published DESC, id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// How many cached statuses there are (operator visibility / tests).
+    pub async fn count(pool: &SqlitePool) -> Result<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM ap_timeline")
+            .fetch_one(pool)
+            .await?)
+    }
+}
+
 /// Split a fediverse handle into `(user, domain)`. Accepts `alice@host`,
 /// `@alice@host`, and `acct:alice@host`.
 pub fn split_handle(handle: &str) -> Option<(&str, &str)> {
@@ -714,6 +977,81 @@ mod tests {
 
         for bad in ["alice", "", "@", "alice@", "@remote.social", "acct:"] {
             assert_eq!(split_handle(bad), None, "{bad:?} is not a handle");
+        }
+    }
+
+    mod content {
+        use super::super::content::html_to_text;
+
+        #[test]
+        fn paragraphs_and_breaks_become_lines() {
+            assert_eq!(html_to_text("<p>first</p><p>second</p>"), "first\nsecond");
+            assert_eq!(html_to_text("a<br>b<br/>c"), "a\nb\nc");
+        }
+
+        #[test]
+        fn entities_are_decoded() {
+            assert_eq!(
+                html_to_text("<p>a &amp; b &lt;c&gt; &quot;d&quot; &#39;e&#39;</p>"),
+                "a & b <c> \"d\" 'e'"
+            );
+            // Unknown entities are left as-is rather than mangled.
+            assert_eq!(html_to_text("x &frobnicate; y"), "x &frobnicate; y");
+        }
+
+        #[test]
+        fn links_keep_text_and_append_the_url_when_it_adds_something() {
+            // A truncated visible label gains the real URL.
+            assert_eq!(
+                html_to_text(r#"see <a href="https://example.com/page">example.com</a>"#),
+                "see example.com (https://example.com/page)",
+            );
+            // When the visible text already is the URL, don't duplicate it.
+            assert_eq!(
+                html_to_text(r#"<a href="https://example.com/">https://example.com/</a>"#),
+                "https://example.com/",
+            );
+            // A hashtag/mention link keeps just its text.
+            assert_eq!(
+                html_to_text(r#"<a href="https://h.example/tags/rust">#rust</a>"#),
+                "#rust (https://h.example/tags/rust)",
+            );
+        }
+
+        #[test]
+        fn images_degrade_to_alt_and_source() {
+            assert_eq!(
+                html_to_text(r#"<img alt="a cat" src="https://cdn.example/cat.png">"#),
+                "[img: a cat] (https://cdn.example/cat.png)",
+            );
+            // No alt still records that an image was here, with its source.
+            assert_eq!(
+                html_to_text(r#"<img src="https://cdn.example/x.png">"#),
+                "[img] (https://cdn.example/x.png)",
+            );
+        }
+
+        #[test]
+        fn unknown_tags_are_stripped_and_blank_lines_squeezed() {
+            assert_eq!(
+                html_to_text("<span class=\"h\">hi</span> <b>there</b>"),
+                "hi there"
+            );
+            assert_eq!(
+                html_to_text("<p>one</p><p></p><p></p><p>two</p>"),
+                "one\ntwo"
+            );
+        }
+
+        #[test]
+        fn a_realistic_mastodon_status_flattens_sensibly() {
+            let html = "<p>Hello <a href=\"https://mastodon.social/@bob\">@bob</a>! \
+                        Check <a href=\"https://example.com/very/long/path\">this link</a></p>\
+                        <p>Second paragraph.</p>";
+            assert_eq!(
+                html_to_text(html),
+                "Hello @bob (https://mastodon.social/@bob)! Check this link (https://example.com/very/long/path)\nSecond paragraph.",
+            );
         }
     }
 }

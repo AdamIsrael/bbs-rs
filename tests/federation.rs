@@ -1199,3 +1199,169 @@ async fn inbound_undo_follow_removes_the_follow() {
         "the unfollow must drop the edge"
     );
 }
+
+// ---- Slice C1: inbound remote statuses → timeline (#109) -------------------
+
+/// Build a federation `Data` for driving inbound activities directly in tests.
+async fn fed_data(
+    pool: &SqlitePool,
+) -> activitypub_federation::config::Data<bbs_rs::web::ap_object::AppData> {
+    use bbs_rs::services::federation::Origin;
+    let fed = enabled_fed();
+    let origin = Origin::from_config(&fed).unwrap();
+    let config = bbs_rs::web::ap_object::build_config(pool.clone(), origin, &fed)
+        .await
+        .unwrap();
+    config.to_request_data()
+}
+
+/// A remote `Create{Note}` from a followed account is degraded to text and
+/// cached in the timeline.
+#[tokio::test]
+async fn inbound_status_from_a_followed_account_lands_in_the_timeline() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, timeline};
+    use bbs_rs::web::ap_object::Create;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    // alice follows bob (an outbound, accepted follow).
+    follows::accept(&pool, &alice, &bob, "https://bbs.example.com/f/1")
+        .await
+        .unwrap();
+
+    let data = fed_data(&pool).await;
+    let create: Create = serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": "https://remote.social/activities/1",
+        "actor": bob,
+        "object": {
+            "type": "Note",
+            "id": "https://remote.social/notes/1",
+            "attributedTo": bob,
+            "content": "<p>Hello from <a href=\"https://remote.social/tags/rust\">#rust</a></p>",
+            "url": "https://remote.social/@bob/1",
+            "published": "2026-07-01T12:00:00Z",
+        }
+    }))
+    .unwrap();
+    create.receive(&data).await.unwrap();
+
+    let entries = timeline::recent(&pool, 10).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert_eq!(e.ap_id, "https://remote.social/notes/1");
+    assert_eq!(e.author_handle, "bob@remote.social");
+    assert_eq!(
+        e.content, "Hello from #rust (https://remote.social/tags/rust)",
+        "HTML is degraded to plain text at ingestion"
+    );
+    assert_eq!(e.url.as_deref(), Some("https://remote.social/@bob/1"));
+    assert_eq!(e.published, 1_782_907_200, "published parsed from RFC 3339");
+}
+
+/// A status from an account nobody here follows is dropped — we don't cache the
+/// whole fediverse, only what someone asked to see.
+#[tokio::test]
+async fn inbound_status_from_an_unfollowed_account_is_dropped() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::timeline;
+    use bbs_rs::web::ap_object::Create;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    // No follow row: alice does not follow bob.
+
+    let data = fed_data(&pool).await;
+    let create: Create = serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": "https://remote.social/activities/2",
+        "actor": bob,
+        "object": {
+            "type": "Note",
+            "id": "https://remote.social/notes/2",
+            "attributedTo": bob,
+            "content": "<p>spam</p>",
+        }
+    }))
+    .unwrap();
+    create.receive(&data).await.unwrap();
+
+    assert_eq!(timeline::count(&pool).await.unwrap(), 0);
+}
+
+/// A `Create` whose Note is attributed to someone other than the signer is
+/// ignored — a followed account can't inject posts as a third party.
+#[tokio::test]
+async fn inbound_status_with_a_forged_author_is_ignored() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, timeline};
+    use bbs_rs::web::ap_object::Create;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+    // alice follows bob, but the note claims to be carol's while bob signs it.
+    follows::accept(&pool, &alice, &bob, "https://bbs.example.com/f/1")
+        .await
+        .unwrap();
+
+    let data = fed_data(&pool).await;
+    let create: Create = serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": "https://remote.social/activities/3",
+        "actor": bob,
+        "object": {
+            "type": "Note",
+            "id": "https://remote.social/notes/3",
+            "attributedTo": carol,
+            "content": "<p>impersonation</p>",
+        }
+    }))
+    .unwrap();
+    create.receive(&data).await.unwrap();
+
+    assert_eq!(timeline::count(&pool).await.unwrap(), 0);
+}
+
+/// The same status delivered twice (a redelivery, or to two of our followers)
+/// caches once — the Note's `ap_id` is the key.
+#[tokio::test]
+async fn a_redelivered_status_is_cached_only_once() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, timeline};
+    use bbs_rs::web::ap_object::Create;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &alice, &bob, "https://bbs.example.com/f/1")
+        .await
+        .unwrap();
+
+    let data = fed_data(&pool).await;
+    let make = || {
+        serde_json::from_value::<Create>(serde_json::json!({
+            "type": "Create",
+            "id": "https://remote.social/activities/4",
+            "actor": bob,
+            "object": {
+                "type": "Note",
+                "id": "https://remote.social/notes/4",
+                "attributedTo": bob,
+                "content": "<p>once</p>",
+            }
+        }))
+        .unwrap()
+    };
+    make().receive(&data).await.unwrap();
+    make().receive(&data).await.unwrap();
+
+    assert_eq!(timeline::count(&pool).await.unwrap(), 1);
+}
