@@ -179,8 +179,13 @@ Phase 5 (#111) is sliced:
   attributed to its author's `Person`, `audience` = the Group. No delivery or inbound yet.
 - **111b — Group follow + `Announce` fan-out**: a remote instance `Follow`s the Group (→ `ap_follows` +
   `Accept`); a local board post is wrapped and `Announce`d from the Group to its followers.
-- **111c — inbound `Announce` → local mirror**: follow a remote board, receive its `Announce`d posts into a
-  mirrored local board.
+- **111c — inbound `Announce` → local mirror** (this slice): following a remote board is just following its
+  Group (`ap-follow <user> <slug@host>`); the remote `Group` is fetched through the same actor path as a
+  Person (its `type` deserializes leniently). When a followed board `Announce`s a post, the `Page` is
+  degraded to text and cached in `ap_board_posts` (migration 0016), gated on following that Group and
+  idempotent on the Page's id — `bbsctl ap-board-posts` lists them. A board Group's inbox is served at
+  `/c/{slug}/inbox`. **Verified end-to-end between two bbs-rs instances**: A follows B's board, B posts, A
+  mirrors it — each step signed and verified (B's Group signature and A's user signature).
 
 Phase 4 (#110) is sliced:
 

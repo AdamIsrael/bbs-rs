@@ -2067,3 +2067,121 @@ async fn a_board_post_announces_to_subscribers() {
         "replies don't syndicate yet"
     );
 }
+
+// ---- #111c: mirror a followed remote board ---------------------------------
+
+/// Build an inbound `Announce{Create{Page}}` from a remote board Group.
+fn board_announce_from(
+    group_uri: &str,
+    page_id: &str,
+    author_uri: &str,
+    name: &str,
+    content: &str,
+) -> bbs_rs::web::ap_object::Announce {
+    serde_json::from_value(serde_json::json!({
+        "type": "Announce",
+        "id": format!("{group_uri}/announce/1"),
+        "actor": group_uri,
+        "object": {
+            "type": "Create",
+            "object": {
+                "type": "Page",
+                "id": page_id,
+                "attributedTo": author_uri,
+                "name": name,
+                "content": content,
+                "published": "2026-07-01T12:00:00Z",
+            }
+        }
+    }))
+    .unwrap()
+}
+
+/// A post announced by a followed remote board is degraded and mirrored.
+#[tokio::test]
+async fn a_followed_board_post_is_mirrored() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice".to_string();
+    // alice follows a remote board Group.
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &alice_uri, &group, "https://bbs.example.com/f/1")
+        .await
+        .unwrap();
+
+    let data = fed_data(&pool).await;
+    let announce = board_announce_from(
+        &group,
+        "https://remote.social/p/1",
+        "https://remote.social/users/bob",
+        "Remote hello",
+        "<p>from &lt;afar&gt; &amp; back</p>",
+    );
+    announce.receive(&data).await.unwrap();
+
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+    let posts = mirror::recent(&pool, &group, 10).await.unwrap();
+    let p = &posts[0];
+    assert_eq!(p.ap_id, "https://remote.social/p/1");
+    assert_eq!(p.group_handle, "rustaceans@remote.social");
+    assert_eq!(
+        p.author_handle, "bob@remote.social",
+        "author derived from its URI"
+    );
+    assert_eq!(p.subject, "Remote hello");
+    assert_eq!(p.content, "from <afar> & back", "HTML degraded");
+    assert_eq!(p.published, 1_782_907_200);
+}
+
+/// An Announce from a board nobody here follows is dropped.
+#[tokio::test]
+async fn an_unfollowed_board_announce_is_dropped() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    // No follow row.
+    let data = fed_data(&pool).await;
+    let announce = board_announce_from(
+        &group,
+        "https://remote.social/p/2",
+        "https://remote.social/users/bob",
+        "spam",
+        "<p>unsolicited</p>",
+    );
+    announce.receive(&data).await.unwrap();
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 0);
+}
+
+/// A redelivered board post mirrors once (idempotent on the Page's id).
+#[tokio::test]
+async fn a_redelivered_board_post_mirrors_once() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice".to_string();
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &alice_uri, &group, "https://bbs.example.com/f/1")
+        .await
+        .unwrap();
+    let data = fed_data(&pool).await;
+
+    let make = || {
+        board_announce_from(
+            &group,
+            "https://remote.social/p/9",
+            "https://remote.social/users/bob",
+            "once",
+            "<p>only once</p>",
+        )
+    };
+    make().receive(&data).await.unwrap();
+    make().receive(&data).await.unwrap();
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+}
