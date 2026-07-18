@@ -21,7 +21,7 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
 use ratatui::Terminal;
 use ratatui::TerminalOptions;
@@ -39,6 +39,7 @@ use crate::services::{admin, auth};
 use crate::transport::{Event, Transport};
 
 pub mod activitypub;
+pub mod ap_object;
 mod terminal;
 pub mod tls;
 use terminal::WebTerminalHandle;
@@ -53,6 +54,10 @@ pub struct WebState {
     presence: Presence,
     /// Session-id source shared with SSH so ids never collide across transports.
     next_id: Arc<AtomicUsize>,
+    /// Present only when federation is enabled with a validated origin. Carries
+    /// the library config that powers inbound signature verification, and gates
+    /// whether the inbox routes exist at all.
+    federation: Option<activitypub_federation::config::FederationConfig<ap_object::AppData>>,
 }
 
 impl WebState {
@@ -67,7 +72,17 @@ impl WebState {
             config,
             presence,
             next_id,
+            federation: None,
         }
+    }
+
+    /// Attach the federation library config, enabling the inbound AP surface.
+    pub fn with_federation(
+        mut self,
+        config: activitypub_federation::config::FederationConfig<ap_object::AppData>,
+    ) -> Self {
+        self.federation = Some(config);
+        self
     }
 }
 
@@ -112,7 +127,7 @@ pub async fn serve_tls(
 
 /// Build the axum router for the browser frontend.
 pub fn router(state: WebState) -> Router {
-    Router::new()
+    let mut app = Router::new()
         .route("/", get(index))
         .route(
             "/xterm.js",
@@ -125,16 +140,44 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
-        // ActivityPub (#107, #108). All 404 unless [federation] is enabled with
-        // a validated origin, so a non-federating board looks like one.
+        // ActivityPub read surface (#107, #108). All 404 unless [federation] is
+        // enabled with a validated origin, so a non-federating board looks like
+        // one.
         .route("/.well-known/webfinger", get(activitypub::webfinger))
         .route("/.well-known/nodeinfo", get(activitypub::nodeinfo_index))
         .route("/nodeinfo/2.1", get(activitypub::nodeinfo))
         .route("/u/{username}", get(activitypub::person))
         .route("/u/{username}/outbox", get(activitypub::outbox))
-        .route("/s/{id}", get(activitypub::status))
-        .layer(axum::middleware::from_fn(log_request))
+        .route("/s/{id}", get(activitypub::status));
+
+    // Inbound (#109). The inbox only exists when federation is configured, and
+    // the FederationMiddleware is what makes `Data<AppData>` available to the
+    // handler (and drives HTTP-signature verification inside receive_activity).
+    if let Some(fed) = state.federation.clone() {
+        app = app
+            .route("/inbox", post(inbox))
+            .route("/u/{username}/inbox", post(inbox))
+            .layer(activitypub_federation::config::FederationMiddleware::new(
+                fed,
+            ));
+    }
+
+    app.layer(axum::middleware::from_fn(log_request))
         .with_state(state)
+}
+
+/// Shared and per-actor inbox. `receive_activity` reads the raw body, fetches
+/// the signing actor, and verifies the HTTP signature before dispatching to
+/// [`ap_object::AnyActivity::receive`]. A bad or missing signature is rejected
+/// here, before any handling.
+async fn inbox(
+    data: activitypub_federation::config::Data<ap_object::AppData>,
+    activity_data: activitypub_federation::axum::inbox::ActivityData,
+) -> impl IntoResponse {
+    use activitypub_federation::axum::inbox::receive_activity;
+    use activitypub_federation::protocol::context::WithContext;
+    use ap_object::{AnyActivity, AppData, FedActor};
+    receive_activity::<WithContext<AnyActivity>, FedActor, AppData>(activity_data, &data).await
 }
 
 /// Body of the health endpoint — a marker the startup self-check looks for to

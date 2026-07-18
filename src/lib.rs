@@ -65,12 +65,25 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
             .context("making the web listener non-blocking")?;
         let scheme = if boot.web.tls { "https" } else { "http" };
         tracing::info!("web frontend listening on {scheme}://{addr}");
-        let state = web::WebState::new(
+        let mut state = web::WebState::new(
             pool.clone(),
             config.clone(),
             presence.clone(),
             next_id.clone(),
         );
+        // Wire up inbound federation when it's enabled and the origin validates.
+        // The origin is validated fail-closed here (same as at startup): a
+        // board that can't federate correctly refuses to, rather than serving
+        // an inbox that would mint permanent garbage.
+        if boot.federation.enabled {
+            let origin = services::federation::Origin::from_config(&boot.federation)
+                .context("[federation] enabled but the origin is invalid")?;
+            let fed = web::ap_object::build_config(pool.clone(), origin, &boot.federation)
+                .await
+                .context("building the federation config")?;
+            state = state.with_federation(fed);
+            tracing::info!("ActivityPub federation enabled");
+        }
         if boot.web.tls {
             // Resolve TLS on the main task so cert errors fail startup.
             let tls = web::tls::resolve(&boot.web)

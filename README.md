@@ -257,6 +257,10 @@ bbsctl add-file <area> <user> <path> [--desc D]   # add a file (copied into stor
 bbsctl rm-file <id>              # remove a file (and its stored blob)
 bbsctl set-file-desc <id> <text> # set a file's description (SFTP uploads have none)
 bbsctl backup [--out DIR] [--files]   # snapshot the DB (and optionally file blobs)
+bbsctl ap-peers                  # list federation allow/block domains
+bbsctl ap-allow <domain> [reason]     # let a domain federate (allowlist posture)
+bbsctl ap-block <domain> [reason]     # block a domain (blocklist posture)
+bbsctl ap-unallow <domain> / ap-unblock <domain>   # remove an entry
 ```
 
 **Backups** (`bbsctl backup`) use SQLite's online `VACUUM INTO`, so they run **while the server is up**

@@ -292,15 +292,25 @@ async fn serve_ap(pool: SqlitePool, fed: bbs_rs::config::Federation) -> String {
     use bbs_rs::services::presence::Presence;
 
     let settings = Settings {
-        federation: fed,
+        federation: fed.clone(),
         ..Default::default()
     };
-    let state = bbs_rs::web::WebState::new(
-        pool,
+    let mut state = bbs_rs::web::WebState::new(
+        pool.clone(),
         Arc::new(ArcSwap::from_pointee(settings)),
         Presence::new(),
         Arc::new(AtomicUsize::new(0)),
     );
+    // Attach the inbound federation machinery, mirroring lib::serve, so the
+    // inbox routes exist and receive_activity can verify signatures. An invalid
+    // origin (a fail-closed case) simply doesn't attach — the server still runs
+    // and its handlers 404, which is what production does too.
+    if fed.enabled
+        && let Ok(origin) = bbs_rs::services::federation::Origin::from_config(&fed)
+        && let Ok(config) = bbs_rs::web::ap_object::build_config(pool, origin, &fed).await
+    {
+        state = state.with_federation(config);
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -743,6 +753,133 @@ async fn delivered_activities_leave_the_queue() {
     let left = queue::due(&pool, 10).await.unwrap();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].id, b);
+}
+
+/// The inbox exists only when federation is on, and it **requires a valid HTTP
+/// signature** — an unsigned POST is rejected before any handling. This is the
+/// security boundary the whole inbound phase rests on.
+#[tokio::test]
+async fn inbox_requires_a_signature() {
+    let pool = setup().await;
+    auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let base = serve_ap(pool, enabled_fed()).await;
+    let client = reqwest::Client::new();
+
+    // A well-formed activity, but no HTTP signature.
+    let body = serde_json::json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": "https://remote.social/activities/1",
+        "type": "Follow",
+        "actor": "https://remote.social/users/bob",
+        "object": "https://bbs.example.com/u/alice"
+    });
+    for path in ["/inbox", "/u/alice/inbox"] {
+        let res = client
+            .post(format!("{base}{path}"))
+            .header("content-type", "application/activity+json")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            res.status(),
+            200,
+            "an unsigned activity must not be accepted at {path}"
+        );
+    }
+}
+
+/// With federation off, there is no inbox at all — a non-federating board must
+/// not expose one.
+#[tokio::test]
+async fn inbox_absent_when_federation_disabled() {
+    let pool = setup().await;
+    let base = serve_ap(pool, bbs_rs::config::Federation::default()).await;
+    let client = reqwest::Client::new();
+    for path in ["/inbox", "/u/alice/inbox"] {
+        let res = client
+            .post(format!("{base}{path}"))
+            .json(&serde_json::json!({"type": "Follow"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            404,
+            "no inbox when federation is off ({path})"
+        );
+    }
+}
+
+/// The domain policy: allowlist (default) admits only listed domains; blocklist
+/// admits all but listed ones. Our own origin is always allowed.
+#[tokio::test]
+async fn domain_policy_allowlist_and_blocklist() {
+    use bbs_rs::services::federation::policy;
+    let pool = setup().await;
+    let origin = "bbs.example.com";
+
+    // Allowlist mode (the default posture): nothing federates until allowed.
+    assert!(
+        !policy::domain_allowed(&pool, origin, "remote.social", true)
+            .await
+            .unwrap()
+    );
+    // ...except ourselves.
+    assert!(
+        policy::domain_allowed(&pool, origin, "bbs.example.com", true)
+            .await
+            .unwrap()
+    );
+    policy::set(&pool, "friend.example", "allow", "a peer")
+        .await
+        .unwrap();
+    assert!(
+        policy::domain_allowed(&pool, origin, "friend.example", true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        policy::domain_allowed(&pool, origin, "FRIEND.EXAMPLE", true)
+            .await
+            .unwrap(),
+        "domain matching is case-insensitive"
+    );
+
+    // Blocklist mode: everyone federates except the listed.
+    assert!(
+        policy::domain_allowed(&pool, origin, "stranger.example", false)
+            .await
+            .unwrap()
+    );
+    policy::set(&pool, "spam.example", "block", "spam")
+        .await
+        .unwrap();
+    assert!(
+        !policy::domain_allowed(&pool, origin, "spam.example", false)
+            .await
+            .unwrap()
+    );
+
+    // Lists and removal round-trip.
+    assert_eq!(policy::list(&pool, "allow").await.unwrap().len(), 1);
+    assert!(
+        policy::unset(&pool, "friend.example", "allow")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !policy::unset(&pool, "friend.example", "allow")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !policy::domain_allowed(&pool, origin, "friend.example", true)
+            .await
+            .unwrap()
+    );
 }
 
 /// `actor_uri` is globally unique, but NULLs stay distinct — so any number of
