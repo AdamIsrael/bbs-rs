@@ -1564,3 +1564,183 @@ async fn send_remote_records_a_local_copy() {
         Err(bbs_rs::error::AppError::GuestNotAllowed)
     ));
 }
+
+// ---- #110b: inbound remote DMs → mailbox -----------------------------------
+
+/// A federation `Data` with remote DMs turned on.
+async fn fed_data_dms(
+    pool: &SqlitePool,
+) -> activitypub_federation::config::Data<bbs_rs::web::ap_object::AppData> {
+    use bbs_rs::config::Federation;
+    use bbs_rs::services::federation::Origin;
+    let fed = Federation {
+        enabled: true,
+        origin: "https://bbs.example.com".into(),
+        allow_remote_dms: true,
+        ..Default::default()
+    };
+    let origin = Origin::from_config(&fed).unwrap();
+    bbs_rs::web::ap_object::build_config(pool.clone(), origin, &fed)
+        .await
+        .unwrap()
+        .to_request_data()
+}
+
+/// Build an inbound `Create{Note}` addressed directly to `to` (no Public).
+fn direct_note_from(
+    actor: &str,
+    note_id: &str,
+    to: &str,
+    summary: Option<&str>,
+    content: &str,
+) -> bbs_rs::web::ap_object::Create {
+    let mut object = serde_json::json!({
+        "type": "Note",
+        "id": note_id,
+        "attributedTo": actor,
+        "content": content,
+        "to": [to],
+        "cc": [],
+    });
+    if let Some(s) = summary {
+        object["summary"] = serde_json::json!(s);
+    }
+    serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": format!("{note_id}/activity"),
+        "actor": actor,
+        "object": object,
+    }))
+    .unwrap()
+}
+
+/// A direct Note addressed to a local user lands in their mailbox (opt-in on),
+/// degraded to text and tagged by its remote sender.
+#[tokio::test]
+async fn inbound_dm_lands_in_the_mailbox() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::mail;
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice";
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+
+    let data = fed_data_dms(&pool).await;
+    let dm = direct_note_from(
+        &bob,
+        "https://remote.social/dm/1",
+        alice_uri,
+        Some("a private hello"),
+        "<p>meet me at <a href=\"https://x.example/\">the spot</a></p>",
+    );
+    dm.receive(&data).await.unwrap();
+
+    let inbox = mail::inbox(&pool, alice.id).await.unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(
+        inbox[0].from_name, "bob@remote.social",
+        "sender is the remote handle (UI flags it)"
+    );
+    assert_eq!(
+        inbox[0].subject, "a private hello",
+        "summary becomes the subject"
+    );
+    assert_eq!(
+        inbox[0].body, "meet me at the spot (https://x.example/)",
+        "HTML degraded"
+    );
+    assert_eq!(mail::unread_count(&pool, alice.id).await.unwrap(), 1);
+}
+
+/// With the opt-in off (the default), inbound DMs are dropped, not stored.
+#[tokio::test]
+async fn inbound_dm_is_dropped_when_the_opt_in_is_off() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::mail;
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+
+    // fed_data() (from Slice C tests) uses the default: allow_remote_dms = false.
+    let data = fed_data(&pool).await;
+    let dm = direct_note_from(
+        &bob,
+        "https://remote.social/dm/2",
+        "https://bbs.example.com/u/alice",
+        None,
+        "<p>psst</p>",
+    );
+    dm.receive(&data).await.unwrap();
+
+    assert!(mail::inbox(&pool, alice.id).await.unwrap().is_empty());
+}
+
+/// A public status (addressed to Public) is never treated as a DM — it goes to
+/// the timeline, not the mailbox, even with remote DMs on.
+#[tokio::test]
+async fn a_public_note_is_not_a_dm() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, timeline};
+    use bbs_rs::services::mail;
+    use bbs_rs::web::ap_object::Create;
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &alice_uri, &bob, "f1")
+        .await
+        .unwrap();
+
+    let data = fed_data_dms(&pool).await;
+    // Public status that also cc's alice — the Public URI makes it a status.
+    let create: Create = serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": "https://remote.social/s/9/activity",
+        "actor": bob,
+        "object": {
+            "type": "Note",
+            "id": "https://remote.social/s/9",
+            "attributedTo": bob,
+            "content": "<p>hi all</p>",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "cc": [alice_uri],
+        }
+    }))
+    .unwrap();
+    create.receive(&data).await.unwrap();
+
+    assert!(
+        mail::inbox(&pool, alice.id).await.unwrap().is_empty(),
+        "not a DM"
+    );
+    assert_eq!(timeline::count(&pool).await.unwrap(), 1, "it's a status");
+}
+
+/// A redelivered DM (same Note id) stores once.
+#[tokio::test]
+async fn a_redelivered_dm_is_stored_once() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::mail;
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let data = fed_data_dms(&pool).await;
+
+    let make = || {
+        direct_note_from(
+            &bob,
+            "https://remote.social/dm/7",
+            "https://bbs.example.com/u/alice",
+            None,
+            "<p>only once</p>",
+        )
+    };
+    make().receive(&data).await.unwrap();
+    make().receive(&data).await.unwrap();
+
+    assert_eq!(mail::inbox(&pool, alice.id).await.unwrap().len(), 1);
+}

@@ -462,13 +462,22 @@ fn render_mailbox(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|m| {
             let flag = if m.read_at.is_none() { "*" } else { " " };
-            Line::from(format!(
-                "{} {:<32} from {:<12} {}",
+            let mut spans = vec![Span::raw(format!(
+                "{} {:<32} from {:<20} {}",
                 flag,
                 truncate(&m.subject, 32),
-                truncate(&m.from_name, 12),
+                // Remote senders show as `user@host`, so allow the wider field.
+                truncate(&m.from_name, 20),
                 fmt_time(m.created_at)
-            ))
+            ))];
+            // A `@` in the sender means a remote fediverse DM — not private.
+            if m.from_name.contains('@') {
+                spans.push(Span::styled(
+                    "  [fedi · not private]",
+                    Style::default().fg(app.theme.warning_fg),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     render_selectable(f, area, " Mailbox ", lines, app.mail_sel);
@@ -478,13 +487,24 @@ fn render_read_mail(f: &mut Frame, area: Rect, app: &App) {
     let Some(m) = &app.current_mail else {
         return placeholder(f, area, " Mail ", "Nothing to show.");
     };
-    let body = format!(
-        "From: {}\nDate: {}\n\n{}",
-        m.from_name,
-        fmt_time(m.created_at),
-        m.body
-    );
-    let p = Paragraph::new(body)
+    let mut lines: Vec<Line> = Vec::new();
+    // A remote (fediverse) DM is not private — say so, up top, before the body.
+    if m.from_name.contains('@') {
+        lines.push(Line::from(Span::styled(
+            "⚠  A fediverse message — it passed through remote servers and is NOT private.",
+            Style::default()
+                .fg(app.theme.warning_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(format!("From: {}", m.from_name)));
+    lines.push(Line::from(format!("Date: {}", fmt_time(m.created_at))));
+    lines.push(Line::from(""));
+    for line in m.body.lines() {
+        lines.push(Line::from(line.to_string()));
+    }
+    let p = Paragraph::new(Text::from(lines))
         .block(Block::bordered().title(format!(" {} ", truncate(&m.subject, 60))))
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);

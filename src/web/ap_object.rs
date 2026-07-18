@@ -30,7 +30,8 @@ use url::Url;
 
 use crate::config::Federation;
 use crate::services::federation::{
-    AS_CONTEXT, Origin, content, ensure_person_keys, follows, policy, queue, split_handle, timeline,
+    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, policy, queue, split_handle,
+    timeline,
 };
 use crate::util::now_unix;
 
@@ -40,6 +41,10 @@ use crate::util::now_unix;
 pub struct AppData {
     pub pool: SqlitePool,
     pub origin: Origin,
+    /// Whether to accept inbound remote DMs into the mailbox (#110). Snapshotted
+    /// at startup from `[federation] allow_remote_dms`, like the rest of the
+    /// federation config — toggling it needs a restart.
+    pub allow_remote_dms: bool,
 }
 
 /// Error type for the federation HTTP surface. The crate's traits require an
@@ -341,6 +346,35 @@ pub struct Note {
     url: Option<String>,
     #[serde(default)]
     published: Option<String>,
+    /// A content warning / subject line, when present.
+    #[serde(default)]
+    summary: Option<String>,
+    /// Addressing. A note with a local actor in `to`/`cc` but **not** the Public
+    /// collection is a direct message; anything Public is a status.
+    #[serde(default, deserialize_with = "string_or_seq")]
+    to: Vec<String>,
+    #[serde(default, deserialize_with = "string_or_seq")]
+    cc: Vec<String>,
+}
+
+/// AS2 addressing fields may be a single string or an array of strings; accept
+/// both so `"to": "…#Public"` and `"to": ["…"]` both parse.
+fn string_or_seq<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+        Null,
+    }
+    Ok(match OneOrMany::deserialize(de)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+        OneOrMany::Null => Vec::new(),
+    })
 }
 
 /// A remote server's `Accept` of a `Follow` we sent — confirmation that a local
@@ -527,7 +561,7 @@ impl Activity for Create {
     /// spraying us with unrelated posts; the second stops an account from
     /// injecting notes attributed to someone else.
     async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
-        let author_uri = self.object.attributed_to.trim();
+        let author_uri = self.object.attributed_to.trim().to_string();
         if author_uri != self.actor.inner().as_str() {
             tracing::info!(
                 "ignoring Create whose author {author_uri:?} isn't the signer {}",
@@ -535,27 +569,32 @@ impl Activity for Create {
             );
             return Ok(());
         }
-        if !follows::is_followed_locally(&data.pool, author_uri).await? {
+
+        // A note addressed to a local actor but not the Public collection is a
+        // direct message; route it to the mailbox instead of the timeline.
+        let is_public = self
+            .object
+            .to
+            .iter()
+            .chain(&self.object.cc)
+            .any(|a| a == PUBLIC);
+        if !is_public && let Some(recipient_id) = self.local_recipient(&data.pool).await? {
+            return self.receive_dm(data, &author_uri, recipient_id).await;
+        }
+
+        // Otherwise a public status — cached only from accounts a local user
+        // follows.
+        if !follows::is_followed_locally(&data.pool, &author_uri).await? {
             tracing::debug!("dropping status from un-followed author {author_uri}");
             return Ok(());
         }
-
         let text = content::html_to_text(&self.object.content);
-        // The author's handle: prefer the stored `user@host` from when we fetched
-        // the actor; fall back to deriving it from the URI.
-        let handle = author_handle(&data.pool, author_uri).await;
-        let published = self
-            .object
-            .published
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.timestamp())
-            .unwrap_or_else(now_unix);
-
+        let handle = author_handle(&data.pool, &author_uri).await;
+        let published = self.published_unix();
         let fresh = timeline::insert(
             &data.pool,
             self.object.id.as_str(),
-            author_uri,
+            &author_uri,
             &handle,
             &text,
             self.object.url.as_deref(),
@@ -564,6 +603,82 @@ impl Activity for Create {
         .await?;
         if fresh {
             tracing::info!("timeline: cached status {} from {handle}", self.object.id);
+        }
+        Ok(())
+    }
+}
+
+impl Create {
+    /// The note's `published` time as Unix seconds, falling back to now.
+    fn published_unix(&self) -> i64 {
+        self.object
+            .published
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
+            .unwrap_or_else(now_unix)
+    }
+
+    /// The id of a local, non-guest user this note is addressed to, if any.
+    async fn local_recipient(&self, pool: &SqlitePool) -> Result<Option<i64>, ApError> {
+        for uri in self.object.to.iter().chain(&self.object.cc) {
+            let row: Option<(i64,)> = sqlx::query_as(
+                "SELECT id FROM users WHERE actor_uri = ? AND is_remote = 0 AND role != 'guest'",
+            )
+            .bind(uri)
+            .fetch_optional(pool)
+            .await?;
+            if let Some((id,)) = row {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Store an inbound direct message in the recipient's mailbox — behind the
+    /// `allow_remote_dms` opt-in. Fediverse DMs are not private; the mailbox UI
+    /// labels these, and a board that hasn't opted in drops them silently.
+    async fn receive_dm(
+        self,
+        data: &Data<AppData>,
+        author_uri: &str,
+        recipient_id: i64,
+    ) -> Result<(), ApError> {
+        if !data.allow_remote_dms {
+            tracing::info!("dropping inbound DM from {author_uri} (allow_remote_dms is off)");
+            return Ok(());
+        }
+        let from_id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM users WHERE actor_uri = ? AND is_remote = 1")
+                .bind(author_uri)
+                .fetch_optional(&data.pool)
+                .await?;
+        let Some(from_id) = from_id else {
+            tracing::warn!("inbound DM from unknown actor {author_uri}; ignoring");
+            return Ok(());
+        };
+        let body = content::html_to_text(&self.object.content);
+        let subject = self
+            .object
+            .summary
+            .as_deref()
+            .map(content::html_to_text)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Direct message".to_string());
+        let fresh = crate::services::mail::store_inbound_remote(
+            &data.pool,
+            from_id,
+            recipient_id,
+            &subject,
+            &body,
+            self.object.id.as_str(),
+        )
+        .await?;
+        if fresh {
+            tracing::info!(
+                "mailbox: stored inbound DM {} from {author_uri}",
+                self.object.id
+            );
         }
         Ok(())
     }
@@ -1031,7 +1146,11 @@ pub async fn build_config(
         origin_host,
         allowlist_only: fed.allowlist_only,
     };
-    let app_data = AppData { pool, origin };
+    let app_data = AppData {
+        pool,
+        origin,
+        allow_remote_dms: fed.allow_remote_dms,
+    };
     let config = FederationConfig::builder()
         .domain(app_data.origin.host().to_string())
         .app_data(app_data)

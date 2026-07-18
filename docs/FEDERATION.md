@@ -177,8 +177,14 @@ Phase 4 (#110) is sliced:
   *limited*, not direct). The compose screen labels a remote recipient as leaving the BBS and not private;
   a local copy is recorded (`mail` row to the recipient's shadow actor). Local mail is untouched and stays
   private.
-- **110b — inbound remote DM**: a direct `Create{Note}` addressed to one of our local actors (not Public)
-  lands in that user's mailbox, visibly tagged as a non-private fediverse message.
+- **110b — inbound remote DM** (this slice): a direct `Create{Note}` addressed to one of our local actors
+  (in `to`/`cc`, and **not** the Public collection) lands in that user's mailbox instead of the timeline —
+  behind the same `allow_remote_dms` opt-in (off → dropped silently). The content degrades to text; the
+  `summary` (if any) becomes the subject, else "Direct message"; storage is idempotent on the Note's
+  `ap_id` (migration 0015 adds `mail.ap_id`). The mailbox and reader label these as non-private fediverse
+  messages. Note the subject round-trips imperfectly BBS↔BBS: 110a encodes the subject as a **bold first
+  line** in `content` (not `summary`, which is Mastodon's content-warning field), so a receiving bbs-rs
+  recovers it as body text, not a separate subject — a deliberate Mastodon-friendly trade.
 
 Phase 2 leads because it pays off against live Mastodon sooner than board syndication, which needs a
 second bbs-rs instance to exist before it means anything.
