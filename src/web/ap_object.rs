@@ -29,7 +29,9 @@ use std::time::Duration;
 use url::Url;
 
 use crate::config::Federation;
-use crate::services::federation::{AS_CONTEXT, Origin, content, follows, policy, queue, timeline};
+use crate::services::federation::{
+    AS_CONTEXT, Origin, content, ensure_person_keys, follows, policy, queue, split_handle, timeline,
+};
 use crate::util::now_unix;
 
 /// App state handed to the federation library. `Data<AppData>` derefs to this
@@ -341,11 +343,24 @@ pub struct Note {
     published: Option<String>,
 }
 
+/// A remote server's `Accept` of a `Follow` we sent — confirmation that a local
+/// user now follows a remote account. `object` is our original `Follow` echoed
+/// back, so it carries who followed whom.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptFollow {
+    #[serde(rename = "type")]
+    kind: AcceptType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    object: Follow,
+}
+
 /// The catch-all for any activity we don't model yet — every well-formed one.
 /// [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
 /// still fetches the signing actor and verifies the HTTP signature before this
 /// runs; we simply don't act on activities outside [`InboundActivity`]'s typed
-/// arms. Remote statuses (`Create{Note}`) get a real arm in Slice C.
+/// arms.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnyActivity {
     id: Url,
@@ -369,6 +384,7 @@ pub enum InboundActivity {
     Follow(Follow),
     Undo(Undo),
     Create(Create),
+    Accept(AcceptFollow),
     Other(AnyActivity),
 }
 
@@ -579,6 +595,43 @@ async fn author_handle(pool: &SqlitePool, actor_uri: &str) -> String {
 }
 
 #[async_trait::async_trait]
+impl Activity for AcceptFollow {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Mark our outbound follow accepted. The signer (`actor`) must be the
+    /// account that was followed (`object.object`) — a server can only accept
+    /// follows addressed to it, not vouch for someone else's.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let follower = self.object.actor.inner().as_str(); // our local user
+        let followed = self.object.object.inner().as_str(); // the remote account
+        if self.actor.inner().as_str() != followed {
+            tracing::warn!(
+                "Accept signer {} does not match the followed account {followed}; ignoring",
+                self.actor.inner()
+            );
+            return Ok(());
+        }
+        if follows::mark_accepted(&data.pool, follower, followed).await? {
+            tracing::info!("follow accepted: {follower} now follows {followed}");
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl Activity for AnyActivity {
     type DataType = AppData;
     type Error = ApError;
@@ -619,6 +672,7 @@ impl Activity for InboundActivity {
             InboundActivity::Follow(a) => a.id(),
             InboundActivity::Undo(a) => a.id(),
             InboundActivity::Create(a) => a.id(),
+            InboundActivity::Accept(a) => a.id(),
             InboundActivity::Other(a) => a.id(),
         }
     }
@@ -628,6 +682,7 @@ impl Activity for InboundActivity {
             InboundActivity::Follow(a) => a.actor(),
             InboundActivity::Undo(a) => a.actor(),
             InboundActivity::Create(a) => a.actor(),
+            InboundActivity::Accept(a) => a.actor(),
             InboundActivity::Other(a) => a.actor(),
         }
     }
@@ -637,6 +692,7 @@ impl Activity for InboundActivity {
             InboundActivity::Follow(a) => a.verify(data).await,
             InboundActivity::Undo(a) => a.verify(data).await,
             InboundActivity::Create(a) => a.verify(data).await,
+            InboundActivity::Accept(a) => a.verify(data).await,
             InboundActivity::Other(a) => a.verify(data).await,
         }
     }
@@ -646,6 +702,7 @@ impl Activity for InboundActivity {
             InboundActivity::Follow(a) => a.receive(data).await,
             InboundActivity::Undo(a) => a.receive(data).await,
             InboundActivity::Create(a) => a.receive(data).await,
+            InboundActivity::Accept(a) => a.receive(data).await,
             InboundActivity::Other(a) => a.receive(data).await,
         }
     }
@@ -757,6 +814,109 @@ async fn deliver_one(data: &Data<AppData>, d: &queue::Delivery) -> anyhow::Resul
             .map_err(|e| anyhow::anyhow!("delivering {}: {e}", d.id))?;
     }
     Ok(())
+}
+
+/// Follow a remote account (`user@host`) on behalf of a local user.
+///
+/// Resolves the handle via WebFinger (which fetches and caches the remote
+/// actor), mints the local user's keypair so the delivery can be signed, records
+/// a `pending` follow, and queues the signed `Follow`. The remote answers with
+/// an `Accept` — handled by [`AcceptFollow`] — which flips the edge to
+/// `accepted`. Returns the resolved remote handle for display.
+pub async fn follow(
+    data: &Data<AppData>,
+    origin: &Origin,
+    local_user: &crate::db::models::User,
+    handle: &str,
+) -> anyhow::Result<String> {
+    use activitypub_federation::fetch::webfinger::webfinger_resolve_actor;
+
+    let (user, domain) = split_handle(handle)
+        .ok_or_else(|| anyhow::anyhow!("{handle:?} is not a user@host handle"))?;
+    // Mint the local actor first: the drain signs the Follow with its key.
+    let keys = ensure_person_keys(&data.pool, origin, local_user).await?;
+    let local_uri = keys.actor_uri;
+
+    let remote: FedActor =
+        webfinger_resolve_actor::<AppData, FedActor>(&format!("{user}@{domain}"), data)
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving {handle}: {}", e.0))?;
+    let remote_uri = remote.ap_id.inner().to_string();
+
+    let follow_id = format!("{local_uri}#follow/{}", now_unix());
+    let activity = serde_json::json!({
+        "@context": AS_CONTEXT,
+        "id": follow_id,
+        "type": "Follow",
+        "actor": local_uri,
+        "object": remote_uri,
+    })
+    .to_string();
+
+    follows::request(&data.pool, &local_uri, &remote_uri, &follow_id).await?;
+    queue::enqueue(
+        &data.pool,
+        &local_uri,
+        remote.inbox.as_str(),
+        &activity,
+        Some(&follow_id),
+    )
+    .await?;
+    Ok(remote.username)
+}
+
+/// Unfollow a remote account a local user follows. Drops the local edge and
+/// queues a signed `Undo{Follow}` so the remote stops delivering. Returns
+/// whether a follow existed. Uses the cached actor row — no network fetch.
+pub async fn unfollow(
+    data: &Data<AppData>,
+    origin: &Origin,
+    local_user: &crate::db::models::User,
+    handle: &str,
+) -> anyhow::Result<bool> {
+    let local_uri = origin.person(&local_user.username);
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT actor_uri, inbox_url FROM users WHERE username = ? AND is_remote = 1",
+    )
+    .bind(handle)
+    .fetch_optional(&data.pool)
+    .await?;
+    let Some((remote_uri, Some(inbox))) = row else {
+        return Ok(false);
+    };
+
+    // Echo the original Follow's id when we have it, so the remote can match the
+    // Undo to the exact follow.
+    let follow_uri: Option<String> = sqlx::query_scalar(
+        "SELECT follow_uri FROM ap_follows WHERE actor_uri = ? AND object_uri = ?",
+    )
+    .bind(&local_uri)
+    .bind(&remote_uri)
+    .fetch_optional(&data.pool)
+    .await?
+    .flatten();
+
+    if !follows::remove(&data.pool, &local_uri, &remote_uri).await? {
+        return Ok(false);
+    }
+
+    let undo_id = format!("{local_uri}#unfollow/{}", now_unix());
+    let inner_follow_id = follow_uri.unwrap_or_else(|| format!("{local_uri}#follow"));
+    let activity = serde_json::json!({
+        "@context": AS_CONTEXT,
+        "id": undo_id,
+        "type": "Undo",
+        "actor": local_uri,
+        "object": {
+            "id": inner_follow_id,
+            "type": "Follow",
+            "actor": local_uri,
+            "object": remote_uri,
+        },
+    })
+    .to_string();
+    queue::enqueue(&data.pool, &local_uri, &inbox, &activity, Some(&undo_id)).await?;
+    Ok(true)
 }
 
 /// Build the federation library config from our validated settings.

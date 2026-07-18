@@ -56,6 +56,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Bulletins => render_bulletins(f, body, app),
         Screen::ReadBulletin => render_read_bulletin(f, body, app),
         Screen::Oneliners => render_oneliners(f, body, app),
+        Screen::Timeline => render_timeline(f, body, app),
         Screen::ComposeOneliner => render_form(f, body, " New Oneliner ", app),
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
@@ -287,6 +288,53 @@ fn render_oneliners(f: &mut Frame, area: Rect, app: &App) {
     }
     // A read-only wall: reuse the list renderer with no selection highlight.
     render_selectable(f, area, " Oneliners ", lines, usize::MAX);
+}
+
+fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
+    if app.timeline.is_empty() {
+        return placeholder(
+            f,
+            area,
+            " Timeline ",
+            "No statuses yet. Follow accounts with `bbsctl ap-follow <user> <@name@host>`.",
+        );
+    }
+    // Each status is a header line (handle · time) followed by its wrapped,
+    // already-degraded text, then a blank spacer. A leading marker per status
+    // lets the selection highlight land on the header row.
+    let inner = area.width.saturating_sub(2) as usize;
+    let width = inner.max(1);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut header_rows: Vec<usize> = Vec::new();
+    for e in &app.timeline {
+        header_rows.push(lines.len());
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("@{}", e.author_handle),
+                Style::default().fg(app.theme.accent),
+            ),
+            Span::styled(
+                format!("  · {}", fmt_time(e.published)),
+                Style::default().fg(app.theme.dim),
+            ),
+        ]));
+        for para in e.content.lines() {
+            if para.is_empty() {
+                lines.push(Line::from(""));
+            } else {
+                for row in wrap_text(para, width) {
+                    lines.push(Line::from(row));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    // Map the selected status to its header row so ↑/↓ steps status-by-status.
+    let selected = header_rows
+        .get(app.timeline_sel)
+        .copied()
+        .unwrap_or(usize::MAX);
+    render_selectable(f, area, " Timeline ", lines, selected);
 }
 
 fn render_boards(f: &mut Frame, area: Rect, app: &App) {
@@ -888,6 +936,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadBulletin => "Bulletin",
         Screen::Oneliners => "Oneliners",
         Screen::ComposeOneliner => "New Oneliner",
+        Screen::Timeline => "Timeline",
         Screen::BoardList => "Boards",
         Screen::MessageList => "Messages",
         Screen::ReadMessage => "Reading",
@@ -923,6 +972,7 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
         Screen::Oneliners => " n new · Esc back ",
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
+        Screen::Timeline => " ↑/↓ scroll · r refresh · Esc back ",
         Screen::BoardList => {
             if is_admin {
                 " ↑/↓ move · Enter open · l lock/unlock · Esc back "

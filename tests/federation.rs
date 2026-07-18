@@ -1365,3 +1365,96 @@ async fn a_redelivered_status_is_cached_only_once() {
 
     assert_eq!(timeline::count(&pool).await.unwrap(), 1);
 }
+
+// ---- Slice C2: outbound follow lifecycle (#109) ----------------------------
+
+/// A local user's outbound follow is `pending` until the remote answers, then
+/// an inbound `Accept` flips it to `accepted`.
+#[tokio::test]
+async fn an_accept_confirms_a_pending_outbound_follow() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::follows;
+    use bbs_rs::web::ap_object::AcceptFollow;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+
+    // alice asks to follow bob.
+    let follow_id = format!("{alice}#follow/1");
+    follows::request(&pool, &alice, &bob, &follow_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        follows::following(&pool, &alice).await.unwrap(),
+        vec![(bob.clone(), "pending".to_string())]
+    );
+    // Not yet a source for the timeline — the follow isn't accepted.
+    assert!(!follows::is_followed_locally(&pool, &bob).await.unwrap());
+
+    // bob's server accepts, echoing our Follow back.
+    let data = fed_data(&pool).await;
+    let accept: AcceptFollow = serde_json::from_value(serde_json::json!({
+        "type": "Accept",
+        "id": "https://remote.social/activities/accept/1",
+        "actor": bob,
+        "object": {
+            "type": "Follow",
+            "id": follow_id,
+            "actor": alice,
+            "object": bob,
+        }
+    }))
+    .unwrap();
+    accept.receive(&data).await.unwrap();
+
+    assert_eq!(
+        follows::following(&pool, &alice).await.unwrap(),
+        vec![(bob.clone(), "accepted".to_string())]
+    );
+    // Now a followed account: its statuses would be cached.
+    assert!(follows::is_followed_locally(&pool, &bob).await.unwrap());
+}
+
+/// An `Accept` signed by someone other than the account that was followed is
+/// ignored — a server can only accept follows addressed to it.
+#[tokio::test]
+async fn an_accept_from_the_wrong_signer_is_ignored() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::follows;
+    use bbs_rs::web::ap_object::AcceptFollow;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+
+    let follow_id = format!("{alice}#follow/1");
+    follows::request(&pool, &alice, &bob, &follow_id)
+        .await
+        .unwrap();
+
+    // carol signs an Accept for a follow of bob — not hers to accept.
+    let data = fed_data(&pool).await;
+    let accept: AcceptFollow = serde_json::from_value(serde_json::json!({
+        "type": "Accept",
+        "id": "https://other.example/accept/1",
+        "actor": carol,
+        "object": {
+            "type": "Follow",
+            "id": follow_id,
+            "actor": alice,
+            "object": bob,
+        }
+    }))
+    .unwrap();
+    accept.receive(&data).await.unwrap();
+
+    assert_eq!(
+        follows::following(&pool, &alice).await.unwrap(),
+        vec![(bob, "pending".to_string())],
+        "the follow stays pending"
+    );
+}
