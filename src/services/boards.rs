@@ -56,6 +56,33 @@ pub async fn list_messages(pool: &SqlitePool, board_id: i64) -> Result<Vec<Messa
     Ok(messages)
 }
 
+/// A board's root posts (`parent_id IS NULL`), newest first, up to `limit`,
+/// with the total root count. Backs the Group outbox (#111): only top-level
+/// posts become `Page` objects; replies are `Note`s under them.
+pub async fn root_posts(
+    pool: &SqlitePool,
+    board_id: i64,
+    limit: i64,
+) -> Result<(Vec<Message>, i64)> {
+    let rows = sqlx::query_as::<_, Message>(
+        "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
+         FROM messages m JOIN users u ON u.id = m.author_id \
+         WHERE m.board_id = ? AND m.parent_id IS NULL ORDER BY m.id DESC LIMIT ?",
+    )
+    .bind(board_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE board_id = ? AND parent_id IS NULL",
+    )
+    .bind(board_id)
+    .fetch_one(pool)
+    .await?;
+    Ok((rows, total))
+}
+
 /// A message plus its depth in the reply tree (0 = top-level thread root).
 #[derive(Debug, Clone)]
 pub struct ThreadItem {

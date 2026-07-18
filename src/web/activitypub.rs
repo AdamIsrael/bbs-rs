@@ -94,26 +94,33 @@ pub async fn webfinger(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let user = match federation::find_local_actor(&state.pool, username).await {
-        Ok(Some(u)) => u,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+    // A local user takes precedence; otherwise try a board Group by slug, so
+    // `@rust@host` resolves the board's Group actor (FEP-1b12, #111).
+    let (acct, actor_uri) = match federation::find_local_actor(&state.pool, username).await {
+        Ok(Some(u)) => (origin.acct(&u.username), origin.person(&u.username)),
+        Ok(None) => match federation::find_board_by_slug(&state.pool, username).await {
+            Ok(Some(_)) => (origin.acct(username), origin.group(username)),
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => {
+                tracing::error!("webfinger board lookup for {username:?}: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        },
         Err(e) => {
             tracing::error!("webfinger lookup for {username:?}: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    let actor_url = match url::Url::parse(&origin.person(&user.username)) {
+    let actor_url = match url::Url::parse(&actor_uri) {
         Ok(u) => u,
         Err(e) => {
             tracing::error!("building actor url: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let response = activitypub_federation::fetch::webfinger::build_webfinger_response(
-        origin.acct(&user.username),
-        actor_url,
-    );
+    let response =
+        activitypub_federation::fetch::webfinger::build_webfinger_response(acct, actor_url);
     ApJson(JRD_CONTENT_TYPE, response).into_response()
 }
 
@@ -357,4 +364,144 @@ pub async fn person(State(state): State<WebState>, Path(username): Path<String>)
         id: keys.actor_uri,
     };
     ApJson(AP_CONTENT_TYPE, doc).into_response()
+}
+
+/// A board as an ActivityPub `Group` (FEP-1b12), served at `/c/{slug}` (#111).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    #[serde(rename = "@context")]
+    context: Vec<String>,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: String,
+    preferred_username: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    summary: String,
+    inbox: String,
+    outbox: String,
+    followers: String,
+    public_key: PublicKeyJson,
+    url: String,
+    /// FEP-1b12: the Group auto-accepts follows (anyone may subscribe to a board).
+    manually_approves_followers: bool,
+}
+
+/// `GET /c/{slug}` — the board's Group actor document.
+pub async fn group(State(state): State<WebState>, Path(slug): Path<String>) -> Response {
+    let Some(origin) = origin(&state) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let board_id = match federation::find_board_by_slug(&state.pool, &slug).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("group lookup for {slug:?}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let board = match crate::services::boards::get_board(&state.pool, board_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("loading board {board_id}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let keys = match federation::ensure_group_keys(&state.pool, &origin, board_id).await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!("minting group for board {board_id}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let doc = Group {
+        context: vec![
+            "https://www.w3.org/ns/activitystreams".into(),
+            "https://w3id.org/security/v1".into(),
+        ],
+        kind: "Group",
+        preferred_username: keys.slug.clone(),
+        name: board.name,
+        summary: board.description,
+        inbox: origin.group_inbox(&keys.slug),
+        outbox: origin.group_outbox(&keys.slug),
+        followers: origin.group_followers(&keys.slug),
+        public_key: PublicKeyJson {
+            id: format!("{}#main-key", keys.actor_uri),
+            owner: keys.actor_uri.clone(),
+            public_key_pem: keys.public_key,
+        },
+        url: keys.actor_uri.clone(),
+        manually_approves_followers: false,
+        id: keys.actor_uri,
+    };
+    ApJson(AP_CONTENT_TYPE, doc).into_response()
+}
+
+/// An `OrderedCollection` of a board's `Announce{Create{Page}}` — the Group outbox.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupOutbox {
+    #[serde(rename = "@context")]
+    context: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: String,
+    total_items: i64,
+    ordered_items: Vec<federation::objects::Announce>,
+}
+
+/// `GET /c/{slug}/outbox` — the board's root posts, each as the Group's
+/// `Announce{Create{Page}}` (the same object a subscriber receives).
+pub async fn group_outbox(State(state): State<WebState>, Path(slug): Path<String>) -> Response {
+    let Some(origin) = origin(&state) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(Some(board_id)) = federation::find_board_by_slug(&state.pool, &slug).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (roots, total) =
+        match crate::services::boards::root_posts(&state.pool, board_id, OUTBOX_LIMIT).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("group outbox for {slug:?}: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+    let mut items = Vec::with_capacity(roots.len());
+    for m in &roots {
+        let ap_id = match federation::ensure_message_ap_id(&state.pool, &origin, m.id).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!("minting post ap_id {}: {e}", m.id);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        let author_uri = origin.person(&m.author_name);
+        let page = federation::objects::board_page(
+            &origin,
+            &slug,
+            &ap_id,
+            &author_uri,
+            &m.subject,
+            &m.body,
+            m.created_at,
+        );
+        items.push(federation::objects::board_announce(
+            &origin,
+            &slug,
+            &author_uri,
+            page,
+        ));
+    }
+    let collection = GroupOutbox {
+        context: "https://www.w3.org/ns/activitystreams",
+        kind: "OrderedCollection",
+        id: origin.group_outbox(&slug),
+        total_items: total,
+        ordered_items: items,
+    };
+    ApJson(AP_CONTENT_TYPE, collection).into_response()
 }
