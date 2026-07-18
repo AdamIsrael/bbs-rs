@@ -15,7 +15,7 @@
 use activitypub_federation::config::{Data, FederationConfig, UrlVerifier};
 use activitypub_federation::error::Error as ApFederationError;
 use activitypub_federation::fetch::object_id::ObjectId;
-use activitypub_federation::kinds::activity::{AcceptType, FollowType, UndoType};
+use activitypub_federation::kinds::activity::{AcceptType, CreateType, FollowType, UndoType};
 use activitypub_federation::kinds::actor::PersonType;
 use activitypub_federation::protocol::public_key::PublicKey;
 use activitypub_federation::protocol::verification::verify_domains_match;
@@ -29,7 +29,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::config::Federation;
-use crate::services::federation::{AS_CONTEXT, Origin, follows, policy, queue};
+use crate::services::federation::{AS_CONTEXT, Origin, content, follows, policy, queue, timeline};
 use crate::util::now_unix;
 
 /// App state handed to the federation library. `Data<AppData>` derefs to this
@@ -311,6 +311,36 @@ enum UndoObject {
     Other(serde_json::Value),
 }
 
+/// A remote status delivered to us: `Create` wrapping a `Note`. Arrives because
+/// a local user follows the author. We only read the fields a terminal timeline
+/// needs; unmodeled fields are ignored.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Create {
+    #[serde(rename = "type")]
+    kind: CreateType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    object: Note,
+}
+
+/// The inbound wire form of a `Note`. Distinct from the outbound
+/// [`objects::Note`](crate::services::federation::objects::Note): here we accept
+/// what Mastodon sends (HTML `content`, optional `url`/`published`) and are
+/// lenient about missing fields.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Note {
+    id: Url,
+    attributed_to: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    published: Option<String>,
+}
+
 /// The catch-all for any activity we don't model yet — every well-formed one.
 /// [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
 /// still fetches the signing actor and verifies the HTTP signature before this
@@ -338,6 +368,7 @@ pub struct AnyActivity {
 pub enum InboundActivity {
     Follow(Follow),
     Undo(Undo),
+    Create(Create),
     Other(AnyActivity),
 }
 
@@ -458,6 +489,96 @@ impl Activity for Undo {
 }
 
 #[async_trait::async_trait]
+impl Activity for Create {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Cache a remote status for the timeline — but only if a local user follows
+    /// its author, and only if the note's author is the actor who signed the
+    /// delivery. The first check stops a followed account (or anyone) from
+    /// spraying us with unrelated posts; the second stops an account from
+    /// injecting notes attributed to someone else.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let author_uri = self.object.attributed_to.trim();
+        if author_uri != self.actor.inner().as_str() {
+            tracing::info!(
+                "ignoring Create whose author {author_uri:?} isn't the signer {}",
+                self.actor.inner()
+            );
+            return Ok(());
+        }
+        if !follows::is_followed_locally(&data.pool, author_uri).await? {
+            tracing::debug!("dropping status from un-followed author {author_uri}");
+            return Ok(());
+        }
+
+        let text = content::html_to_text(&self.object.content);
+        // The author's handle: prefer the stored `user@host` from when we fetched
+        // the actor; fall back to deriving it from the URI.
+        let handle = author_handle(&data.pool, author_uri).await;
+        let published = self
+            .object
+            .published
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
+            .unwrap_or_else(now_unix);
+
+        let fresh = timeline::insert(
+            &data.pool,
+            self.object.id.as_str(),
+            author_uri,
+            &handle,
+            &text,
+            self.object.url.as_deref(),
+            published,
+        )
+        .await?;
+        if fresh {
+            tracing::info!("timeline: cached status {} from {handle}", self.object.id);
+        }
+        Ok(())
+    }
+}
+
+/// The display handle for a remote actor: the stored `user@host` if we've seen
+/// them, otherwise derived from the URI (`{last-path-segment}@{host}`).
+async fn author_handle(pool: &SqlitePool, actor_uri: &str) -> String {
+    if let Ok(Some(name)) =
+        sqlx::query_scalar::<_, String>("SELECT username FROM users WHERE actor_uri = ?")
+            .bind(actor_uri)
+            .fetch_optional(pool)
+            .await
+    {
+        return name;
+    }
+    match Url::parse(actor_uri) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("unknown").to_string();
+            let user = u
+                .path_segments()
+                .and_then(|mut s| s.next_back())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown");
+            format!("{user}@{host}")
+        }
+        Err(_) => actor_uri.to_string(),
+    }
+}
+
+#[async_trait::async_trait]
 impl Activity for AnyActivity {
     type DataType = AppData;
     type Error = ApError;
@@ -497,6 +618,7 @@ impl Activity for InboundActivity {
         match self {
             InboundActivity::Follow(a) => a.id(),
             InboundActivity::Undo(a) => a.id(),
+            InboundActivity::Create(a) => a.id(),
             InboundActivity::Other(a) => a.id(),
         }
     }
@@ -505,6 +627,7 @@ impl Activity for InboundActivity {
         match self {
             InboundActivity::Follow(a) => a.actor(),
             InboundActivity::Undo(a) => a.actor(),
+            InboundActivity::Create(a) => a.actor(),
             InboundActivity::Other(a) => a.actor(),
         }
     }
@@ -513,6 +636,7 @@ impl Activity for InboundActivity {
         match self {
             InboundActivity::Follow(a) => a.verify(data).await,
             InboundActivity::Undo(a) => a.verify(data).await,
+            InboundActivity::Create(a) => a.verify(data).await,
             InboundActivity::Other(a) => a.verify(data).await,
         }
     }
@@ -521,6 +645,7 @@ impl Activity for InboundActivity {
         match self {
             InboundActivity::Follow(a) => a.receive(data).await,
             InboundActivity::Undo(a) => a.receive(data).await,
+            InboundActivity::Create(a) => a.receive(data).await,
             InboundActivity::Other(a) => a.receive(data).await,
         }
     }
