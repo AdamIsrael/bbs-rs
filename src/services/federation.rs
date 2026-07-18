@@ -347,6 +347,86 @@ pub mod queue {
     }
 }
 
+/// Domain-level federation policy, over the `ap_blocks` table.
+///
+/// Two postures (`[federation] allowlist_only`):
+/// - **allowlist** (default): only domains with an `allow` row may federate.
+///   For a small board this is a feature, not a limitation — open federation
+///   means volunteering to moderate the entire internet.
+/// - **blocklist**: anyone may federate except domains with a `block` row.
+pub mod policy {
+    use super::*;
+    use crate::util::now_unix;
+
+    /// Whether `domain` may federate with us under the given posture. Our own
+    /// origin host is always allowed (we federate with ourselves).
+    pub async fn domain_allowed(
+        pool: &SqlitePool,
+        origin_host: &str,
+        domain: &str,
+        allowlist_only: bool,
+    ) -> Result<bool> {
+        let domain = domain.trim().to_ascii_lowercase();
+        if domain.is_empty() {
+            return Ok(false);
+        }
+        if domain.eq_ignore_ascii_case(origin_host) {
+            return Ok(true);
+        }
+        let kind = if allowlist_only { "allow" } else { "block" };
+        let listed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ap_blocks WHERE kind = ? AND lower(domain) = ?",
+        )
+        .bind(kind)
+        .bind(&domain)
+        .fetch_one(pool)
+        .await?;
+        // Allowlist: must be listed. Blocklist: must NOT be listed.
+        Ok(if allowlist_only {
+            listed > 0
+        } else {
+            listed == 0
+        })
+    }
+
+    /// Add or update a policy row (`kind` = "allow" | "block").
+    pub async fn set(pool: &SqlitePool, domain: &str, kind: &str, reason: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO ap_blocks (domain, kind, reason, created_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(domain, kind) DO UPDATE SET reason = excluded.reason",
+        )
+        .bind(domain.trim().to_ascii_lowercase())
+        .bind(kind)
+        .bind(reason)
+        .bind(now_unix())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a policy row. Returns whether one existed.
+    pub async fn unset(pool: &SqlitePool, domain: &str, kind: &str) -> Result<bool> {
+        let n = sqlx::query("DELETE FROM ap_blocks WHERE lower(domain) = ? AND kind = ?")
+            .bind(domain.trim().to_ascii_lowercase())
+            .bind(kind)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// All policy rows of a kind, for operator display.
+    pub async fn list(pool: &SqlitePool, kind: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT domain, reason FROM ap_blocks WHERE kind = ? ORDER BY domain",
+        )
+        .bind(kind)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+}
+
 /// Split a fediverse handle into `(user, domain)`. Accepts `alice@host`,
 /// `@alice@host`, and `acct:alice@host`.
 pub fn split_handle(handle: &str) -> Option<(&str, &str)> {

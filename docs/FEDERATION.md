@@ -128,8 +128,20 @@ it is the load-bearing assumption of the whole approach.
 |---|---|---|---|
 | 0 | Relicense to AGPL-3.0, this doc, issue housekeeping | S | **done** (#114) |
 | 1 | Federated foundation: keypairs, `users` AP columns, WebFinger, `Person`, `[federation]` config | M | **done** (#115) |
-| 2 | **Outbound statuses** — oneliners rework, `Note`, outbox, nodeinfo, delivery-queue storage. No inbox | M–L | in progress (#108) |
-| 3 | **Inbound** — inbox POST, signature verification, `Follow`/`Accept`, remote statuses, timeline screen, allowlist, **content degradation**, queue drain | L | #109 |
+| 2 | **Outbound statuses** — oneliners rework, `Note`, outbox, nodeinfo, delivery-queue storage. No inbox | M–L | **done** (#116) |
+| 3 | **Inbound** — inbox POST, signature verification, `Follow`/`Accept`, remote statuses, timeline screen, allowlist, **content degradation**, queue drain | L | #109 (in progress) |
+
+Phase 3 (#109) is sliced into reviewable PRs:
+
+- **A — inbound plumbing + signature verification** (this slice): the inbox as a POST endpoint, the
+  `Object`/`Actor` impls that let the crate fetch a sender's key, HTTP-signature verification via
+  `receive_activity`, remote actors persisted as `is_remote` shadow rows, and the domain **allowlist**
+  (`ap_blocks` + `bbsctl ap-*`, enforced through the crate's `UrlVerifier`). Signatures are *verified* but
+  activities are not yet *acted on* — a permissive `AnyActivity` accepts-and-logs.
+- **B — Follow/Accept + the queue drain**: record inbound follows, reply `Accept`, and turn on delivery
+  (sign + POST). This is where a user becomes *followable* from real Mastodon.
+- **C — remote statuses + timeline + content degradation**: receive `Create{Note}`, degrade HTML→text and
+  images→`[img: alt]`, and show a timeline.
 | 4 | Remote DMs — opt-in, labeled not-private | M | #110 |
 | 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
 | 6 | Inbound board posts + moderation | L | #112 |

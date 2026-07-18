@@ -162,6 +162,24 @@ enum Cmd {
     },
     /// Remove a oneliner by id (moderation).
     RmOneliner { id: i64 },
+    /// List the ActivityPub federation allow/block domains.
+    ApPeers,
+    /// Allow a domain to federate (needed in the default allowlist posture).
+    ApAllow {
+        domain: String,
+        #[arg(default_value = "")]
+        reason: String,
+    },
+    /// Block a domain from federating (used in blocklist posture).
+    ApBlock {
+        domain: String,
+        #[arg(default_value = "")]
+        reason: String,
+    },
+    /// Remove a domain's allow entry.
+    ApUnallow { domain: String },
+    /// Remove a domain's block entry.
+    ApUnblock { domain: String },
     /// Show recent login attempts.
     Logins {
         /// Filter to a single username.
@@ -485,6 +503,52 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 println!("no oneliner #{id}");
             }
+        }
+        Cmd::ApPeers => {
+            use bbs_rs::services::federation::policy;
+            for kind in ["allow", "block"] {
+                let rows = policy::list(&pool, kind).await?;
+                if rows.is_empty() {
+                    println!("({kind}: none)");
+                } else {
+                    println!("{}:", kind.to_uppercase());
+                    for (domain, reason) in rows {
+                        println!("  {domain:<30} {reason}");
+                    }
+                }
+            }
+        }
+        Cmd::ApAllow { domain, reason } => {
+            bbs_rs::services::federation::policy::set(&pool, &domain, "allow", &reason).await?;
+            println!("allowed {domain}");
+        }
+        Cmd::ApBlock { domain, reason } => {
+            bbs_rs::services::federation::policy::set(&pool, &domain, "block", &reason).await?;
+            println!("blocked {domain}");
+        }
+        Cmd::ApUnallow { domain } => {
+            let removed =
+                bbs_rs::services::federation::policy::unset(&pool, &domain, "allow").await?;
+            println!(
+                "{}",
+                if removed {
+                    format!("removed allow for {domain}")
+                } else {
+                    format!("no allow entry for {domain}")
+                }
+            );
+        }
+        Cmd::ApUnblock { domain } => {
+            let removed =
+                bbs_rs::services::federation::policy::unset(&pool, &domain, "block").await?;
+            println!(
+                "{}",
+                if removed {
+                    format!("removed block for {domain}")
+                } else {
+                    format!("no block entry for {domain}")
+                }
+            );
         }
         Cmd::Logins {
             user,
