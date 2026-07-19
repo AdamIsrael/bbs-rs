@@ -34,7 +34,7 @@ use crate::services::federation::{
     AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, lifecycle, mirror,
     moderation, policy, queue, split_handle, timeline,
 };
-use crate::util::now_unix;
+use crate::util::{now_unix, reply_subject};
 
 /// App state handed to the federation library. `Data<AppData>` derefs to this
 /// in the inbox handler and every trait method.
@@ -443,6 +443,9 @@ pub struct AnnouncedPage {
     attributed_to: String,
     #[serde(default)]
     name: Option<String>,
+    /// Set when the announced object is a reply `Note` (#139).
+    #[serde(default)]
+    in_reply_to: Option<String>,
     #[serde(default)]
     content: String,
     #[serde(default)]
@@ -1078,7 +1081,28 @@ impl Activity for Announce {
         let group_handle = author_handle(&data.pool, group_uri).await;
         let author_handle = author_handle(&data.pool, page.attributed_to.trim()).await;
         let content = content::html_to_text(&page.content);
-        let subject = page.name.unwrap_or_else(|| "(untitled)".to_string());
+        let in_reply_to = page
+            .in_reply_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        // A bbs-rs peer sends `name` even on a reply Note, so BBS↔BBS keeps the
+        // real subject. Everyone else omits it — hence the `Re: <parent>` fallback
+        // for a reply whose parent we hold, and only then "(untitled)".
+        let subject = match page
+            .name
+            .map(|n| content::html_to_text(&n))
+            .filter(|n| !n.is_empty())
+        {
+            Some(name) => name,
+            None => match in_reply_to {
+                Some(parent) => mirror::subject_of(&data.pool, parent)
+                    .await?
+                    .map(|s| reply_subject(&s))
+                    .unwrap_or_else(|| "(untitled reply)".to_string()),
+                None => "(untitled)".to_string(),
+            },
+        };
         let published = page
             .published
             .as_deref()
@@ -1097,6 +1121,7 @@ impl Activity for Announce {
             &content,
             page.url.as_deref(),
             published,
+            in_reply_to,
         )
         .await?;
         if fresh {

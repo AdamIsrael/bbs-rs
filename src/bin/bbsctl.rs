@@ -688,17 +688,23 @@ async fn main() -> anyhow::Result<()> {
                 .await?
                 .with_context(|| format!("no followed board {board:?} — follow it first"))?
             };
-            let posts = mirror::recent(&pool, &group_uri, limit).await?;
+            // Threaded, like the in-BBS screen (#139) — a flat list of a
+            // conversation misrepresents it.
+            let posts = mirror::thread(&pool, &group_uri, limit).await?;
             if posts.is_empty() {
                 println!("no mirrored posts from {board}");
             } else {
-                for p in posts {
+                for item in posts {
+                    let p = item.post;
+                    let pad = "  ".repeat(item.depth as usize);
+                    let lead = if item.depth > 0 { "↳ " } else { "" };
                     println!(
-                        "  {}  {} — {}\n      {}",
+                        "  {pad}{}  {}{} — {}\n      {pad}{}",
                         fmt_time(p.published),
+                        lead,
                         p.author_handle,
                         p.subject,
-                        p.content.replace('\n', "\n      ")
+                        p.content.replace('\n', &format!("\n      {pad}"))
                     );
                 }
             }
