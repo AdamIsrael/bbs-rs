@@ -1637,3 +1637,136 @@ async fn mail_unread_count_tracks_reads() {
     mail::read_mail(&pool, inbox[0].id, bob.id).await.unwrap();
     assert_eq!(mail::unread_count(&pool, bob.id).await.unwrap(), 1);
 }
+
+// ---- #70: mail delete, reply/forward prefill --------------------------------
+
+#[tokio::test]
+async fn deleting_mail_is_scoped_to_the_recipient() {
+    use bbs_rs::services::{auth, mail};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    mail::send_mail(&pool, &alice, "bob", "Hello", "hi bob", &Default::default())
+        .await
+        .unwrap();
+    let m = mail::inbox(&pool, bob.id).await.unwrap().remove(0);
+
+    // Alice (the sender, not the recipient) can't delete it from bob's mailbox.
+    assert!(
+        !mail::delete_mail(&pool, m.id, alice.id).await.unwrap(),
+        "only the recipient can delete"
+    );
+    assert_eq!(mail::inbox(&pool, bob.id).await.unwrap().len(), 1);
+
+    // Bob can.
+    assert!(mail::delete_mail(&pool, m.id, bob.id).await.unwrap());
+    assert!(mail::inbox(&pool, bob.id).await.unwrap().is_empty());
+
+    // Deleting again is a no-op, not an error.
+    assert!(!mail::delete_mail(&pool, m.id, bob.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_deleted_message_stops_counting_as_unread() {
+    use bbs_rs::services::{auth, mail};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    mail::send_mail(&pool, &alice, "bob", "New", "unread", &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(mail::unread_count(&pool, bob.id).await.unwrap(), 1);
+
+    let m = mail::inbox(&pool, bob.id).await.unwrap().remove(0);
+    mail::delete_mail(&pool, m.id, bob.id).await.unwrap();
+    assert_eq!(
+        mail::unread_count(&pool, bob.id).await.unwrap(),
+        0,
+        "a deleted message isn't unread — it's gone"
+    );
+}
+
+#[tokio::test]
+async fn reply_prefills_recipient_subject_and_quoted_body() {
+    use bbs_rs::services::{auth, mail};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    mail::send_mail(
+        &pool,
+        &alice,
+        "bob",
+        "Question",
+        "line one\nline two",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let m = mail::inbox(&pool, bob.id).await.unwrap().remove(0);
+
+    let (to, subject, body) = mail::reply_prefill(&m);
+    assert_eq!(to, "alice", "reply goes to the original sender");
+    assert_eq!(subject, "Re: Question");
+    assert!(body.contains("alice wrote:"), "attribution line: {body}");
+    assert!(body.contains("> line one"), "original quoted: {body}");
+    assert!(body.contains("> line two"));
+    assert!(
+        body.ends_with("\n\n"),
+        "trailing blank line for the reply cursor"
+    );
+
+    // A reply to a reply doesn't stack "Re:".
+    let mut m2 = m.clone();
+    m2.subject = "Re: Question".into();
+    assert_eq!(mail::reply_prefill(&m2).1, "Re: Question");
+}
+
+#[tokio::test]
+async fn forward_prefills_subject_and_verbatim_body_without_a_recipient() {
+    use bbs_rs::services::{auth, mail};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    mail::send_mail(
+        &pool,
+        &alice,
+        "bob",
+        "Notice",
+        "the original text",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let m = mail::inbox(&pool, bob.id).await.unwrap().remove(0);
+
+    let (subject, body) = mail::forward_prefill(&m);
+    assert_eq!(subject, "Fwd: Notice");
+    assert!(body.contains("Forwarded message"), "{body}");
+    assert!(body.contains("From: alice"));
+    assert!(
+        body.contains("the original text"),
+        "body verbatim, not quoted"
+    );
+    assert!(!body.contains("> the original"), "forward doesn't quote");
+
+    // Forwarding a forward doesn't stack "Fwd:".
+    let mut m2 = m.clone();
+    m2.subject = "Fwd: Notice".into();
+    assert_eq!(mail::forward_prefill(&m2).0, "Fwd: Notice");
+}

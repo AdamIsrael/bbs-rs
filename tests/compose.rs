@@ -259,3 +259,155 @@ async fn a_multi_line_mail_is_sent() {
         "sending returns to the mailbox"
     );
 }
+
+// ---- #70: mail reply / forward / delete through the App ---------------------
+
+use bbs_rs::db::models::Mail;
+
+/// Put the app on ReadMail with a given message loaded, as if the user had
+/// opened it from the mailbox.
+async fn app_reading_mail(pool: SqlitePool, mail: Mail) -> App {
+    let bob = auth::find_user(&pool, "bob").await.unwrap().unwrap();
+    let mut app = App::new(pool, Presence::new(), config(), bob, 1, Transport::Ssh);
+    app.current_mail = Some(mail);
+    app.screen = Screen::ReadMail;
+    app
+}
+
+async fn seed_mail_to_bob(pool: &SqlitePool) -> Mail {
+    let alice = auth::register_user(pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    auth::register_user(pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    services::mail::send_mail(
+        pool,
+        &alice,
+        "bob",
+        "Hi Bob",
+        "the body\nsecond line",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let bob = auth::find_user(pool, "bob").await.unwrap().unwrap();
+    services::mail::inbox(pool, bob.id).await.unwrap().remove(0)
+}
+
+/// `r` on a read message opens compose prefilled to reply, focused on the body.
+#[tokio::test]
+async fn replying_opens_compose_prefilled() {
+    let pool = setup().await;
+    let m = seed_mail_to_bob(&pool).await;
+    let mut app = app_reading_mail(pool, m).await;
+
+    press(&mut app, KeyCode::Char('r')).await;
+    assert_eq!(app.screen, Screen::ComposeMail);
+    assert_eq!(app.form.value(0), "alice", "reply addressed to the sender");
+    assert_eq!(app.form.value(1), "Re: Hi Bob");
+    assert!(app.body.text().contains("> the body"), "quoted original");
+    assert!(
+        app.body_focused,
+        "cursor starts in the body, header already filled"
+    );
+}
+
+/// `f` opens compose prefilled to forward, with no recipient — focus stays on
+/// the To field so the user picks one.
+#[tokio::test]
+async fn forwarding_opens_compose_needing_a_recipient() {
+    let pool = setup().await;
+    let m = seed_mail_to_bob(&pool).await;
+    let mut app = app_reading_mail(pool, m).await;
+
+    press(&mut app, KeyCode::Char('f')).await;
+    assert_eq!(app.screen, Screen::ComposeMail);
+    assert_eq!(app.form.value(0), "", "no recipient yet");
+    assert_eq!(app.form.value(1), "Fwd: Hi Bob");
+    assert!(app.body.text().contains("Forwarded message"));
+    assert!(
+        !app.body_focused,
+        "focus is on the To field, which is empty"
+    );
+}
+
+/// A reply actually sends, and the quoted body reaches the sender's mailbox.
+#[tokio::test]
+async fn a_reply_is_delivered() {
+    let pool = setup().await;
+    let m = seed_mail_to_bob(&pool).await;
+    let alice_id = auth::find_user(&pool, "alice").await.unwrap().unwrap().id;
+    let mut app = app_reading_mail(pool.clone(), m).await;
+
+    press(&mut app, KeyCode::Char('r')).await;
+    // Type a line above the quote (cursor is in the body).
+    typed(&mut app, "sure, sounds good").await;
+    ctrl_d(&mut app).await;
+
+    let alice_inbox = services::mail::inbox(&pool, alice_id).await.unwrap();
+    let reply = alice_inbox
+        .iter()
+        .find(|m| m.subject == "Re: Hi Bob")
+        .unwrap();
+    assert!(reply.body.contains("sure, sounds good"));
+    assert!(reply.body.contains("> the body"), "quote carried through");
+}
+
+/// `d` on a read message deletes it after a confirm, and returns to the mailbox.
+#[tokio::test]
+async fn deleting_a_read_message_asks_then_removes_it() {
+    let pool = setup().await;
+    let m = seed_mail_to_bob(&pool).await;
+    let bob_id = auth::find_user(&pool, "bob").await.unwrap().unwrap().id;
+    let mut app = app_reading_mail(pool.clone(), m).await;
+
+    press(&mut app, KeyCode::Char('d')).await;
+    assert_eq!(app.screen, Screen::ConfirmDeleteMail, "asks first");
+
+    // Any other key keeps it.
+    press(&mut app, KeyCode::Char('n')).await;
+    assert_eq!(services::mail::inbox(&pool, bob_id).await.unwrap().len(), 1);
+
+    // Confirm removes it and lands back on the mailbox list.
+    app.screen = Screen::ReadMail;
+    press(&mut app, KeyCode::Char('d')).await;
+    press(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(app.screen, Screen::Mailbox);
+    assert!(
+        services::mail::inbox(&pool, bob_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A guest can't reply (guests can't send mail); the compose path stays closed.
+#[tokio::test]
+async fn a_guest_reply_is_refused_at_send() {
+    let pool = setup().await;
+    let m = seed_mail_to_bob(&pool).await;
+    let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+    let mut app = App::new(
+        pool.clone(),
+        Presence::new(),
+        config(),
+        guest,
+        1,
+        Transport::Ssh,
+    );
+    app.current_mail = Some(m);
+    app.screen = Screen::ReadMail;
+
+    press(&mut app, KeyCode::Char('r')).await;
+    typed(&mut app, "trying").await;
+    ctrl_d(&mut app).await;
+    // Still composing, with an explanation, and nothing delivered.
+    assert_eq!(app.screen, Screen::ComposeMail);
+    let alice_id = auth::find_user(&pool, "alice").await.unwrap().unwrap().id;
+    let alice_inbox = services::mail::inbox(&pool, alice_id).await.unwrap();
+    assert!(
+        alice_inbox.iter().all(|m| m.subject != "Re: Hi Bob"),
+        "no reply delivered"
+    );
+}
