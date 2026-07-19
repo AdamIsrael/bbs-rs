@@ -170,7 +170,8 @@ max_length = 500       # max chars per oneliner (0 = no cap; 500 matches Mastodo
 
 Doors are also editable in **`bbscfg`** — a list you can add to, remove from, and reorder (the order is
 what callers see in the menu), with a field screen per door. Removing one takes it out of the config
-only; files on disk are left alone.
+only; files on disk are left alone. Per-screen art (`[art.screens]`) is editable there too, and `bbscfg`
+flags a filename that isn't in the art directory — a typo that would otherwise fail silently at runtime.
 
 A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-style RPG — ships in
 [`doors/`](doors/) (a self-contained workspace built on a reusable `doorkit` library). See
