@@ -65,10 +65,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
         Screen::ReadMessage => render_read_message(f, body, app),
-        Screen::ComposePost => render_form(f, body, " New Post ", app),
+        Screen::ComposePost => render_compose(f, body, " New Post ", app),
         Screen::Mailbox => render_mailbox(f, body, app),
         Screen::ReadMail => render_read_mail(f, body, app),
-        Screen::ComposeMail => render_form(f, body, " Compose Mail ", app),
+        Screen::ComposeMail => render_compose(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
         Screen::Profile => render_profile(f, body, app),
         Screen::EditProfile => render_form(f, body, " Edit Profile ", app),
@@ -996,6 +996,90 @@ fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
     f.render_widget(p, area);
 }
 
+/// The multi-line compose editor (#96): single-line header fields, then a
+/// bordered body area with soft word-wrap and a visible cursor.
+fn render_compose(f: &mut Frame, area: Rect, title: &str, app: &App) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+
+    // A remote (`user@host`) recipient means a fediverse DM — the same
+    // not-private warning the old form showed, kept here.
+    let remote_warn = app.screen == Screen::ComposeMail
+        && app
+            .form
+            .fields
+            .first()
+            .is_some_and(|fld| fld.value.contains('@'));
+
+    let header_lines = app.form.fields.len() as u16 + if remote_warn { 2 } else { 0 };
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(header_lines + 2), Constraint::Min(3)])
+        .split(area);
+
+    // ---- header fields ----
+    let mut lines: Vec<Line> = app
+        .form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let focused = !app.body_focused && i == app.form.focus;
+            let marker = if focused { "> " } else { "  " };
+            let line = Line::from(format!("{}{}: {}", marker, field.label, field.value));
+            if focused {
+                line.style(Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                line
+            }
+        })
+        .collect();
+    if remote_warn {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "⚠  Remote recipient: this message LEAVES the BBS and is NOT private.",
+            Style::default()
+                .fg(app.theme.warning_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(title.to_string())),
+        outer[0],
+    );
+
+    // ---- body ----
+    let body_title = if app.body_focused {
+        " Body — ^D send · Esc cancel "
+    } else {
+        " Body — Tab/Enter to edit "
+    };
+    let block = Block::bordered().title(body_title);
+    let inner = block.inner(outer[1]);
+    f.render_widget(block, outer[1]);
+
+    let width = inner.width.max(1) as usize;
+    let (rows, (cur_row, cur_col)) = app.body.display(width);
+
+    // Scroll so the cursor row stays visible in a tall body.
+    let height = inner.height.max(1) as usize;
+    let top = cur_row.saturating_sub(height.saturating_sub(1));
+    let visible: Vec<Line> = rows
+        .iter()
+        .skip(top)
+        .take(height)
+        .map(|r| Line::from(r.clone()))
+        .collect();
+    f.render_widget(Paragraph::new(Text::from(visible)), inner);
+
+    // Place the terminal cursor when the body has focus, so it blinks where
+    // typing will land.
+    if app.body_focused {
+        let x = inner.x + cur_col as u16;
+        let y = inner.y + (cur_row - top) as u16;
+        f.set_cursor_position((x, y));
+    }
+}
+
 fn render_admin_users(f: &mut Frame, area: Rect, app: &App) {
     if app.admin_users.is_empty() {
         return placeholder(f, area, " Admin · Users ", "No users.");
@@ -1165,9 +1249,10 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
             }
         }
         Screen::ReadMail | Screen::ReadBulletin | Screen::Help => " Esc back ",
-        Screen::ComposePost | Screen::ComposeMail | Screen::Register => {
-            " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel "
+        Screen::ComposePost | Screen::ComposeMail => {
+            " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel "
         }
+        Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · Esc back ",
         Screen::WhoOnline => " ↑/↓ move · Enter profile · r refresh · Esc back ",
         Screen::Profile => {

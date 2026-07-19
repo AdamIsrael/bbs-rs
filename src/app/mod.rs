@@ -4,6 +4,7 @@
 pub mod ansi;
 pub mod door;
 pub mod state;
+pub mod textarea;
 pub mod theme;
 pub mod ui;
 
@@ -169,6 +170,10 @@ pub struct App {
 
     // Shared form for compose/register screens
     pub form: Form,
+    /// The multi-line body buffer for post/mail compose (#96). The header
+    /// fields stay in `form`; focus moves between the two.
+    pub body: crate::app::textarea::TextArea,
+    pub body_focused: bool,
 }
 
 impl App {
@@ -297,6 +302,8 @@ impl App {
             admin_logins: Vec::new(),
             admin_login_sel: 0,
             form: Form::new(Vec::new()),
+            body: crate::app::textarea::TextArea::new(),
+            body_focused: false,
         }
     }
 
@@ -1199,7 +1206,9 @@ impl App {
             }
             None => None,
         };
-        self.form = Form::new(vec![subject, Field::new("Body", false)]);
+        self.form = Form::new(vec![subject]);
+        self.body = crate::app::textarea::TextArea::new();
+        self.body_focused = false;
         self.screen = Screen::ComposePost;
     }
 
@@ -1235,21 +1244,80 @@ impl App {
         }
     }
 
+    /// Shared editing for the compose screens (#96): a single-line header form
+    /// plus the multi-line [`TextArea`] body, with focus moving between them.
+    /// Returns `true` when the send key (Ctrl-D) was pressed, so the caller can
+    /// run its own submit.
+    fn edit_compose(&mut self, key: KeyEvent) -> bool {
+        // Ctrl-D sends from either focus — Enter can't, since in the body it
+        // inserts a newline.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+            return true;
+        }
+        let max = self.config.limits.max_body_chars;
+        if self.body_focused {
+            match key.code {
+                // Leaving the top of the body steps back to the last header field.
+                KeyCode::Up if self.body.cursor().0 == 0 => {
+                    self.body_focused = false;
+                    self.form.focus = self.form.fields.len().saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    if max == 0 || self.body.char_count() < max {
+                        self.body.insert_newline();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    // Stop at the configured body limit rather than accept text
+                    // the post would be rejected for at submit.
+                    if max == 0 || self.body.char_count() < max {
+                        self.body.insert_char(c);
+                    } else {
+                        self.status = format!("Body limit reached ({max} characters).");
+                    }
+                }
+                KeyCode::Backspace => self.body.backspace(),
+                KeyCode::Delete => self.body.delete(),
+                KeyCode::Left => self.body.left(),
+                KeyCode::Right => self.body.right(),
+                KeyCode::Up => self.body.up(),
+                KeyCode::Down => self.body.down(),
+                KeyCode::Home => self.body.home(),
+                KeyCode::End => self.body.end(),
+                _ => {}
+            }
+        } else {
+            match key.code {
+                // Tab / Enter / Down off the last header field drops into the body.
+                KeyCode::Enter | KeyCode::Tab | KeyCode::Down => {
+                    if self.form.on_last() {
+                        self.body_focused = true;
+                    } else {
+                        self.form.next_field();
+                    }
+                }
+                KeyCode::Up => self.form.prev_field(),
+                KeyCode::Backspace => self.form.backspace(),
+                KeyCode::Char(c) => self.form.insert(c),
+                _ => {}
+            }
+        }
+        false
+    }
+
     async fn on_compose_post(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.screen = Screen::MessageList,
-            KeyCode::Enter if self.form.on_last() => self.submit_post().await,
-            KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.form.next_field(),
-            KeyCode::BackTab | KeyCode::Up => self.form.prev_field(),
-            KeyCode::Backspace => self.form.backspace(),
-            KeyCode::Char(c) => self.form.insert(c),
-            _ => {}
+        if key.code == KeyCode::Esc {
+            self.screen = Screen::MessageList;
+            return;
+        }
+        if self.edit_compose(key) {
+            self.submit_post().await;
         }
     }
 
     async fn submit_post(&mut self) {
         let subject = self.form.value(0).to_string();
-        let body = self.form.value(1).to_string();
+        let body = self.body.text().trim().to_string();
         if subject.is_empty() {
             self.status = "Subject cannot be empty.".into();
             return;
@@ -1327,8 +1395,9 @@ impl App {
                 self.form = Form::new(vec![
                     Field::new("To (username)", false),
                     Field::new("Subject", false),
-                    Field::new("Body", false),
                 ]);
+                self.body = crate::app::textarea::TextArea::new();
+                self.body_focused = false;
                 self.screen = Screen::ComposeMail;
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
@@ -1342,21 +1411,19 @@ impl App {
     }
 
     async fn on_compose_mail(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.screen = Screen::Mailbox,
-            KeyCode::Enter if self.form.on_last() => self.submit_mail().await,
-            KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.form.next_field(),
-            KeyCode::BackTab | KeyCode::Up => self.form.prev_field(),
-            KeyCode::Backspace => self.form.backspace(),
-            KeyCode::Char(c) => self.form.insert(c),
-            _ => {}
+        if key.code == KeyCode::Esc {
+            self.screen = Screen::Mailbox;
+            return;
+        }
+        if self.edit_compose(key) {
+            self.submit_mail().await;
         }
     }
 
     async fn submit_mail(&mut self) {
         let to = self.form.value(0).to_string();
         let subject = self.form.value(1).to_string();
-        let body = self.form.value(2).to_string();
+        let body = self.body.text().trim().to_string();
         if to.is_empty() || subject.is_empty() {
             self.status = "Recipient and subject are required.".into();
             return;
