@@ -27,7 +27,8 @@ use ratatui::{Frame, Terminal};
 
 use bbs_rs::cfg::ConfigDoc;
 use bbs_rs::cfg::editor::{Action, Editor, Screen};
-use bbs_rs::cfg::schema::{DOOR_FIELDS, FieldKind, SECTIONS};
+use bbs_rs::cfg::schema::{DOOR_FIELDS, FieldKind, SECTIONS, SEED_BOARD_FIELDS};
+use bbs_rs::cfg::seed::SeedStatus;
 
 #[derive(Parser)]
 #[command(
@@ -104,6 +105,9 @@ fn draw(f: &mut Frame, editor: &Editor) {
         Screen::ConfirmQuit => confirm_quit(f, chunks[1], editor),
         Screen::Doors => doors(f, chunks[1], editor),
         Screen::ArtScreens => art_screens(f, chunks[1], editor),
+        Screen::SeedBoards => seed_boards(f, chunks[1], editor),
+        Screen::SeedBoardFields => seed_board_fields(f, chunks[1], editor),
+        Screen::ConfirmRemoveSeedBoard => confirm_remove_seed_board(f, chunks[1], editor),
         Screen::DoorFields => door_fields(f, chunks[1], editor),
         Screen::ConfirmRemoveDoor => confirm_remove_door(f, chunks[1], editor),
     }
@@ -324,6 +328,172 @@ fn save(f: &mut Frame, area: Rect, editor: &Editor) {
     );
 }
 
+fn seed_boards(f: &mut Frame, area: Rect, editor: &Editor) {
+    let mut lines = Vec::new();
+
+    // The whole point of the section: say whether any of this will take effect.
+    match &editor.seed_status {
+        SeedStatus::WillSeed => lines.push(Line::from(Span::styled(
+            "This database has no boards yet, so these settings apply on the next start.",
+            Style::default().add_modifier(Modifier::DIM),
+        ))),
+        SeedStatus::AlreadySeeded { boards } => lines.push(Line::from(Span::styled(
+            format!(
+                "The database already has {boards} board(s), so seeding is skipped — edits                  here change the file but nothing else until the database is recreated."
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        SeedStatus::Unknown { reason } => lines.push(Line::from(Span::styled(
+            format!("Can't tell whether seeding will run ({reason})."),
+            Style::default().add_modifier(Modifier::DIM),
+        ))),
+    }
+    lines.push(Line::from(""));
+
+    // Row 0: the guest password (or a note that the default applies).
+    let pw_shown = editor
+        .doc
+        .get("seed", "guest_password")
+        .map(|v| v.display())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "(default: guest)".to_string());
+    lines.push(seed_row(
+        editor.seed_sel == 0,
+        "Guest password",
+        &pw_shown,
+        14,
+    ));
+
+    // Then each board.
+    let names = editor.doc.seed_board_names();
+    if names.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No custom boards — the built-in General + Announcements are used. 'a' adds one.",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    } else {
+        for (i, name) in names.iter().enumerate() {
+            let write = editor
+                .doc
+                .seed_board_get(i, "min_write")
+                .map(|v| v.display())
+                .unwrap_or_default();
+            lines.push(seed_row(
+                editor.seed_sel == i + 1,
+                &format!("Board: {name}"),
+                &format!("post: {write}"),
+                14,
+            ));
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" First-run seeding "),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn seed_row(selected: bool, label: &str, value: &str, width: usize) -> Line<'static> {
+    let style = if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::raw(format!(
+            "{} {:<width$}",
+            if selected { ">" } else { " " },
+            label
+        )),
+        Span::raw(value.to_string()),
+    ])
+    .style(style)
+}
+
+fn seed_board_fields(f: &mut Frame, area: Rect, editor: &Editor) {
+    let idx = editor.seed_sel.saturating_sub(1);
+    let label_width = SEED_BOARD_FIELDS
+        .iter()
+        .map(|f| f.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let lines: Vec<Line> = SEED_BOARD_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let value = editor
+                .doc
+                .seed_board_get(idx, field.key)
+                .map(|v| v.display())
+                .unwrap_or_default();
+            let shown = if value.is_empty() {
+                "(blank)".to_string()
+            } else {
+                value
+            };
+            let style = if i == editor.seed_field_sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::raw(format!(
+                    "{} {:<label_width$}",
+                    if i == editor.seed_field_sel { ">" } else { " " },
+                    field.label
+                )),
+                Span::raw(shown),
+            ])
+            .style(style)
+        })
+        .collect();
+    let name = editor
+        .doc
+        .seed_board_names()
+        .get(idx)
+        .cloned()
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Seed board: {name} ")),
+        ),
+        area,
+    );
+}
+
+fn confirm_remove_seed_board(f: &mut Frame, area: Rect, editor: &Editor) {
+    let name = editor
+        .doc
+        .seed_board_names()
+        .get(editor.seed_sel.saturating_sub(1))
+        .cloned()
+        .unwrap_or_default();
+    let lines = vec![
+        Line::from(format!("Remove the seeded board \"{name}\"?")),
+        Line::from(""),
+        Line::from("This only changes what a fresh database would be seeded with."),
+        Line::from(""),
+        Line::from("y = remove    any other key = keep"),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Remove seed board "),
+        ),
+        area,
+    );
+}
+
 fn art_screens(f: &mut Frame, area: Rect, editor: &Editor) {
     let rows = editor.art_rows();
     let width = rows
@@ -523,6 +693,11 @@ fn help_pane(f: &mut Frame, area: Rect, editor: &Editor) {
     let text = match editor.screen {
         Screen::Sections => editor.section().help.to_string(),
         Screen::Doors | Screen::ArtScreens => editor.section().help.to_string(),
+        Screen::SeedBoards => editor.section().help.to_string(),
+        Screen::SeedBoardFields => editor
+            .seed_board_field()
+            .map(|f| f.help.to_string())
+            .unwrap_or_default(),
         Screen::DoorFields => editor
             .door_field()
             .map(|f| f.help.to_string())
@@ -559,6 +734,11 @@ fn status_bar(f: &mut Frame, area: Rect, editor: &Editor) {
         Screen::DoorFields => " ↑/↓ move · Enter edit · s save · Esc back ",
         Screen::ConfirmRemoveDoor => " y remove · any key keep ",
         Screen::ArtScreens => " ↑/↓ move · Enter set · u clear · s save · Esc back ",
+        Screen::SeedBoards => {
+            " ↑/↓ move · Enter edit · a add board · d remove · s save · Esc back "
+        }
+        Screen::SeedBoardFields => " ↑/↓ move · Enter edit · s save · Esc back ",
+        Screen::ConfirmRemoveSeedBoard => " y remove · any key keep ",
     };
     let line = format!("{keys}  {}", editor.status);
     f.render_widget(

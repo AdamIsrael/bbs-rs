@@ -151,6 +151,114 @@ impl ConfigDoc {
         }
     }
 
+    // ---- Seeded boards: an array of inline tables (#147) ----------------
+    //
+    // `[seed] boards = [ { name = "...", ... }, ... ]` — a list of inline
+    // tables, distinct from `[[doors]]` (an array of *tables*). The key is
+    // `Some(None)` vs `Some(Some(vec))` in the config: absent means "use the
+    // built-in defaults", an empty array means "seed no boards". We only touch
+    // it once the operator adds a board, so an unset config stays unset.
+
+    /// How many seed boards are configured. `None` means the key is absent (the
+    /// built-in defaults apply); `Some(0)` means an explicit empty list.
+    pub fn seed_board_count(&self) -> Option<usize> {
+        self.doc
+            .get("seed")?
+            .get("boards")?
+            .as_array()
+            .map(|a| a.len())
+    }
+
+    /// Each seed board's name, for the list screen.
+    pub fn seed_board_names(&self) -> Vec<String> {
+        let Some(arr) = self
+            .doc
+            .get("seed")
+            .and_then(|s| s.get("boards"))
+            .and_then(|b| b.as_array())
+        else {
+            return Vec::new();
+        };
+        arr.iter()
+            .map(|v| {
+                v.as_inline_table()
+                    .and_then(|t| t.get("name"))
+                    .and_then(|n| n.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("(unnamed)")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Read one field of one seed board.
+    pub fn seed_board_get(&self, index: usize, key: &str) -> Option<FieldValue> {
+        let arr = self.doc.get("seed")?.get("boards")?.as_array()?;
+        let table = arr.get(index)?.as_inline_table()?;
+        let v = table.get(key)?;
+        Some(match v {
+            Value::String(s) => FieldValue::Str(s.value().clone()),
+            other => FieldValue::Str(other.to_string().trim().to_string()),
+        })
+    }
+
+    /// Set one field of one seed board.
+    pub fn seed_board_set(&mut self, index: usize, key: &str, value: &str) {
+        let Some(arr) = self
+            .doc
+            .get_mut("seed")
+            .and_then(|s| s.get_mut("boards"))
+            .and_then(|b| b.as_array_mut())
+        else {
+            return;
+        };
+        let Some(item) = arr.get_mut(index) else {
+            return;
+        };
+        if let Some(table) = item.as_inline_table_mut() {
+            table.insert(key, value.into());
+        }
+    }
+
+    /// Append a seed board, pre-filled so it parses. Creates `[seed]` and the
+    /// `boards` array if absent — which is the moment the config stops relying
+    /// on the built-in defaults, so it's the operator's explicit choice.
+    pub fn seed_board_add(&mut self, name: &str) -> usize {
+        if self.doc.get("seed").is_none() {
+            self.doc["seed"] = Item::Table(toml_edit::Table::new());
+        }
+        if self.doc["seed"].get("boards").is_none() {
+            self.doc["seed"]["boards"] = toml_edit::value(Array::new());
+        }
+        let arr = self.doc["seed"]["boards"].as_array_mut().expect("just set");
+        let mut t = toml_edit::InlineTable::new();
+        t.insert("name", name.into());
+        t.insert("description", "".into());
+        t.insert("min_read", "guest".into());
+        t.insert("min_write", "user".into());
+        arr.push(t);
+        arr.len() - 1
+    }
+
+    /// Remove a seed board. When the last one goes the array becomes `[]`, which
+    /// is meaningful — "seed no boards", distinct from the absent key that means
+    /// "use the defaults". So it is *not* removed, unlike the doors array.
+    pub fn seed_board_remove(&mut self, index: usize) -> bool {
+        let Some(arr) = self
+            .doc
+            .get_mut("seed")
+            .and_then(|s| s.get_mut("boards"))
+            .and_then(|b| b.as_array_mut())
+        else {
+            return false;
+        };
+        if index >= arr.len() {
+            return false;
+        }
+        arr.remove(index);
+        true
+    }
+
     // ---- Per-screen art: a nested table (#146) --------------------------
     //
     // `[art.screens]` is a table *inside* `[art]`, so it can't go through the
