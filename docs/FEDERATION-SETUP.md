@@ -263,10 +263,32 @@ Announced posts arrive at your inbox, are degraded from HTML to plain text, and
 are cached locally. `ap-board-posts` also accepts the board's actor URI
 (`https://peer.example/c/general`) if the handle doesn't resolve.
 
-> Mirrored posts are currently an operator-visible cache (`bbsctl`), not yet a
-> browsable in-BBS screen, and inbound *posting* into a remote board (a user here
-> writing to a followed board) is not implemented — that's the remaining
-> federation work.
+### Accepting posts from other instances
+
+Your boards also **accept posts from remote instances** — nothing to configure.
+A post whose `audience` names one of your board Groups is filed on that board,
+threaded under its parent if it's a reply, and then re-`Announce`d from your
+board to every subscriber: your instance is that board's hub, so it's what
+propagates the post onward. The original author's attribution is preserved, not
+rewritten to your domain.
+
+Two properties worth knowing, because they're what keep this safe:
+
+- **Routing is by `audience`, not by which inbox the post arrived at.** A reply
+  from Mastodon is delivered to a *person's* inbox rather than the board's; it
+  still reaches the board. (This is the failure mode where Lemmy loses Mastodon
+  replies.)
+- **Remote HTML is never stored or rendered.** Everything is flattened to plain
+  text on the way in — that flattening *is* the sanitization, since the
+  federation library performs none of its own. A remote author is also held to
+  the same `[limits] max_posts` per-window budget as a local one, so one peer
+  can't flood a board even if its own server doesn't rate-limit.
+
+> **Still missing**, so you know where the edges are: posting from *here* into a
+> followed remote board; a browsable in-BBS screen for mirrored boards (they're
+> an operator-visible cache via `bbsctl` today); and remote `Delete`/`Update`
+> handling plus the moderation surface (inbound reports, domain-block severity).
+> Those are the remaining federation work.
 
 ---
 
@@ -325,6 +347,7 @@ post, and DM between them locally.
 | `ActivityPub federation enabled` never logged | `[federation] enabled` is false, or `[web] enabled` is false (the endpoints live on the web frontend). |
 | Mastodon can't find `@alice@yourdomain` | WebFinger unreachable (check §4 curl), the domain in the handle doesn't match `origin`'s host, or `alice` is the guest / an unregistered name. |
 | A follow or post never arrives | The peer's domain isn't allowed (`bbsctl ap-peers`), or the cert isn't CA-trusted (self-signed can't interop), or 443 isn't publicly reachable. |
+| A remote instance's posts never land on my board | The peer's domain isn't allowed, the post carries no `audience` naming your board, its author isn't the signer, or that author hit the `[limits] max_posts` inbound cap. |
 | A followed board's posts never appear | The follow isn't `accepted` yet (`bbsctl ap-following <user>`), the peer's domain isn't allowed, or the post was a **reply** — only top-level posts syndicate. |
 | Config change had no effect | `[federation]` is restart-only — restart the server. (Allow/block entries via `bbsctl` are the exception and apply immediately.) |
 | ACME cert never issues | Port 443 not reachable from the internet, DNS not pointing at the box, or you hit the rate limit — retry with `acme_staging = true`. |

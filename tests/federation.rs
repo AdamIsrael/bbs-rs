@@ -307,7 +307,8 @@ async fn serve_ap(pool: SqlitePool, fed: bbs_rs::config::Federation) -> String {
     // and its handlers 404, which is what production does too.
     if fed.enabled
         && let Ok(origin) = bbs_rs::services::federation::Origin::from_config(&fed)
-        && let Ok(config) = bbs_rs::web::ap_object::build_config(pool, origin, &fed).await
+        && let Ok(config) =
+            bbs_rs::web::ap_object::build_config(pool, origin, &fed, &Default::default()).await
     {
         state = state.with_federation(config);
     }
@@ -1093,7 +1094,9 @@ async fn inbound_follow_is_stored_and_accepted() {
 
     let fed = enabled_fed();
     let origin = Origin::from_config(&fed).unwrap();
-    let config = build_config(pool.clone(), origin, &fed).await.unwrap();
+    let config = build_config(pool.clone(), origin, &fed, &Default::default())
+        .await
+        .unwrap();
     let data = config.to_request_data();
 
     let follow: Follow = serde_json::from_value(serde_json::json!({
@@ -1138,7 +1141,9 @@ async fn inbound_follow_of_a_remote_actor_is_ignored() {
 
     let fed = enabled_fed();
     let origin = Origin::from_config(&fed).unwrap();
-    let config = build_config(pool.clone(), origin, &fed).await.unwrap();
+    let config = build_config(pool.clone(), origin, &fed, &Default::default())
+        .await
+        .unwrap();
     let data = config.to_request_data();
 
     let follow: Follow = serde_json::from_value(serde_json::json!({
@@ -1176,7 +1181,9 @@ async fn inbound_undo_follow_removes_the_follow() {
 
     let fed = enabled_fed();
     let origin = Origin::from_config(&fed).unwrap();
-    let config = build_config(pool.clone(), origin, &fed).await.unwrap();
+    let config = build_config(pool.clone(), origin, &fed, &Default::default())
+        .await
+        .unwrap();
     let data = config.to_request_data();
 
     let undo: Undo = serde_json::from_value(serde_json::json!({
@@ -1209,9 +1216,10 @@ async fn fed_data(
     use bbs_rs::services::federation::Origin;
     let fed = enabled_fed();
     let origin = Origin::from_config(&fed).unwrap();
-    let config = bbs_rs::web::ap_object::build_config(pool.clone(), origin, &fed)
-        .await
-        .unwrap();
+    let config =
+        bbs_rs::web::ap_object::build_config(pool.clone(), origin, &fed, &Default::default())
+            .await
+            .unwrap();
     config.to_request_data()
 }
 
@@ -1580,7 +1588,7 @@ async fn fed_data_dms(
         ..Default::default()
     };
     let origin = Origin::from_config(&fed).unwrap();
-    bbs_rs::web::ap_object::build_config(pool.clone(), origin, &fed)
+    bbs_rs::web::ap_object::build_config(pool.clone(), origin, &fed, &Default::default())
         .await
         .unwrap()
         .to_request_data()
@@ -2184,4 +2192,292 @@ async fn a_redelivered_board_post_mirrors_once() {
     make().receive(&data).await.unwrap();
     make().receive(&data).await.unwrap();
     assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+}
+
+// ---- #112a: inbound board posts --------------------------------------------
+
+/// Build an inbound `Create` for a board post. `audience` is what routes it.
+fn board_post_from(
+    actor: &str,
+    page_id: &str,
+    audience: Option<&str>,
+    to: &[&str],
+    name: &str,
+    content: &str,
+    in_reply_to: Option<&str>,
+) -> bbs_rs::web::ap_object::Create {
+    let mut object = serde_json::json!({
+        "type": "Page",
+        "id": page_id,
+        "attributedTo": actor,
+        "name": name,
+        "content": content,
+        "to": to,
+    });
+    if let Some(a) = audience {
+        object["audience"] = serde_json::json!(a);
+    }
+    if let Some(r) = in_reply_to {
+        object["inReplyTo"] = serde_json::json!(r);
+    }
+    serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": format!("{page_id}/activity"),
+        "actor": actor,
+        "object": object,
+    }))
+    .unwrap()
+}
+
+/// A remote post addressed to one of our board Groups lands on that board, with
+/// its HTML degraded to text and the remote author attached.
+#[tokio::test]
+async fn a_remote_post_lands_on_the_board() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+
+    let create = board_post_from(
+        &bob,
+        "https://remote.social/p/1",
+        Some(&keys.actor_uri),
+        &["https://www.w3.org/ns/activitystreams#Public"],
+        "Hello from afar",
+        "<p>a remote &amp; <b>bold</b> post</p>",
+        None,
+    );
+    create.receive(&data).await.unwrap();
+
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let msgs = boards::list_messages(&pool, general.id).await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].subject, "Hello from afar");
+    assert_eq!(
+        msgs[0].body, "a remote & bold post",
+        "HTML degraded on the way in — we never store remote markup"
+    );
+    assert_eq!(msgs[0].author_name, "bob@remote.social");
+    assert!(msgs[0].parent_id.is_none());
+}
+
+/// The Lemmy weakness this project set out to beat: a post that arrives at a
+/// *person's* inbox still reaches the board, because we route on `audience`,
+/// not on which inbox it was delivered to.
+#[tokio::test]
+async fn a_post_delivered_to_a_person_still_reaches_the_board_by_audience() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+
+    // Addressed to alice (a Person), but audience is the board.
+    let create = board_post_from(
+        &bob,
+        "https://remote.social/p/2",
+        Some(&keys.actor_uri),
+        &["https://bbs.example.com/u/alice"],
+        "Reply via a person inbox",
+        "<p>still lands on the board</p>",
+        None,
+    );
+    create.receive(&data).await.unwrap();
+
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    assert_eq!(
+        boards::list_messages(&pool, general.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // ...and it did NOT become a DM to alice.
+    assert!(
+        bbs_rs::services::mail::inbox(&pool, alice.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A remote reply threads under the post it answers, matched by `inReplyTo`.
+#[tokio::test]
+async fn a_remote_reply_threads_under_its_parent() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+
+    board_post_from(
+        &bob,
+        "https://remote.social/p/10",
+        Some(&keys.actor_uri),
+        &[],
+        "Root",
+        "<p>root</p>",
+        None,
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    board_post_from(
+        &bob,
+        "https://remote.social/p/11",
+        Some(&keys.actor_uri),
+        &[],
+        "Re: Root",
+        "<p>a reply</p>",
+        Some("https://remote.social/p/10"),
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let msgs = boards::list_messages(&pool, general.id).await.unwrap();
+    assert_eq!(msgs.len(), 2);
+    let root = msgs.iter().find(|m| m.subject == "Root").unwrap();
+    let reply = msgs.iter().find(|m| m.subject == "Re: Root").unwrap();
+    assert_eq!(
+        reply.parent_id,
+        Some(root.id),
+        "the reply threads under the post it answers"
+    );
+}
+
+/// A redelivered board post stores once, and a post whose author isn't the
+/// signer is ignored.
+#[tokio::test]
+async fn board_posts_are_deduped_and_author_is_verified() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+    let data = fed_data(&pool).await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+
+    let make = || {
+        board_post_from(
+            &bob,
+            "https://remote.social/p/20",
+            Some(&keys.actor_uri),
+            &[],
+            "once",
+            "<p>only once</p>",
+            None,
+        )
+    };
+    make().receive(&data).await.unwrap();
+    make().receive(&data).await.unwrap();
+    assert_eq!(
+        boards::list_messages(&pool, general.id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "redelivery stores once"
+    );
+
+    // bob signs, but the post claims to be carol's.
+    let forged: bbs_rs::web::ap_object::Create = serde_json::from_value(serde_json::json!({
+        "type": "Create",
+        "id": "https://remote.social/p/21/activity",
+        "actor": bob,
+        "object": {
+            "type": "Page",
+            "id": "https://remote.social/p/21",
+            "attributedTo": carol,
+            "name": "forged",
+            "content": "<p>not mine</p>",
+            "audience": keys.actor_uri,
+        }
+    }))
+    .unwrap();
+    forged.receive(&data).await.unwrap();
+    assert_eq!(
+        boards::list_messages(&pool, general.id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a post attributed to someone other than the signer is refused"
+    );
+}
+
+/// A remote author gets the same per-window post budget as a local one — a
+/// peer's own rate limiting isn't something we take on faith.
+#[tokio::test]
+async fn inbound_board_posts_are_rate_limited() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    // fed_data uses the default limits: max_posts = 5 per 60s window.
+    let data = fed_data(&pool).await;
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+
+    for n in 0..8 {
+        board_post_from(
+            &bob,
+            &format!("https://remote.social/p/flood{n}"),
+            Some(&keys.actor_uri),
+            &[],
+            &format!("flood {n}"),
+            "<p>spam</p>",
+            None,
+        )
+        .receive(&data)
+        .await
+        .unwrap();
+    }
+
+    let stored = boards::list_messages(&pool, general.id)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(
+        stored,
+        bbs_rs::config::Limits::default().max_posts as usize,
+        "a flooding remote author is capped at the configured per-window budget"
+    );
 }

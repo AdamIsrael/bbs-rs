@@ -300,6 +300,17 @@ pub async fn ensure_group_keys(
     })
 }
 
+/// Resolve a board by its Group actor URI — how an inbound post addressed to
+/// `audience` (or `to`) finds its board (#112).
+pub async fn find_board_by_actor_uri(pool: &SqlitePool, uri: &str) -> Result<Option<i64>> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM boards WHERE actor_uri = ?")
+            .bind(uri)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
 /// Resolve a board by its Group slug — the `boards.id` behind `/c/{slug}`.
 pub async fn find_board_by_slug(pool: &SqlitePool, slug: &str) -> Result<Option<i64>> {
     Ok(sqlx::query_scalar("SELECT id FROM boards WHERE slug = ?")
@@ -1121,7 +1132,15 @@ pub mod outbound {
         }
 
         let ap_id = ensure_message_ap_id(pool, origin, msg.id).await?;
-        let author_uri = origin.person(&msg.author_name);
+        // A remote author (an inbound post we re-Announce, #112) keeps its own
+        // actor URI; a local author's is minted from our origin.
+        let author_uri: String =
+            sqlx::query_scalar("SELECT actor_uri FROM users WHERE id = ? AND is_remote = 1")
+                .bind(msg.author_id)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+                .unwrap_or_else(|| origin.person(&msg.author_name));
         let page = objects::board_page(
             origin,
             &keys.slug,

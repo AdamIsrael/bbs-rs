@@ -261,6 +261,67 @@ pub async fn post_message(
     Ok(id)
 }
 
+/// Store a post that arrived from a remote instance into a local board (#112).
+///
+/// Bypasses the local ACL/rate path deliberately — a remote server enforces its
+/// own, and the caller applies federation-side guards. Instead it is:
+/// - **deduped** on `ap_id` (a redelivery inserts once), and
+/// - **threaded**: `in_reply_to_uri` is resolved to a local parent by its
+///   `ap_id`, so a remote reply nests under the post it answers (falling back to
+///   a root post when we've never seen the parent).
+///
+/// Returns the new message id, or `None` if we already had it.
+pub async fn store_remote_post(
+    pool: &SqlitePool,
+    board_id: i64,
+    author_id: i64,
+    subject: &str,
+    body: &str,
+    ap_id: &str,
+    in_reply_to_uri: Option<&str>,
+) -> Result<Option<i64>> {
+    let parent_id: Option<i64> = match in_reply_to_uri {
+        Some(uri) => {
+            sqlx::query_scalar("SELECT id FROM messages WHERE ap_id = ?")
+                .bind(uri)
+                .fetch_optional(pool)
+                .await?
+        }
+        None => None,
+    };
+    let affected = sqlx::query(
+        "INSERT INTO messages \
+           (board_id, author_id, subject, body, created_at, parent_id, ap_id, in_reply_to_uri) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
+    )
+    .bind(board_id)
+    .bind(author_id)
+    .bind(subject)
+    .bind(body)
+    .bind(now_unix())
+    .bind(parent_id)
+    .bind(ap_id)
+    .bind(in_reply_to_uri)
+    .execute(pool)
+    .await?;
+    if affected.rows_affected() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(affected.last_insert_rowid()))
+}
+
+/// How many posts an author has made to a board since `since` — the inbound
+/// flood guard for remote authors (#112).
+pub async fn author_post_count_since(pool: &SqlitePool, author_id: i64, since: i64) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE author_id = ? AND created_at >= ?")
+            .bind(author_id)
+            .bind(since)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 // ---- Moderation (ungated; callers must be admins) -----------------------
 
 /// Delete a message by id. Returns whether a row was removed.
