@@ -172,6 +172,22 @@ Phase 3 (#109) is sliced into reviewable PRs:
 | 5 | **Board syndication** (bbs-rs ↔ bbs-rs) — `Group` actors + `Announce` fan-out | L | #111 |
 | 6 | Inbound board posts + moderation | L | #112 |
 
+Phase 6 (#112) is sliced:
+
+- **112a — inbound board posts** (this slice): a remote `Create` whose `audience` (or `to`/`cc`) names one
+  of our board Groups is accepted onto that board. **Routing is by `audience`, not by which inbox it was
+  delivered to** — that's the Lemmy weakness this project set out to beat: a Mastodon reply lands in a
+  *person's* inbox, and on Lemmy it never propagates; here it still reaches the board. The post's author
+  must be the signer, content is degraded to plain text on the way in (**that degradation is also our
+  sanitization** — no remote HTML is ever stored or rendered, and the crate does none of its own), storage
+  dedups on `ap_id`, `inReplyTo` threads a reply under its parent, and a remote author gets the same
+  per-window post budget as a local one. We then **re-`Announce` as the Group** — we're the board's home, so
+  subscribers hear it from us, with the original author's attribution preserved.
+- **112b — remote lifecycle**: honor `Delete` / `Update` / `Undo` for content we've accepted.
+- **112c — moderation surface**: inbound `Flag` (remote reports) surfaced to admins, and domain blocks with
+  severity. Note defederation is **not retroactive** — dropping a peer stops updates, it doesn't delete
+  what already arrived.
+
 Phase 5 (#111) is sliced:
 
 - **111a — boards as `Group` actors** (this slice): the read/discovery surface. Each board lazily mints a

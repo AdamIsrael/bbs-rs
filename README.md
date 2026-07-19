@@ -346,6 +346,13 @@ follows another instance's (or Lemmy's) board Group, and its announced posts are
 locally; `bbsctl ap-board-posts <slug@host>` lists them. This closes the loop the project set out to build:
 **board syndication between bbs-rs instances**, verified end-to-end.
 
+Your boards also **accept posts from remote instances**: a post whose `audience` names one of your boards is
+filed there (threaded under its parent if it's a reply) and re-`Announce`d to every subscriber — your
+instance is that board's hub. Routing is by `audience` rather than by which inbox the post arrived at, so a
+Mastodon reply that lands in a *person's* inbox still reaches the board. Remote HTML is never stored or
+rendered — everything is degraded to plain text on the way in — and remote authors are held to the same
+`[limits] max_posts` budget as local ones.
+
 **File areas.** Downloadable files are grouped into **areas**, each with a read/write role ACL like a
 board. Registered users browse areas and files from the **File Areas** menu and view per-file details
 (size, uploader, description, download count). This first phase is a **catalog with operator-managed

@@ -84,9 +84,10 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
             services::federation::ensure_all_group_keys(&pool, &origin)
                 .await
                 .context("minting board Group identities")?;
-            let fed = web::ap_object::build_config(pool.clone(), origin, &boot.federation)
-                .await
-                .context("building the federation config")?;
+            let fed =
+                web::ap_object::build_config(pool.clone(), origin, &boot.federation, &boot.limits)
+                    .await
+                    .context("building the federation config")?;
             // Drain the durable delivery queue in the background: sign each
             // outbound activity with its actor's key and POST it. The config is
             // cheap to clone (it's Arc-backed); one copy drives the drain, the

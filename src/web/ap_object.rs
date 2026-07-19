@@ -46,6 +46,9 @@ pub struct AppData {
     /// at startup from `[federation] allow_remote_dms`, like the rest of the
     /// federation config — toggling it needs a restart.
     pub allow_remote_dms: bool,
+    /// Rate limits, reused as the **inbound** flood guard for remote authors
+    /// posting into our boards (#112). Snapshotted at startup like the rest.
+    pub limits: crate::config::Limits,
 }
 
 /// Error type for the federation HTTP surface. The crate's traits require an
@@ -373,6 +376,18 @@ pub struct Note {
     /// A content warning / subject line, when present.
     #[serde(default)]
     summary: Option<String>,
+    /// A `Page`'s title — a board post's subject.
+    #[serde(default)]
+    name: Option<String>,
+    /// The board this post belongs to (FEP-1b12). **This is what routes an
+    /// inbound post to a board**, even when it was delivered to a *person's*
+    /// inbox rather than the Group's — the case Mastodon replies hit (#112).
+    #[serde(default)]
+    audience: Option<String>,
+    /// The post this replies to, by its `ap_id` — threads a remote reply under
+    /// its parent.
+    #[serde(default)]
+    in_reply_to: Option<String>,
     /// Addressing. A note with a local actor in `to`/`cc` but **not** the Public
     /// collection is a direct message; anything Public is a status.
     #[serde(default, deserialize_with = "string_or_seq")]
@@ -633,6 +648,14 @@ impl Activity for Create {
             return Ok(());
         }
 
+        // A post carrying `audience` (or addressed to) one of our board Groups
+        // belongs on that board — checked *first*, and by audience rather than
+        // delivery path, so a reply that lands in a person's inbox still reaches
+        // the board (the case Mastodon replies hit; #112).
+        if let Some(board_id) = self.board_target(&data.pool).await? {
+            return self.receive_board_post(data, &author_uri, board_id).await;
+        }
+
         // A note addressed to a local actor but not the Public collection is a
         // direct message; route it to the mailbox instead of the timeline.
         let is_public = self
@@ -680,6 +703,108 @@ impl Create {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.timestamp())
             .unwrap_or_else(now_unix)
+    }
+
+    /// The local board this post belongs to, if any: `audience` first (the
+    /// FEP-1b12 signal), then `to`/`cc`.
+    async fn board_target(&self, pool: &SqlitePool) -> Result<Option<i64>, ApError> {
+        if let Some(audience) = self.object.audience.as_deref()
+            && let Some(id) =
+                crate::services::federation::find_board_by_actor_uri(pool, audience.trim()).await?
+        {
+            return Ok(Some(id));
+        }
+        for uri in self.object.to.iter().chain(&self.object.cc) {
+            if let Some(id) =
+                crate::services::federation::find_board_by_actor_uri(pool, uri).await?
+            {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Accept a post from a remote instance into one of our boards, then
+    /// re-`Announce` it — we're the board's home, so subscribers hear it from us.
+    ///
+    /// Content is **degraded to plain text on the way in**, which is also our
+    /// sanitization: no remote HTML is ever stored or rendered (the federation
+    /// crate does none of its own).
+    async fn receive_board_post(
+        self,
+        data: &Data<AppData>,
+        author_uri: &str,
+        board_id: i64,
+    ) -> Result<(), ApError> {
+        let author_id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM users WHERE actor_uri = ? AND is_remote = 1")
+                .bind(author_uri)
+                .fetch_optional(&data.pool)
+                .await?;
+        let Some(author_id) = author_id else {
+            tracing::warn!("board post from unknown actor {author_uri}; ignoring");
+            return Ok(());
+        };
+
+        // Inbound flood guard: a remote author gets the same per-window post
+        // budget as a local one. A remote server enforces its own limits, but we
+        // don't take its word for it.
+        if let Some(since) = data.limits.window_start(now_unix())
+            && data.limits.max_posts > 0
+        {
+            let recent =
+                crate::services::boards::author_post_count_since(&data.pool, author_id, since)
+                    .await?;
+            if recent >= data.limits.max_posts as i64 {
+                tracing::warn!(
+                    "dropping board post from {author_uri}: over the inbound rate limit"
+                );
+                return Ok(());
+            }
+        }
+
+        let body = content::html_to_text(&self.object.content);
+        let subject = self
+            .object
+            .name
+            .as_deref()
+            .map(content::html_to_text)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(no subject)".to_string());
+
+        let stored = crate::services::boards::store_remote_post(
+            &data.pool,
+            board_id,
+            author_id,
+            &subject,
+            &body,
+            self.object.id.as_str(),
+            self.object.in_reply_to.as_deref(),
+        )
+        .await?;
+        let Some(message_id) = stored else {
+            tracing::debug!("board post {} already stored", self.object.id);
+            return Ok(());
+        };
+        tracing::info!(
+            "board: accepted post {} from {author_uri} into board {board_id}",
+            self.object.id
+        );
+
+        // Re-Announce as the Group so every subscriber sees it — including the
+        // instance that sent it, which dedups on the post's id.
+        match crate::services::federation::outbound::deliver_board_post(
+            &data.pool,
+            &data.origin,
+            message_id,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("re-announced inbound post {message_id} to {n} inbox(es)"),
+            Err(e) => tracing::warn!("could not re-announce inbound post {message_id}: {e}"),
+        }
+        Ok(())
     }
 
     /// The id of a local, non-guest user this note is addressed to, if any.
@@ -1182,7 +1307,7 @@ pub async fn send_remote_dm(
     let origin = Origin::from_config(fed)?;
     let (user, domain) = split_handle(handle)
         .ok_or_else(|| anyhow::anyhow!("{handle:?} is not a user@host handle"))?;
-    let config = build_config(pool.clone(), origin.clone(), fed).await?;
+    let config = build_config(pool.clone(), origin.clone(), fed, &Default::default()).await?;
     let data = config.to_request_data();
 
     // Sign as the sender; mint their actor if this is their first federated act.
@@ -1237,7 +1362,7 @@ pub async fn follow_handle(
 ) -> anyhow::Result<String> {
     anyhow::ensure!(fed.enabled, "federation is not enabled");
     let origin = Origin::from_config(fed)?;
-    let config = build_config(pool.clone(), origin.clone(), fed).await?;
+    let config = build_config(pool.clone(), origin.clone(), fed, &Default::default()).await?;
     follow(&config.to_request_data(), &origin, local_user, handle).await
 }
 
@@ -1251,7 +1376,7 @@ pub async fn unfollow_handle(
 ) -> anyhow::Result<bool> {
     anyhow::ensure!(fed.enabled, "federation is not enabled");
     let origin = Origin::from_config(fed)?;
-    let config = build_config(pool.clone(), origin.clone(), fed).await?;
+    let config = build_config(pool.clone(), origin.clone(), fed, &Default::default()).await?;
     unfollow(&config.to_request_data(), &origin, local_user, handle).await
 }
 
@@ -1263,6 +1388,7 @@ pub async fn build_config(
     pool: SqlitePool,
     origin: Origin,
     fed: &Federation,
+    limits: &crate::config::Limits,
 ) -> anyhow::Result<FederationConfig<AppData>> {
     let origin_host = origin.host().to_string();
     let verifier = AllowlistVerifier {
@@ -1274,6 +1400,7 @@ pub async fn build_config(
         pool,
         origin,
         allow_remote_dms: fed.allow_remote_dms,
+        limits: limits.clone(),
     };
     let config = FederationConfig::builder()
         .domain(app_data.origin.host().to_string())
