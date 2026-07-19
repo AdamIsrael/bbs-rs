@@ -861,32 +861,81 @@ pub mod policy {
         if domain.eq_ignore_ascii_case(origin_host) {
             return Ok(true);
         }
-        let kind = if allowlist_only { "allow" } else { "block" };
-        let listed: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM ap_blocks WHERE kind = ? AND lower(domain) = ?",
+        // A *suspended* domain is refused in either posture — that's the hard
+        // block. A `silence` block is not refused here: it may still federate,
+        // and is filtered at content ingestion instead (see `domain_silenced`).
+        let suspended: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ap_blocks \
+             WHERE kind = 'block' AND severity = 'suspend' AND lower(domain) = ?",
         )
-        .bind(kind)
         .bind(&domain)
         .fetch_one(pool)
         .await?;
-        // Allowlist: must be listed. Blocklist: must NOT be listed.
-        Ok(if allowlist_only {
-            listed > 0
-        } else {
-            listed == 0
-        })
+        if suspended > 0 {
+            return Ok(false);
+        }
+        if !allowlist_only {
+            return Ok(true);
+        }
+        let allowed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ap_blocks WHERE kind = 'allow' AND lower(domain) = ?",
+        )
+        .bind(&domain)
+        .fetch_one(pool)
+        .await?;
+        Ok(allowed > 0)
     }
 
-    /// Add or update a policy row (`kind` = "allow" | "block").
-    pub async fn set(pool: &SqlitePool, domain: &str, kind: &str, reason: &str) -> Result<()> {
+    /// Whether a domain is *silenced*: it may still federate, but nothing it
+    /// sends is accepted into a shared surface (boards, timeline, mirrors).
+    ///
+    /// This is the middle setting between "fully trusted" and "defederated" —
+    /// useful when a peer isn't malicious enough to cut off but shouldn't be
+    /// filling your board.
+    pub async fn domain_silenced(pool: &SqlitePool, domain: &str) -> Result<bool> {
+        let domain = domain.trim().to_ascii_lowercase();
+        if domain.is_empty() {
+            return Ok(false);
+        }
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ap_blocks \
+             WHERE kind = 'block' AND severity = 'silence' AND lower(domain) = ?",
+        )
+        .bind(&domain)
+        .fetch_one(pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// Whether the actor at `uri` belongs to a silenced domain.
+    pub async fn actor_silenced(pool: &SqlitePool, actor_uri: &str) -> Result<bool> {
+        let host = url::Url::parse(actor_uri)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        domain_silenced(pool, &host).await
+    }
+
+    /// Add or update a policy row (`kind` = "allow" | "block"). `severity` is
+    /// `"suspend"` (hard block) or `"silence"`, and only applies to blocks.
+    pub async fn set(
+        pool: &SqlitePool,
+        domain: &str,
+        kind: &str,
+        reason: &str,
+        severity: &str,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO ap_blocks (domain, kind, reason, created_at) VALUES (?, ?, ?, ?) \
-             ON CONFLICT(domain, kind) DO UPDATE SET reason = excluded.reason",
+            "INSERT INTO ap_blocks (domain, kind, reason, created_at, severity) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(domain, kind) DO UPDATE SET \
+               reason = excluded.reason, severity = excluded.severity",
         )
         .bind(domain.trim().to_ascii_lowercase())
         .bind(kind)
         .bind(reason)
         .bind(now_unix())
+        .bind(severity)
         .execute(pool)
         .await?;
         Ok(())
@@ -904,9 +953,9 @@ pub mod policy {
     }
 
     /// All policy rows of a kind, for operator display.
-    pub async fn list(pool: &SqlitePool, kind: &str) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT domain, reason FROM ap_blocks WHERE kind = ? ORDER BY domain",
+    pub async fn list(pool: &SqlitePool, kind: &str) -> Result<Vec<(String, String, String)>> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT domain, reason, severity FROM ap_blocks WHERE kind = ? ORDER BY domain",
         )
         .bind(kind)
         .fetch_all(pool)
@@ -1641,6 +1690,160 @@ pub mod lifecycle {
             return Ok(Some(Target::Mail));
         }
         Ok(None)
+    }
+}
+
+/// Inbound reports (`Flag`) and after-the-fact cleanup (#112).
+pub mod moderation {
+    use super::*;
+    use crate::util::now_unix;
+
+    /// A report a remote instance sent us.
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct Report {
+        pub id: i64,
+        pub reporter_handle: String,
+        pub reporter_uri: String,
+        /// Reported object URIs, one per line.
+        pub objects: String,
+        pub content: String,
+        pub created_at: i64,
+        pub resolved_at: Option<i64>,
+    }
+
+    /// Record an inbound report. Idempotent on the `Flag`'s own id, so a
+    /// redelivered report doesn't pile up. Returns whether it was new.
+    pub async fn record_report(
+        pool: &SqlitePool,
+        ap_id: &str,
+        reporter_uri: &str,
+        reporter_handle: &str,
+        objects: &str,
+        content: &str,
+    ) -> Result<bool> {
+        let n = sqlx::query(
+            "INSERT INTO ap_reports \
+               (ap_id, reporter_uri, reporter_handle, objects, content, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
+        )
+        .bind(ap_id)
+        .bind(reporter_uri)
+        .bind(reporter_handle)
+        .bind(objects)
+        .bind(content)
+        .bind(now_unix())
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Reports for an operator to read — open ones unless `include_resolved`.
+    pub async fn reports(
+        pool: &SqlitePool,
+        include_resolved: bool,
+        limit: i64,
+    ) -> Result<Vec<Report>> {
+        let sql = if include_resolved {
+            "SELECT id, reporter_handle, reporter_uri, objects, content, created_at, resolved_at \
+             FROM ap_reports ORDER BY id DESC LIMIT ?"
+        } else {
+            "SELECT id, reporter_handle, reporter_uri, objects, content, created_at, resolved_at \
+             FROM ap_reports WHERE resolved_at IS NULL ORDER BY id DESC LIMIT ?"
+        };
+        Ok(sqlx::query_as::<_, Report>(sql)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?)
+    }
+
+    /// Mark a report handled. Returns whether it existed and was open.
+    pub async fn resolve_report(pool: &SqlitePool, id: i64) -> Result<bool> {
+        let n = sqlx::query(
+            "UPDATE ap_reports SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL",
+        )
+        .bind(now_unix())
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// How many reports are open (operator visibility).
+    pub async fn open_report_count(pool: &SqlitePool) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM ap_reports WHERE resolved_at IS NULL")
+                .fetch_one(pool)
+                .await?,
+        )
+    }
+
+    /// Content purged from one domain, by store.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Purged {
+        pub board_posts: u64,
+        pub statuses: u64,
+        pub mirrored_posts: u64,
+        pub mail: u64,
+    }
+
+    /// Delete everything a domain sent us.
+    ///
+    /// **Blocking a peer is not retroactive** — it stops what arrives next and
+    /// leaves what already arrived in place. This is the explicit tool for the
+    /// second half, kept separate so removing content is always a deliberate act
+    /// rather than a silent side effect of a policy change.
+    pub async fn purge_domain(pool: &SqlitePool, domain: &str) -> Result<Purged> {
+        let domain = domain.trim().to_ascii_lowercase();
+        // Matches an actor URI's host: `https://host/...` or `https://host`.
+        let host_prefix = format!("%//{domain}/%");
+        let host_exact = format!("%//{domain}");
+
+        let board_posts = sqlx::query(
+            "DELETE FROM messages WHERE author_id IN \
+               (SELECT id FROM users WHERE is_remote = 1 AND lower(domain) = ?)",
+        )
+        .bind(&domain)
+        .execute(pool)
+        .await?
+        .rows_affected();
+
+        let statuses =
+            sqlx::query("DELETE FROM ap_timeline WHERE author_uri LIKE ? OR author_uri LIKE ?")
+                .bind(&host_prefix)
+                .bind(&host_exact)
+                .execute(pool)
+                .await?
+                .rows_affected();
+
+        let mirrored_posts = sqlx::query(
+            "DELETE FROM ap_board_posts WHERE group_uri LIKE ? OR group_uri LIKE ? \
+             OR author_uri LIKE ? OR author_uri LIKE ?",
+        )
+        .bind(&host_prefix)
+        .bind(&host_exact)
+        .bind(&host_prefix)
+        .bind(&host_exact)
+        .execute(pool)
+        .await?
+        .rows_affected();
+
+        let mail = sqlx::query(
+            "DELETE FROM mail WHERE from_id IN \
+               (SELECT id FROM users WHERE is_remote = 1 AND lower(domain) = ?)",
+        )
+        .bind(&domain)
+        .execute(pool)
+        .await?
+        .rows_affected();
+
+        Ok(Purged {
+            board_posts,
+            statuses,
+            mirrored_posts,
+            mail,
+        })
     }
 }
 

@@ -193,9 +193,15 @@ Phase 6 (#112) is sliced:
   against. Deleting a board post also drops it from the FTS index, since the 0012 triggers fire.
   `Undo` was already handled for `Follow`, the only `Undo` we act on; `Announce`-wrapped lifecycle
   (a Group relaying a member's `Delete`) is **not** handled yet.
-- **112c — moderation surface**: inbound `Flag` (remote reports) surfaced to admins, and domain blocks with
-  severity. Note defederation is **not retroactive** — dropping a peer stops updates, it doesn't delete
-  what already arrived.
+- **112c — moderation surface** (this slice): inbound `Flag` (remote reports) recorded for operators —
+  **never acted on automatically**, since auto-acting would hand any peer a remote moderation lever over
+  this board. Domain blocks gain **severity**: `suspend` is the hard block we already had (refused at the
+  door by the `UrlVerifier`), while `silence` still lets a domain federate — existing follows and opted-in
+  DMs keep working — but stops its content entering shared surfaces (boards, timeline, mirrors). Because
+  defederation is **not retroactive**, `bbsctl ap-purge <domain> --yes` is the explicit second step for
+  content that already arrived; it's deliberately separate so deleting content is never a silent side
+  effect of a policy change. Operator surface: `ap-reports`, `ap-resolve`, `ap-block --severity`,
+  `ap-purge`.
 
 Phase 5 (#111) is sliced:
 
