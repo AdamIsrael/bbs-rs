@@ -16,7 +16,7 @@ use activitypub_federation::config::{Data, FederationConfig, UrlVerifier};
 use activitypub_federation::error::Error as ApFederationError;
 use activitypub_federation::fetch::object_id::ObjectId;
 use activitypub_federation::kinds::activity::{
-    AcceptType, AnnounceType, CreateType, DeleteType, FollowType, UndoType, UpdateType,
+    AcceptType, AnnounceType, CreateType, DeleteType, FlagType, FollowType, UndoType, UpdateType,
 };
 use activitypub_federation::protocol::public_key::PublicKey;
 use activitypub_federation::protocol::verification::verify_domains_match;
@@ -31,8 +31,8 @@ use url::Url;
 
 use crate::config::Federation;
 use crate::services::federation::{
-    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, lifecycle, mirror, policy,
-    queue, split_handle, timeline,
+    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, lifecycle, mirror,
+    moderation, policy, queue, split_handle, timeline,
 };
 use crate::util::now_unix;
 
@@ -513,6 +513,21 @@ pub struct Update {
     object: ObjectRef,
 }
 
+/// A remote instance reporting content or an actor to us — the fediverse's
+/// report mechanism (#112). `object` may name several things at once.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Flag {
+    #[serde(rename = "type")]
+    kind: FlagType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    #[serde(default, deserialize_with = "string_or_seq")]
+    object: Vec<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
 /// The catch-all for any activity we don't model yet — every well-formed one.
 /// [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
 /// still fetches the signing actor and verifies the HTTP signature before this
@@ -545,6 +560,7 @@ pub enum InboundActivity {
     Announce(Announce),
     Delete(Delete),
     Update(Update),
+    Flag(Flag),
     Other(AnyActivity),
 }
 
@@ -722,6 +738,10 @@ impl Activity for Create {
             tracing::debug!("dropping status from un-followed author {author_uri}");
             return Ok(());
         }
+        if policy::actor_silenced(&data.pool, &author_uri).await? {
+            tracing::info!("dropping status from silenced {author_uri}");
+            return Ok(());
+        }
         let text = content::html_to_text(&self.object.content);
         let handle = author_handle(&data.pool, &author_uri).await;
         let published = self.published_unix();
@@ -793,6 +813,12 @@ impl Create {
             tracing::warn!("board post from unknown actor {author_uri}; ignoring");
             return Ok(());
         };
+        // A silenced domain may still federate, but its content stays out of
+        // shared surfaces like boards (#112).
+        if policy::actor_silenced(&data.pool, author_uri).await? {
+            tracing::info!("dropping board post from silenced {author_uri}");
+            return Ok(());
+        }
 
         // Inbound flood guard: a remote author gets the same per-window post
         // budget as a local one. A remote server enforces its own limits, but we
@@ -1008,6 +1034,10 @@ impl Activity for Announce {
             tracing::debug!("dropping Announce from un-followed board {group_uri}");
             return Ok(());
         }
+        if policy::actor_silenced(&data.pool, group_uri).await? {
+            tracing::info!("dropping Announce from silenced board {group_uri}");
+            return Ok(());
+        }
         let page = self.object.object;
         let group_handle = author_handle(&data.pool, group_uri).await;
         let author_handle = author_handle(&data.pool, page.attributed_to.trim()).await;
@@ -1116,6 +1146,53 @@ impl Activity for Update {
 }
 
 #[async_trait::async_trait]
+impl Activity for Flag {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// File a remote report for an operator to read. Reports are recorded, never
+    /// acted on automatically — deciding what a report means is a human call,
+    /// and auto-acting would hand any peer a remote moderation lever.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let reporter = self.actor.inner().as_str();
+        let handle = author_handle(&data.pool, reporter).await;
+        let objects = self.object.join("\n");
+        let comment =
+            self.object.is_empty().then(String::new).unwrap_or_else(|| {
+                content::html_to_text(self.content.as_deref().unwrap_or_default())
+            });
+        let fresh = moderation::record_report(
+            &data.pool,
+            self.id.as_str(),
+            reporter,
+            &handle,
+            &objects,
+            &comment,
+        )
+        .await?;
+        if fresh {
+            tracing::warn!(
+                "federation report from {handle} about {} object(s)",
+                self.object.len()
+            );
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl Activity for AnyActivity {
     type DataType = AppData;
     type Error = ApError;
@@ -1160,6 +1237,7 @@ impl Activity for InboundActivity {
             InboundActivity::Announce(a) => a.id(),
             InboundActivity::Delete(a) => a.id(),
             InboundActivity::Update(a) => a.id(),
+            InboundActivity::Flag(a) => a.id(),
             InboundActivity::Other(a) => a.id(),
         }
     }
@@ -1173,6 +1251,7 @@ impl Activity for InboundActivity {
             InboundActivity::Announce(a) => a.actor(),
             InboundActivity::Delete(a) => a.actor(),
             InboundActivity::Update(a) => a.actor(),
+            InboundActivity::Flag(a) => a.actor(),
             InboundActivity::Other(a) => a.actor(),
         }
     }
@@ -1186,6 +1265,7 @@ impl Activity for InboundActivity {
             InboundActivity::Announce(a) => a.verify(data).await,
             InboundActivity::Delete(a) => a.verify(data).await,
             InboundActivity::Update(a) => a.verify(data).await,
+            InboundActivity::Flag(a) => a.verify(data).await,
             InboundActivity::Other(a) => a.verify(data).await,
         }
     }
@@ -1199,6 +1279,7 @@ impl Activity for InboundActivity {
             InboundActivity::Announce(a) => a.receive(data).await,
             InboundActivity::Delete(a) => a.receive(data).await,
             InboundActivity::Update(a) => a.receive(data).await,
+            InboundActivity::Flag(a) => a.receive(data).await,
             InboundActivity::Other(a) => a.receive(data).await,
         }
     }

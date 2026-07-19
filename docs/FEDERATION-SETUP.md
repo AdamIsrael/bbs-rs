@@ -31,7 +31,7 @@ mint permanent broken URIs.
 
 The origin you configure must be **scheme + host only** — no port, no path, no
 query. Valid: `https://bbs.example.com`. Rejected: `https://bbs.example.com:8088`,
-`http://…` (unless `debug_insecure`, see §8), `https://1.2.3.4`,
+`http://…` (unless `debug_insecure`, see §9), `https://1.2.3.4`,
 `https://localhost`, `https://host/bbs`.
 
 ---
@@ -297,31 +297,76 @@ acting as the authority for its own content.
 
 > **Still missing**, so you know where the edges are: posting from *here* into a
 > followed remote board; a browsable in-BBS screen for mirrored boards (they're
-> an operator-visible cache via `bbsctl` today); `Announce`-wrapped lifecycle (a
-> board relaying one of its members' deletions); and the moderation surface
-> (inbound reports, domain-block severity). Those are the remaining federation
-> work.
+> an operator-visible cache via `bbsctl` today); and `Announce`-wrapped lifecycle
+> (a board relaying one of its members' deletions).
 
 ---
 
-## 7. `bbsctl` federation commands
+## 7. Moderating federation
+
+### Block severity
+
+`ap-block` takes a `--severity`:
+
+```bash
+bbsctl ap-block bad.example "abuse"                      # suspend (default)
+bbsctl ap-block noisy.example "too chatty" --severity silence
+bbsctl ap-peers                                          # severity shown per row
+```
+
+- **`suspend`** — the hard block. The domain is refused at the door: nothing in,
+  nothing out.
+- **`silence`** — it may still federate (existing follows and opted-in DMs keep
+  working), but its content no longer enters boards, the timeline, or mirrors.
+  The setting for a peer that's noisy rather than hostile.
+
+> **Blocking is not retroactive.** It stops what arrives next; it does not touch
+> what already arrived. That's deliberate — deleting content should never be a
+> silent side effect of a policy change.
+
+To remove what a domain already sent you, do it explicitly:
+
+```bash
+bbsctl ap-purge bad.example --yes     # --yes is required; this cannot be undone
+```
+
+It reports what it removed across board posts, statuses, mirrored posts, and mail.
+
+### Reports from other instances
+
+When a remote instance reports content or an account to you, it arrives as a
+`Flag` and is filed for you to read. **Reports are recorded, never acted on
+automatically** — otherwise any peer could moderate your board by sending
+reports.
+
+```bash
+bbsctl ap-reports              # open reports (--all includes resolved)
+bbsctl ap-resolve 3            # mark report #3 handled
+```
+
+---
+
+## 8. `bbsctl` federation commands
 
 | Command | What it does |
 |---|---|
 | `ap-peers` | List allow/block domains |
 | `ap-allow <domain> [reason]` | Permit a domain (needed in the default allowlist posture) |
-| `ap-block <domain> [reason]` | Block a domain (used when `allowlist_only = false`) |
+| `ap-block <domain> [reason] [--severity suspend\|silence]` | Block a domain — `suspend` refuses it entirely, `silence` only stops its content |
 | `ap-unallow <domain>` / `ap-unblock <domain>` | Remove an allow/block entry |
 | `ap-follow <user> <name@host>` | Follow a remote account on a local user's behalf |
 | `ap-unfollow <user> <name@host>` | Unfollow |
 | `ap-following <user>` | List the remote accounts a user follows, with follow state |
 | `ap-board-posts <board>` | Show cached posts from a followed remote board (handle or actor URI) |
+| `ap-reports [--all]` | Reports other instances have sent you |
+| `ap-resolve <id>` | Mark a report handled |
+| `ap-purge <domain> --yes` | Delete everything a domain sent you (blocking is not retroactive) |
 
 Point `bbsctl` at the same config the server uses: `bbsctl --config /path/to/bbs.toml <cmd>`.
 
 ---
 
-## 8. Testing locally without a public domain
+## 9. Testing locally without a public domain
 
 To exercise the machinery on your workstation — or to test bbs-rs ↔ bbs-rs — use
 **`debug_insecure = true`**, which relaxes the origin rules to permit `http://`,
@@ -351,7 +396,7 @@ post, and DM between them locally.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|

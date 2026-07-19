@@ -170,11 +170,15 @@ enum Cmd {
         #[arg(default_value = "")]
         reason: String,
     },
-    /// Block a domain from federating (used in blocklist posture).
+    /// Block a domain. `--severity suspend` (default) refuses it entirely;
+    /// `silence` still lets it federate but stops accepting its content into
+    /// boards, the timeline, and mirrors.
     ApBlock {
         domain: String,
         #[arg(default_value = "")]
         reason: String,
+        #[arg(long, default_value = "suspend", value_parser = ["suspend", "silence"])]
+        severity: String,
     },
     /// Remove a domain's allow entry.
     ApUnallow { domain: String },
@@ -199,6 +203,23 @@ enum Cmd {
         board: String,
         #[arg(long, default_value_t = 20)]
         limit: i64,
+    },
+    /// Show reports other instances have sent us (open ones by default).
+    ApReports {
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+    /// Mark a report handled.
+    ApResolve { id: i64 },
+    /// Delete everything a domain sent us. Blocking is NOT retroactive — this
+    /// is the deliberate cleanup step for content that already arrived.
+    ApPurge {
+        domain: String,
+        /// Required: this deletes stored content and cannot be undone.
+        #[arg(long)]
+        yes: bool,
     },
     /// Show recent login attempts.
     Logins {
@@ -548,19 +569,36 @@ async fn main() -> anyhow::Result<()> {
                     println!("({kind}: none)");
                 } else {
                     println!("{}:", kind.to_uppercase());
-                    for (domain, reason) in rows {
-                        println!("  {domain:<30} {reason}");
+                    for (domain, reason, severity) in rows {
+                        let tag = if kind == "block" {
+                            format!("[{severity}] ")
+                        } else {
+                            String::new()
+                        };
+                        println!("  {domain:<30} {tag}{reason}");
                     }
                 }
             }
         }
         Cmd::ApAllow { domain, reason } => {
-            bbs_rs::services::federation::policy::set(&pool, &domain, "allow", &reason).await?;
+            bbs_rs::services::federation::policy::set(&pool, &domain, "allow", &reason, "suspend")
+                .await?;
             println!("allowed {domain}");
         }
-        Cmd::ApBlock { domain, reason } => {
-            bbs_rs::services::federation::policy::set(&pool, &domain, "block", &reason).await?;
-            println!("blocked {domain}");
+        Cmd::ApBlock {
+            domain,
+            reason,
+            severity,
+        } => {
+            bbs_rs::services::federation::policy::set(&pool, &domain, "block", &reason, &severity)
+                .await?;
+            println!("blocked {domain} ({severity})");
+            if severity == "suspend" {
+                println!(
+                    "note: this stops what arrives next; it does not delete what already \
+                     arrived — use `ap-purge {domain} --yes` for that"
+                );
+            }
         }
         Cmd::ApUnallow { domain } => {
             let removed =
@@ -656,6 +694,56 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+        }
+        Cmd::ApReports { all, limit } => {
+            use bbs_rs::services::federation::moderation;
+            let reports = moderation::reports(&pool, all, limit).await?;
+            if reports.is_empty() {
+                println!("no {}reports", if all { "" } else { "open " });
+            } else {
+                for r in reports {
+                    let state = if r.resolved_at.is_some() {
+                        "resolved"
+                    } else {
+                        "OPEN"
+                    };
+                    println!(
+                        "#{:<4} {:<8} {}  from {}",
+                        r.id,
+                        state,
+                        fmt_time(r.created_at),
+                        r.reporter_handle
+                    );
+                    if !r.content.is_empty() {
+                        println!("      {}", r.content.replace('\n', "\n      "));
+                    }
+                    for o in r.objects.lines() {
+                        println!("      · {o}");
+                    }
+                }
+            }
+        }
+        Cmd::ApResolve { id } => {
+            let done = bbs_rs::services::federation::moderation::resolve_report(&pool, id).await?;
+            println!(
+                "{}",
+                if done {
+                    format!("report #{id} marked resolved")
+                } else {
+                    format!("no open report #{id}")
+                }
+            );
+        }
+        Cmd::ApPurge { domain, yes } => {
+            anyhow::ensure!(
+                yes,
+                "refusing to delete content without --yes (this cannot be undone)"
+            );
+            let p = bbs_rs::services::federation::moderation::purge_domain(&pool, &domain).await?;
+            println!(
+                "purged {domain}: {} board post(s), {} status(es), {} mirrored post(s), {} mail",
+                p.board_posts, p.statuses, p.mirrored_posts, p.mail
+            );
         }
         Cmd::Logins {
             user,

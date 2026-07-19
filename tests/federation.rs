@@ -834,7 +834,7 @@ async fn domain_policy_allowlist_and_blocklist() {
             .await
             .unwrap()
     );
-    policy::set(&pool, "friend.example", "allow", "a peer")
+    policy::set(&pool, "friend.example", "allow", "a peer", "suspend")
         .await
         .unwrap();
     assert!(
@@ -855,7 +855,7 @@ async fn domain_policy_allowlist_and_blocklist() {
             .await
             .unwrap()
     );
-    policy::set(&pool, "spam.example", "block", "spam")
+    policy::set(&pool, "spam.example", "block", "spam", "suspend")
         .await
         .unwrap();
     assert!(
@@ -2682,5 +2682,176 @@ async fn delete_reaches_statuses_and_mirrored_posts() {
         mirror::count(&pool, &group).await.unwrap(),
         0,
         "mirrored post withdrawn by the announcing board"
+    );
+}
+
+// ---- #112c: moderation surface ---------------------------------------------
+
+/// An inbound `Flag` is filed for an operator — recorded, never acted on
+/// automatically — and a redelivered report lands once.
+#[tokio::test]
+async fn an_inbound_report_is_filed_for_operators() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::moderation;
+    use bbs_rs::web::ap_object::Flag;
+
+    let pool = setup().await;
+    let reporter = insert_follower(&pool, "mod@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+
+    let make = || {
+        serde_json::from_value::<Flag>(serde_json::json!({
+            "type": "Flag",
+            "id": "https://remote.social/flags/1",
+            "actor": reporter,
+            "object": ["https://bbs.example.com/p/1", "https://bbs.example.com/u/alice"],
+            "content": "<p>spam &amp; abuse</p>",
+        }))
+        .unwrap()
+    };
+    make().receive(&data).await.unwrap();
+    make().receive(&data).await.unwrap();
+
+    assert_eq!(moderation::open_report_count(&pool).await.unwrap(), 1);
+    let reports = moderation::reports(&pool, false, 10).await.unwrap();
+    let r = &reports[0];
+    assert_eq!(r.reporter_handle, "mod@remote.social");
+    assert_eq!(
+        r.content, "spam & abuse",
+        "the comment is degraded like any remote text"
+    );
+    assert_eq!(r.objects.lines().count(), 2, "both reported objects kept");
+    assert!(r.resolved_at.is_none());
+
+    assert!(moderation::resolve_report(&pool, r.id).await.unwrap());
+    assert_eq!(moderation::open_report_count(&pool).await.unwrap(), 0);
+    assert!(
+        !moderation::resolve_report(&pool, r.id).await.unwrap(),
+        "resolving twice is a no-op"
+    );
+}
+
+/// `silence` is the middle setting: the domain may still federate, but its
+/// content stops entering shared surfaces. `suspend` is refused at the door.
+#[tokio::test]
+async fn silence_blocks_content_while_suspend_blocks_the_domain() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::policy;
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+    let board = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap()
+        .id;
+
+    // Silenced: still federates (not refused at the door)...
+    policy::set(&pool, "remote.social", "block", "noisy", "silence")
+        .await
+        .unwrap();
+    assert!(
+        policy::domain_allowed(&pool, "bbs.example.com", "remote.social", false)
+            .await
+            .unwrap(),
+        "a silenced domain may still federate"
+    );
+    assert!(
+        policy::domain_silenced(&pool, "remote.social")
+            .await
+            .unwrap()
+    );
+
+    // ...but its board post is dropped.
+    board_post_from(
+        &bob,
+        "https://remote.social/p/silenced",
+        Some(&keys.actor_uri),
+        &[],
+        "should not land",
+        "<p>nope</p>",
+        None,
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    assert!(
+        boards::list_messages(&pool, board)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a silenced domain's content stays out of the board"
+    );
+
+    // Suspended: refused outright, in either posture.
+    policy::set(&pool, "remote.social", "block", "abuse", "suspend")
+        .await
+        .unwrap();
+    assert!(
+        !policy::domain_allowed(&pool, "bbs.example.com", "remote.social", false)
+            .await
+            .unwrap(),
+        "a suspended domain is refused at the door"
+    );
+}
+
+/// Blocking is not retroactive — purging is the explicit, separate act.
+#[tokio::test]
+async fn purging_a_domain_removes_what_already_arrived() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{moderation, policy};
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let data = fed_data(&pool).await;
+    let board = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap()
+        .id;
+
+    board_post_from(
+        &bob,
+        "https://remote.social/p/kept",
+        Some(&keys.actor_uri),
+        &[],
+        "already here",
+        "<p>arrived before the block</p>",
+        None,
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    assert_eq!(boards::list_messages(&pool, board).await.unwrap().len(), 1);
+
+    // Blocking stops what comes next; the existing post stays.
+    policy::set(&pool, "remote.social", "block", "abuse", "suspend")
+        .await
+        .unwrap();
+    assert_eq!(
+        boards::list_messages(&pool, board).await.unwrap().len(),
+        1,
+        "defederation is not retroactive"
+    );
+
+    // Purging is the deliberate cleanup.
+    let purged = moderation::purge_domain(&pool, "remote.social")
+        .await
+        .unwrap();
+    assert_eq!(purged.board_posts, 1);
+    assert!(
+        boards::list_messages(&pool, board)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
