@@ -36,7 +36,7 @@ use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
 use crate::util::{now_unix, reply_subject};
 
-use state::{Field, Form, MenuItem, Screen};
+use state::{Field, Form, MenuItem, MirrorRow, Screen};
 
 /// All per-session state.
 pub struct App {
@@ -79,11 +79,11 @@ pub struct App {
     // someone else's board, not content we're the authority for.
     pub remote_boards: Vec<crate::services::federation::mirror::Board>,
     pub remote_board_sel: usize,
-    pub mirror_posts: Vec<crate::services::federation::mirror::ThreadedPost>,
-    /// Posts we submitted to this board that it hasn't announced back yet (#131).
-    pub mirror_pending: Vec<crate::services::federation::remote_posting::Pending>,
+    pub mirror_rows: Vec<MirrorRow>,
     pub mirror_sel: usize,
     pub current_remote_board: Option<crate::services::federation::mirror::Board>,
+    /// The remote post URI being replied to, while composing (#139 Slice C).
+    pub remote_reply_to: Option<String>,
 
     // Boards
     pub boards: Vec<Board>,
@@ -248,10 +248,10 @@ impl App {
             timeline_sel: 0,
             remote_boards: Vec::new(),
             remote_board_sel: 0,
-            mirror_posts: Vec::new(),
-            mirror_pending: Vec::new(),
+            mirror_rows: Vec::new(),
             mirror_sel: 0,
             current_remote_board: None,
+            remote_reply_to: None,
             boards: Vec::new(),
             board_sel: 0,
             current_board: None,
@@ -686,13 +686,13 @@ impl App {
         };
         match crate::services::federation::mirror::thread(&self.pool, &board.group_uri, 200).await {
             Ok(posts) => {
-                self.mirror_pending = crate::services::federation::remote_posting::pending(
+                let pending = crate::services::federation::remote_posting::pending(
                     &self.pool,
                     &board.group_uri,
                 )
                 .await
                 .unwrap_or_default();
-                self.mirror_posts = posts;
+                self.mirror_rows = merge_pending(posts, pending);
                 self.mirror_sel = 0;
                 self.current_remote_board = Some(board);
                 self.screen = Screen::RemoteBoardPosts;
@@ -704,7 +704,9 @@ impl App {
     /// Start a submission to the open remote board (#131). The guards that would
     /// fail at submit are checked here instead, so the user learns why up front
     /// rather than after typing a post.
-    fn begin_compose_remote_post(&mut self) {
+    /// `reply_to` is the selected post when replying (#139 Slice C), `None` for
+    /// a new thread.
+    fn begin_compose_remote_post(&mut self, reply_to: Option<&MirrorRow>) {
         if self.user.is_guest() {
             self.status = "Guests cannot post — register an account first.".into();
             return;
@@ -719,10 +721,23 @@ impl App {
             );
             return;
         }
-        self.form = Form::new(vec![
-            Field::new("Subject", false),
-            Field::new("Body", false),
-        ]);
+        // A reply to a post the board hasn't published yet has nothing stable to
+        // point at: our submission's URI only becomes real to *them* once they
+        // accept it, so a reply naming it would dangle on their side.
+        if reply_to.is_some_and(|r| r.pending) {
+            self.status =
+                "That post hasn't been published by the board yet — wait for it to appear.".into();
+            return;
+        }
+        let mut subject = Field::new("Subject", false);
+        self.remote_reply_to = match reply_to {
+            Some(row) => {
+                subject.value = reply_subject(&row.subject);
+                Some(row.ap_id.clone())
+            }
+            None => None,
+        };
+        self.form = Form::new(vec![subject, Field::new("Body", false)]);
         self.screen = Screen::ComposeRemotePost;
     }
 
@@ -764,10 +779,12 @@ impl App {
             &subject,
             &body,
             &self.config.limits,
+            self.remote_reply_to.as_deref(),
         )
         .await
         {
             Ok(_) => {
+                self.remote_reply_to = None;
                 self.status = format!(
                     "Sent to {} — it appears here once the board publishes it.",
                     board.handle
@@ -784,14 +801,16 @@ impl App {
                 self.mirror_sel = self.mirror_sel.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                // The list is pending submissions followed by mirrored posts, so
-                // the selection runs over both.
-                if self.mirror_sel + 1 < self.mirror_pending.len() + self.mirror_posts.len() {
+                if self.mirror_sel + 1 < self.mirror_rows.len() {
                     self.mirror_sel += 1;
                 }
             }
-            KeyCode::Char('p') => self.begin_compose_remote_post(),
-            KeyCode::Char('r') => self.open_remote_board().await,
+            KeyCode::Char('p') => self.begin_compose_remote_post(None),
+            KeyCode::Char('r') => {
+                let target = self.mirror_rows.get(self.mirror_sel).cloned();
+                self.begin_compose_remote_post(target.as_ref());
+            }
+            KeyCode::Char('R') => self.open_remote_board().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
                 self.current_remote_board = None;
                 self.screen = Screen::RemoteBoards;
@@ -2112,6 +2131,54 @@ fn load_art(cfg: &crate::config::Art) -> HashMap<Screen, Text<'static>> {
     out
 }
 
+/// Merge our not-yet-published submissions into a mirrored board's thread.
+///
+/// A pending reply is placed directly after the post it answers, one level
+/// deeper; a pending root (or one whose parent we don't hold) goes at the top,
+/// since it's the newest thing the user did. Everything else keeps the order
+/// `mirror::thread` produced.
+fn merge_pending(
+    posts: Vec<crate::services::federation::mirror::ThreadedPost>,
+    pending: Vec<crate::services::federation::remote_posting::Pending>,
+) -> Vec<MirrorRow> {
+    let mut rows: Vec<MirrorRow> = posts
+        .into_iter()
+        .map(|t| MirrorRow {
+            ap_id: t.post.ap_id,
+            subject: t.post.subject,
+            author_handle: t.post.author_handle,
+            published: t.post.published,
+            body: t.post.content,
+            depth: t.depth,
+            pending: false,
+        })
+        .collect();
+
+    for p in pending {
+        let row = MirrorRow {
+            ap_id: p.ap_id,
+            subject: p.subject,
+            author_handle: p.author_handle,
+            published: p.created_at,
+            body: p.body,
+            depth: 0,
+            pending: true,
+        };
+        match p
+            .in_reply_to
+            .as_deref()
+            .and_then(|parent| rows.iter().position(|r| r.ap_id == parent))
+        {
+            Some(at) => {
+                let depth = rows[at].depth + 1;
+                rows.insert(at + 1, MirrorRow { depth, ..row });
+            }
+            None => rows.insert(0, row),
+        }
+    }
+    rows
+}
+
 /// Trim a subject/title for inclusion in the one-line status bar.
 fn truncate_status(s: &str) -> String {
     const MAX: usize = 40;
@@ -2203,4 +2270,98 @@ pub async fn run<W: std::io::Write>(
 
     app.presence.leave(app.session_id).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::federation::mirror::{Post, ThreadedPost};
+    use crate::services::federation::remote_posting::Pending;
+
+    fn post(ap_id: &str, subject: &str, depth: u16) -> ThreadedPost {
+        ThreadedPost {
+            post: Post {
+                id: 1,
+                ap_id: ap_id.into(),
+                group_uri: "https://remote.social/c/x".into(),
+                group_handle: "x@remote.social".into(),
+                author_handle: "bob@remote.social".into(),
+                subject: subject.into(),
+                content: "body".into(),
+                url: None,
+                published: 100,
+                in_reply_to: None,
+            },
+            depth,
+        }
+    }
+
+    fn pending(ap_id: &str, subject: &str, in_reply_to: Option<&str>) -> Pending {
+        Pending {
+            id: 1,
+            ap_id: ap_id.into(),
+            group_uri: "https://remote.social/c/x".into(),
+            author_handle: "alice".into(),
+            subject: subject.into(),
+            body: "mine".into(),
+            created_at: 200,
+            in_reply_to: in_reply_to.map(Into::into),
+        }
+    }
+
+    /// A pending reply sits under the post it answers, not at the top — the
+    /// whole point of merging the two lists (#139 Slice C).
+    #[test]
+    fn a_pending_reply_is_placed_under_its_parent() {
+        let rows = merge_pending(
+            vec![post("p/1", "Root", 0), post("p/2", "Re: Root", 1)],
+            vec![pending("mine/1", "Re: Root", Some("p/1"))],
+        );
+        let ids: Vec<&str> = rows.iter().map(|r| r.ap_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["p/1", "mine/1", "p/2"],
+            "inserted after its parent"
+        );
+        assert_eq!(rows[1].depth, 1, "one level deeper than the parent");
+        assert!(rows[1].pending);
+        assert!(!rows[0].pending);
+    }
+
+    /// A pending *root* goes to the top: it's the newest thing the user did and
+    /// answers nothing.
+    #[test]
+    fn a_pending_root_goes_first() {
+        let rows = merge_pending(
+            vec![post("p/1", "Root", 0)],
+            vec![pending("mine/1", "New thread", None)],
+        );
+        assert_eq!(rows[0].ap_id, "mine/1");
+        assert_eq!(rows[0].depth, 0);
+    }
+
+    /// A pending reply to a post we don't hold can't be nested, so it surfaces
+    /// at the top rather than vanishing — same rule the mirror uses for an
+    /// orphaned remote reply.
+    #[test]
+    fn a_pending_reply_to_an_unknown_parent_still_appears() {
+        let rows = merge_pending(
+            vec![post("p/1", "Root", 0)],
+            vec![pending("mine/1", "Re: something", Some("p/999"))],
+        );
+        assert_eq!(rows.len(), 2, "nothing is dropped");
+        assert_eq!(rows[0].ap_id, "mine/1");
+        assert_eq!(rows[0].depth, 0);
+    }
+
+    /// Nesting under a reply keeps going deeper.
+    #[test]
+    fn a_pending_reply_to_a_reply_nests_two_deep() {
+        let rows = merge_pending(
+            vec![post("p/1", "Root", 0), post("p/2", "Re: Root", 1)],
+            vec![pending("mine/1", "Re: Re: Root", Some("p/2"))],
+        );
+        let mine = rows.iter().find(|r| r.pending).unwrap();
+        assert_eq!(mine.depth, 2);
+    }
 }

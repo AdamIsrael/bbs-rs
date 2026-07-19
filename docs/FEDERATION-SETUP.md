@@ -351,8 +351,10 @@ Mirrored boards show replies threaded under their parent, both in the BBS and in
 a mirror only holds what was announced while you were subscribed — is shown as a
 top-level post rather than hidden.
 
-> **Still missing**, so you know where the edges are: replying *into* a followed
-> remote board isn't wired up yet (tracked on #139).
+Replying works in both directions: `r` on a mirrored post sends a reply to that
+board, and it appears under its parent marked `[sent — awaiting the board]` until
+the board publishes it. You can't reply to a post that's still pending — its URI
+isn't real to the remote board yet.
 
 ---
 

@@ -1,0 +1,12 @@
+-- Posts we submit to a remote board can be replies (#139 Slice C).
+--
+-- `ap_outbox_posts` recorded only root submissions, because that's all #131
+-- could send. A reply needs the parent's URI for two reasons: it goes on the
+-- wire as `inReplyTo`, and until the board publishes the reply we show it from
+-- this table — so without the parent we'd have to display it detached from the
+-- conversation it belongs to, which is exactly the flat-thread problem 0021 just
+-- fixed on the receiving side.
+--
+-- A URI, not a local id, for the same reason as `ap_board_posts.in_reply_to`:
+-- the parent lives on someone else's board and has no row of ours.
+ALTER TABLE ap_outbox_posts ADD COLUMN in_reply_to TEXT;

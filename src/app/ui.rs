@@ -401,8 +401,8 @@ fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
         Some(b) => format!(" {} · mirrored copy ", truncate(&b.handle, 40)),
         None => " Remote Board ".to_string(),
     };
-    if app.mirror_posts.is_empty() && app.mirror_pending.is_empty() {
-        let pending = app
+    if app.mirror_rows.is_empty() {
+        let unaccepted = app
             .current_remote_board
             .as_ref()
             .is_some_and(|b| b.state != "accepted");
@@ -410,7 +410,7 @@ fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
             f,
             area,
             &title,
-            if pending {
+            if unaccepted {
                 "This subscription hasn't been accepted by the remote server yet. \
                  Posts appear once it is."
             } else {
@@ -422,54 +422,39 @@ fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
     let width = inner.max(1);
     let mut lines: Vec<Line> = Vec::new();
     let mut header_rows: Vec<usize> = Vec::new();
-    // Our own submissions the board hasn't published yet (#131), first because
-    // they're the newest thing the user did — and marked, because we are not the
-    // ones who decide they're published.
-    for p in &app.mirror_pending {
+    for row in &app.mirror_rows {
         header_rows.push(lines.len());
-        lines.push(Line::from(vec![
-            Span::styled(p.subject.clone(), Style::default().fg(app.theme.accent)),
+        // Indent replies like a local thread, so a mirrored board reads the same
+        // as one of ours (#139). Body lines carry the same indent as their
+        // header — otherwise a nested reply's text runs back to the margin and
+        // the nesting stops being legible past the first line.
+        let indent = "  ".repeat(row.depth as usize);
+        let lead = if row.depth > 0 { "↳ " } else { "" };
+        let mut spans = vec![
+            Span::raw(format!("{indent}{lead}")),
+            Span::styled(row.subject.clone(), Style::default().fg(app.theme.accent)),
             Span::styled(
-                format!("  · @{} · {}", p.author_handle, fmt_time(p.created_at)),
+                format!("  · @{} · {}", row.author_handle, fmt_time(row.published)),
                 Style::default().fg(app.theme.dim),
             ),
-            Span::styled(
+        ];
+        // Our own submission, not yet published by the board — we don't get to
+        // call it published, so it says so.
+        if row.pending {
+            spans.push(Span::styled(
                 "  [sent — awaiting the board]",
                 Style::default().fg(app.theme.warning_fg),
-            ),
-        ]));
-        for para in p.body.lines() {
-            if para.is_empty() {
-                lines.push(Line::from(""));
-            } else {
-                for row in wrap_text(para, width) {
-                    lines.push(Line::from(row));
-                }
-            }
+            ));
         }
-        lines.push(Line::from(""));
-    }
-    for item in &app.mirror_posts {
-        let p = &item.post;
-        header_rows.push(lines.len());
-        // Indent replies exactly like a local thread, so a mirrored board reads
-        // the same as one of ours (#139).
-        let indent = "  ".repeat(item.depth as usize);
-        let lead = if item.depth > 0 { "↳ " } else { "" };
-        lines.push(Line::from(vec![
-            Span::raw(format!("{indent}{lead}")),
-            Span::styled(p.subject.clone(), Style::default().fg(app.theme.accent)),
-            Span::styled(
-                format!("  · @{} · {}", p.author_handle, fmt_time(p.published)),
-                Style::default().fg(app.theme.dim),
-            ),
-        ]));
-        for para in p.content.lines() {
+        lines.push(Line::from(spans));
+
+        let body_width = width.saturating_sub(indent.len()).max(1);
+        for para in row.body.lines() {
             if para.is_empty() {
                 lines.push(Line::from(""));
             } else {
-                for row in wrap_text(para, width) {
-                    lines.push(Line::from(row));
+                for wrapped in wrap_text(para, body_width) {
+                    lines.push(Line::from(format!("{indent}{wrapped}")));
                 }
             }
         }
@@ -1155,7 +1140,7 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
         Screen::Timeline => " ↑/↓ scroll · f follow · r refresh · Esc back ",
         Screen::RemoteBoards => " ↑/↓ select · Enter open · r refresh · Esc back ",
-        Screen::RemoteBoardPosts => " ↑/↓ scroll · p post · r refresh · Esc back ",
+        Screen::RemoteBoardPosts => " ↑/↓ scroll · p post · r reply · R refresh · Esc back ",
         Screen::ComposeRemotePost => " Tab/Enter next field · Enter on Body sends · Esc cancel ",
         Screen::FollowRemote => " type user@host · Enter follow · Esc cancel ",
         Screen::BoardList => {

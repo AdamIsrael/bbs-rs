@@ -150,3 +150,23 @@ impl Form {
         self.fields[idx].value.trim()
     }
 }
+
+/// One row of a mirrored board's thread view.
+///
+/// Mirrored posts and our own not-yet-published submissions are merged into a
+/// single ordered list so a pending reply sits under the post it answers,
+/// instead of floating at the top detached from its conversation. Keeping them
+/// in two lists would reproduce, on the sending side, exactly the flat-thread
+/// problem #139 Slice B fixed on the receiving side.
+#[derive(Debug, Clone)]
+pub struct MirrorRow {
+    /// The post's permanent URI — what a reply to it points at.
+    pub ap_id: String,
+    pub subject: String,
+    pub author_handle: String,
+    pub published: i64,
+    pub body: String,
+    pub depth: u16,
+    /// True for our own submission the board hasn't announced back yet.
+    pub pending: bool,
+}

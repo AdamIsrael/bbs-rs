@@ -3632,6 +3632,7 @@ async fn posting_to_a_remote_board_queues_a_create_for_its_inbox() {
         "Hello from bbs-rs",
         "posting across the fediverse",
         &Default::default(),
+        None,
     )
     .await
     .unwrap();
@@ -3689,6 +3690,7 @@ async fn a_submission_is_pending_until_the_board_announces_it_back() {
         "Hello",
         "body",
         &Default::default(),
+        None,
     )
     .await
     .unwrap();
@@ -3752,6 +3754,7 @@ async fn posting_to_an_unaccepted_board_is_refused() {
         "Hello",
         "body",
         &Default::default(),
+        None,
     )
     .await
     .unwrap_err();
@@ -3776,6 +3779,7 @@ async fn posting_to_an_unsubscribed_board_is_refused() {
         "Hello",
         "body",
         &Default::default(),
+        None,
     )
     .await
     .unwrap_err();
@@ -3804,6 +3808,7 @@ async fn a_guest_cannot_post_to_a_remote_board() {
         "Hello",
         "body",
         &Default::default(),
+        None,
     )
     .await
     .unwrap_err();
@@ -3836,7 +3841,7 @@ async fn remote_board_posts_are_rate_limited_like_local_ones() {
         .await
         .unwrap();
 
-    let err = remote_posting::submit(&pool, &origin, &alice, &group, "Hi", "body", &limits)
+    let err = remote_posting::submit(&pool, &origin, &alice, &group, "Hi", "body", &limits, None)
         .await
         .unwrap_err();
     assert!(
@@ -4419,4 +4424,132 @@ async fn a_nameless_reply_to_a_reply_does_not_double_the_re_prefix() {
         "not 'Re: Re: …'"
     );
     assert_eq!(deepest.depth, 2, "nested two levels down");
+}
+
+// ---- #139c: replying into a followed remote board ---------------------------
+
+/// A reply into a remote board goes out as a `Note` with `inReplyTo` pointing at
+/// **their** object — we're a contributor to their thread, not its authority.
+#[tokio::test]
+async fn replying_into_a_remote_board_points_at_their_post() {
+    use bbs_rs::services::federation::{Origin, queue, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = subscribe_to_board(&pool, "rustaceans@remote.social").await;
+
+    let ap_id = remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "Re: Their thread",
+        "chiming in from bbs-rs",
+        &Default::default(),
+        Some("https://remote.social/p/1"),
+    )
+    .await
+    .unwrap();
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    let body: serde_json::Value = serde_json::from_str(&due.last().unwrap().activity).unwrap();
+    let note = &body["object"];
+    assert_eq!(note["type"], "Note", "a reply is a Note, not a Page");
+    assert_eq!(note["id"], ap_id);
+    assert_eq!(
+        note["inReplyTo"], "https://remote.social/p/1",
+        "points at their object, not anything of ours"
+    );
+    assert_eq!(note["audience"], group, "still routed to their board");
+    assert_eq!(
+        body["actor"], "https://bbs.example.com/u/alice",
+        "the author signs — the remote board decides whether to publish"
+    );
+    assert_eq!(note["name"], "Re: Their thread", "subject survives the hop");
+}
+
+/// A pending reply is recorded with its parent, so it can be shown in the right
+/// place in the thread while it waits for the board to publish it.
+#[tokio::test]
+async fn a_pending_reply_remembers_what_it_answers() {
+    use bbs_rs::services::federation::{Origin, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = subscribe_to_board(&pool, "rustaceans@remote.social").await;
+
+    remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "Re: Theirs",
+        "body",
+        &Default::default(),
+        Some("https://remote.social/p/1"),
+    )
+    .await
+    .unwrap();
+    remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "A new thread",
+        "body",
+        &Default::default(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let pending = remote_posting::pending(&pool, &group).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    let reply = pending.iter().find(|p| p.subject == "Re: Theirs").unwrap();
+    assert_eq!(
+        reply.in_reply_to.as_deref(),
+        Some("https://remote.social/p/1")
+    );
+    let root = pending
+        .iter()
+        .find(|p| p.subject == "A new thread")
+        .unwrap();
+    assert_eq!(root.in_reply_to, None, "a new thread answers nothing");
+}
+
+/// Replies obey the same guards as root submissions — an unaccepted
+/// subscription can't be replied into either.
+#[tokio::test]
+async fn replying_into_an_unaccepted_board_is_refused() {
+    use bbs_rs::services::federation::{Origin, follows, queue, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = insert_follower(&pool, "slow@remote.social", "remote.social", None).await;
+    follows::request(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    let err = remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "Re: nope",
+        "body",
+        &Default::default(),
+        Some("https://remote.social/p/1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err}").contains("accepted"), "got: {err}");
+    assert_eq!(queue::pending(&pool).await.unwrap(), 0);
 }

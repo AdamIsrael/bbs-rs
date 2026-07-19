@@ -265,6 +265,25 @@ already.
 `bbsctl ap-board-posts` threads its output too. A flat rendering of a conversation misrepresents it, and
 having the operator view disagree with the in-BBS view is the outbox/fan-out drift all over again.
 
+### #139 Slice C — replying into a followed remote board (post-epic follow-up)
+
+Completes #139. `r` on a mirrored post composes a reply; it goes out as a `Create{Note}` with `inReplyTo`
+pointing at **their** object, addressed to their Group. We're a contributor to their thread, so the author
+signs and the remote board decides whether to publish — the same posture as #131's root submissions.
+Migration 0022 adds `ap_outbox_posts.in_reply_to`.
+
+**Pending submissions are merged into the thread, not listed beside it.** A pending reply is placed
+directly under the post it answers, one level deeper, keeping its `[sent — awaiting the board]` marker.
+Keeping the two lists separate would have reproduced, on the sending side, exactly the flat-thread problem
+Slice B just fixed on the receiving side. `merge_pending` owns that ordering and is unit-tested for the
+four cases that matter: reply under parent, root at top, unknown parent still shown, and nesting two deep.
+
+**You can't reply to a pending post.** Our submission's URI isn't real to the remote board until they
+accept it, so a reply naming it would dangle on their side. Refused with an explanation rather than
+allowed to fail silently later.
+
+`R` refreshes the screen now that `r` replies, matching the local board screens where `r` is reply.
+
 ### #131 — posting into a followed remote board (post-epic follow-up)
 
 The receiving half has worked since #112a; this is the sending half. The asymmetry with our own boards is
