@@ -709,6 +709,28 @@ pub mod objects {
         }
     }
 
+    /// Build a `Note` **replying** to a post on a remote board (#139 Slice C).
+    ///
+    /// Mirror image of [`board_reply`], which addresses one of our own Groups.
+    /// `in_reply_to` is the parent's URI on that remote board — we are a
+    /// contributor to their thread, so we point at their object and let them
+    /// decide whether to publish.
+    pub fn remote_board_reply(
+        ap_id: &str,
+        author_uri: &str,
+        group_uri: &str,
+        subject: &str,
+        body: &str,
+        published_unix: i64,
+        in_reply_to: &str,
+    ) -> BoardItem {
+        let mut item =
+            remote_board_page(ap_id, author_uri, group_uri, subject, body, published_unix);
+        item.kind = "Note";
+        item.in_reply_to = Some(in_reply_to.to_string());
+        item
+    }
+
     /// Wrap a submission in the author's `Create`. Unlike [`board_announce`],
     /// the **author** signs and owns this — we're a contributor to that board,
     /// not its hub.
@@ -1989,6 +2011,8 @@ pub mod remote_posting {
         pub subject: String,
         pub body: String,
         pub created_at: i64,
+        /// The remote parent's URI when this submission is a reply (#139).
+        pub in_reply_to: Option<String>,
     }
 
     /// Submit a post to a remote board: record it, mint its permanent URI, and
@@ -1997,6 +2021,7 @@ pub mod remote_posting {
     /// Returns the minted `ap_id`. Errors rather than silently no-oping when the
     /// board is unknown or the subscription isn't accepted — unlike a fan-out,
     /// this is a direct user action and deserves to be told it failed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit(
         pool: &SqlitePool,
         origin: &Origin,
@@ -2005,6 +2030,7 @@ pub mod remote_posting {
         subject: &str,
         body: &str,
         limits: &crate::config::Limits,
+        in_reply_to: Option<&str>,
     ) -> Result<String> {
         if author.is_guest() {
             return Err(AppError::GuestNotAllowed);
@@ -2048,14 +2074,16 @@ pub mod remote_posting {
 
         let created_at = now_unix();
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO ap_outbox_posts (group_uri, author_id, subject, body, created_at) \
-             VALUES (?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO ap_outbox_posts \
+               (group_uri, author_id, subject, body, created_at, in_reply_to) \
+             VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(group_uri)
         .bind(author.id)
         .bind(subject)
         .bind(body)
         .bind(created_at)
+        .bind(in_reply_to)
         .fetch_one(pool)
         .await?;
 
@@ -2069,11 +2097,28 @@ pub mod remote_posting {
             .await?;
 
         let author_uri = origin.person(&author.username);
-        let page =
-            objects::remote_board_page(&ap_id, &author_uri, group_uri, subject, body, created_at);
-        let create = objects::remote_board_create(page);
+        let item = match in_reply_to {
+            None => objects::remote_board_page(
+                &ap_id,
+                &author_uri,
+                group_uri,
+                subject,
+                body,
+                created_at,
+            ),
+            Some(parent) => objects::remote_board_reply(
+                &ap_id,
+                &author_uri,
+                group_uri,
+                subject,
+                body,
+                created_at,
+                parent,
+            ),
+        };
+        let create = objects::remote_board_create(item);
         let activity = serde_json::to_string(&create)
-            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Create{{Page}}: {e}")))?;
+            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Create: {e}")))?;
         queue::enqueue(pool, &author_uri, &inbox, &activity, Some(&create.id)).await?;
         Ok(ap_id)
     }
@@ -2086,7 +2131,7 @@ pub mod remote_posting {
     pub async fn pending(pool: &SqlitePool, group_uri: &str) -> Result<Vec<Pending>> {
         let rows = sqlx::query_as::<_, Pending>(
             "SELECT o.id, o.ap_id, o.group_uri, u.username AS author_handle, \
-                    o.subject, o.body, o.created_at \
+                    o.subject, o.body, o.created_at, o.in_reply_to \
                FROM ap_outbox_posts o \
                JOIN users u ON u.id = o.author_id \
               WHERE o.group_uri = ? \
