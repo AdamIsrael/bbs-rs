@@ -2481,3 +2481,206 @@ async fn inbound_board_posts_are_rate_limited() {
         "a flooding remote author is capped at the configured per-window budget"
     );
 }
+
+// ---- #112b: honoring remote Delete / Update --------------------------------
+
+/// Seed a board post authored remotely, and return (board_id, ap_id).
+async fn seed_remote_board_post(pool: &SqlitePool, author_uri: &str, ap_id: &str) -> i64 {
+    use activitypub_federation::traits::Activity;
+    let keys = mint_general_group(pool).await;
+    let data = fed_data(pool).await;
+    board_post_from(
+        author_uri,
+        ap_id,
+        Some(&keys.actor_uri),
+        &[],
+        "Original subject",
+        "<p>original body</p>",
+        None,
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    bbs_rs::services::boards::list_boards(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap()
+        .id
+}
+
+/// An author can withdraw their own board post; the row (and its search index
+/// entry) goes with it.
+#[tokio::test]
+async fn a_remote_author_can_delete_their_board_post() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+    use bbs_rs::web::ap_object::Delete;
+
+    let pool = setup().await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let board = seed_remote_board_post(&pool, &bob, "https://remote.social/p/1").await;
+    assert_eq!(boards::list_messages(&pool, board).await.unwrap().len(), 1);
+
+    let data = fed_data(&pool).await;
+    let del: Delete = serde_json::from_value(serde_json::json!({
+        "type": "Delete",
+        "id": "https://remote.social/d/1",
+        "actor": bob,
+        "object": "https://remote.social/p/1",
+    }))
+    .unwrap();
+    del.receive(&data).await.unwrap();
+
+    assert!(
+        boards::list_messages(&pool, board)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The FTS index dropped it too — a deleted remote post can't resurface in search.
+    let hits = bbs_rs::services::search::search_messages(&pool, "user", "original", 10)
+        .await
+        .unwrap();
+    assert!(hits.is_empty(), "deleted post must leave the search index");
+}
+
+/// One actor cannot delete another's content — authorization is in the SQL, so
+/// a foreign Delete is simply a no-op.
+#[tokio::test]
+async fn a_delete_from_the_wrong_actor_is_refused() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+    use bbs_rs::web::ap_object::Delete;
+
+    let pool = setup().await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let carol = insert_follower(&pool, "carol@other.example", "other.example", None).await;
+    let board = seed_remote_board_post(&pool, &bob, "https://remote.social/p/2").await;
+
+    let data = fed_data(&pool).await;
+    let del: Delete = serde_json::from_value(serde_json::json!({
+        "type": "Delete",
+        "id": "https://other.example/d/1",
+        "actor": carol,
+        "object": "https://remote.social/p/2",
+    }))
+    .unwrap();
+    del.receive(&data).await.unwrap();
+
+    assert_eq!(
+        boards::list_messages(&pool, board).await.unwrap().len(),
+        1,
+        "carol cannot delete bob's post"
+    );
+}
+
+/// A remote edit is applied, and its new content is degraded like the original.
+#[tokio::test]
+async fn a_remote_author_can_update_their_board_post() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+    use bbs_rs::web::ap_object::Update;
+
+    let pool = setup().await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let board = seed_remote_board_post(&pool, &bob, "https://remote.social/p/3").await;
+
+    let data = fed_data(&pool).await;
+    let upd: Update = serde_json::from_value(serde_json::json!({
+        "type": "Update",
+        "id": "https://remote.social/u/1",
+        "actor": bob,
+        "object": {
+            "type": "Page",
+            "id": "https://remote.social/p/3",
+            "name": "Edited subject",
+            "content": "<p>edited &amp; <b>degraded</b></p>",
+        }
+    }))
+    .unwrap();
+    upd.receive(&data).await.unwrap();
+
+    let msgs = boards::list_messages(&pool, board).await.unwrap();
+    assert_eq!(msgs[0].subject, "Edited subject");
+    assert_eq!(
+        msgs[0].body, "edited & degraded",
+        "the edit is degraded like any other remote content"
+    );
+}
+
+/// Delete also reaches cached statuses and mirrored board posts — every
+/// federated store, authorized by owner.
+#[tokio::test]
+async fn delete_reaches_statuses_and_mirrored_posts() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, mirror, timeline};
+    use bbs_rs::web::ap_object::Delete;
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let alice_uri = "https://bbs.example.com/u/alice".to_string();
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &alice_uri, &bob, "f1")
+        .await
+        .unwrap();
+    follows::accept(&pool, &alice_uri, &group, "f2")
+        .await
+        .unwrap();
+    let data = fed_data(&pool).await;
+
+    // A cached status from bob...
+    serde_json::from_value::<bbs_rs::web::ap_object::Create>(serde_json::json!({
+        "type": "Create",
+        "id": "https://remote.social/a/1",
+        "actor": bob,
+        "object": {
+            "type": "Note",
+            "id": "https://remote.social/s/1",
+            "attributedTo": bob,
+            "content": "<p>a status</p>",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        }
+    }))
+    .unwrap()
+    .receive(&data)
+    .await
+    .unwrap();
+    // ...and a mirrored post announced by the board.
+    board_announce_from(
+        &group,
+        "https://remote.social/bp/1",
+        &bob,
+        "mirrored",
+        "<p>mirrored body</p>",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    assert_eq!(timeline::count(&pool).await.unwrap(), 1);
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+
+    // bob deletes his status; the board withdraws the mirrored post.
+    for (actor, object) in [
+        (&bob, "https://remote.social/s/1"),
+        (&group, "https://remote.social/bp/1"),
+    ] {
+        let del: Delete = serde_json::from_value(serde_json::json!({
+            "type": "Delete",
+            "id": format!("{object}/delete"),
+            "actor": actor,
+            "object": object,
+        }))
+        .unwrap();
+        del.receive(&data).await.unwrap();
+    }
+
+    assert_eq!(timeline::count(&pool).await.unwrap(), 0, "status withdrawn");
+    assert_eq!(
+        mirror::count(&pool, &group).await.unwrap(),
+        0,
+        "mirrored post withdrawn by the announcing board"
+    );
+}
