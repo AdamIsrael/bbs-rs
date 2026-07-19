@@ -32,6 +32,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   jump straight from a hit to the message.
 - **Multi-line compose** — board posts and mail are written in a full-screen editor with word-wrap,
   cursor movement, and line breaks (Enter for a new line, `^D` to send). Oneliners stay single-line.
+- **Mail actions** — reply (quotes the original), forward, and delete, from the reading and mailbox
+  screens. Delete is scoped to the recipient's own copy.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
 - **Access control** — three roles (`guest` / `user` / `admin`); admins get an in-BBS admin view.
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.

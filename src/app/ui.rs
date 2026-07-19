@@ -68,6 +68,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ComposePost => render_compose(f, body, " New Post ", app),
         Screen::Mailbox => render_mailbox(f, body, app),
         Screen::ReadMail => render_read_mail(f, body, app),
+        Screen::ConfirmDeleteMail => render_confirm_delete_mail(f, body, app),
         Screen::ComposeMail => render_compose(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
         Screen::Profile => render_profile(f, body, app),
@@ -639,6 +640,26 @@ fn render_read_mail(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(p, area);
 }
 
+fn render_confirm_delete_mail(f: &mut Frame, area: Rect, app: &App) {
+    let subject = app
+        .current_mail
+        .as_ref()
+        .map(|m| truncate(&m.subject, 50))
+        .unwrap_or_default();
+    let lines = vec![
+        Line::from(format!("Delete \"{subject}\"?")),
+        Line::from(""),
+        // Mail is one row, one recipient — deleting is the only copy gone.
+        Line::from("This permanently removes it from your mailbox."),
+        Line::from(""),
+        Line::from("y = delete    any other key = keep"),
+    ];
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Delete mail ")),
+        area,
+    );
+}
+
 fn render_who(f: &mut Frame, area: Rect, app: &App) {
     if app.online.is_empty() {
         return placeholder(f, area, " Who's Online ", "Nobody online.");
@@ -1193,6 +1214,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ComposePost => "New Post",
         Screen::Mailbox => "Mailbox",
         Screen::ReadMail => "Reading Mail",
+        Screen::ConfirmDeleteMail => "Delete Mail",
         Screen::ComposeMail => "Compose Mail",
         Screen::WhoOnline => "Who's Online",
         Screen::Profile => "Profile",
@@ -1248,12 +1270,14 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
                 " r reply · Esc back "
             }
         }
-        Screen::ReadMail | Screen::ReadBulletin | Screen::Help => " Esc back ",
+        Screen::ReadMail => " r reply · f forward · d delete · Esc back ",
+        Screen::ReadBulletin | Screen::Help => " Esc back ",
         Screen::ComposePost | Screen::ComposeMail => {
             " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel "
         }
         Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",
-        Screen::Mailbox => " ↑/↓ move · Enter read · n compose · Esc back ",
+        Screen::Mailbox => " ↑/↓ move · Enter read · n compose · d delete · Esc back ",
+        Screen::ConfirmDeleteMail => " y delete · any key keep ",
         Screen::WhoOnline => " ↑/↓ move · Enter profile · r refresh · Esc back ",
         Screen::Profile => {
             if can_edit_profile {

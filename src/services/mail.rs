@@ -48,6 +48,64 @@ pub async fn read_mail(pool: &SqlitePool, id: i64, user_id: i64) -> Result<Mail>
     Ok(mail)
 }
 
+/// A reply's prefilled `(to, subject, body)` (#70).
+///
+/// Bottom-posting: the original is quoted with `> ` under an attribution line,
+/// and the body ends with a blank line so the compose editor's cursor (which
+/// lands at the end) sits ready for the reply. `to` is the original sender's
+/// name, which is what the reader would type anyway.
+pub fn reply_prefill(mail: &Mail) -> (String, String, String) {
+    let subject = crate::util::reply_subject(&mail.subject);
+    let quoted = mail
+        .body
+        .lines()
+        .map(|l| format!("> {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let attribution = format!(
+        "On {}, {} wrote:",
+        crate::util::fmt_time(mail.created_at),
+        mail.from_name
+    );
+    // Trailing blank line → cursor lands there for the reply.
+    let body = format!("{attribution}\n{quoted}\n\n");
+    (mail.from_name.clone(), subject, body)
+}
+
+/// A forward's prefilled `(subject, body)` (#70). `to` is left for the sender to
+/// choose. The original is reproduced verbatim under a header rather than quoted
+/// — a forward passes the message on, it doesn't respond to it.
+pub fn forward_prefill(mail: &Mail) -> (String, String) {
+    let subject = if mail.subject.to_ascii_lowercase().starts_with("fwd:") {
+        mail.subject.clone()
+    } else {
+        format!("Fwd: {}", mail.subject)
+    };
+    let body = format!(
+        "---------- Forwarded message ----------\nFrom: {}\nSubject: {}\n\n{}",
+        mail.from_name, mail.subject, mail.body
+    );
+    (subject, body)
+}
+
+/// Delete a message from a user's mailbox (#70).
+///
+/// **Scoped to the recipient in the SQL**: the `to_id = ?` clause means a user
+/// can only delete mail addressed to them, so there's no separate ownership
+/// check to get wrong. A mail row is a single delivery to one recipient — there
+/// is no sender "sent" copy in this schema — so removing the row is exactly
+/// "the recipient discards their message", nothing more. Returns whether a row
+/// was removed (a wrong or already-deleted id is a no-op, not an error).
+pub async fn delete_mail(pool: &SqlitePool, id: i64, user_id: i64) -> Result<bool> {
+    let affected = sqlx::query("DELETE FROM mail WHERE id = ? AND to_id = ?")
+        .bind(id)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(affected > 0)
+}
+
 /// Number of unread messages addressed to a user (`read_at IS NULL`). Used to
 /// surface a "you have N new messages" notice at login and a main-menu badge.
 pub async fn unread_count(pool: &SqlitePool, user_id: i64) -> Result<i64> {

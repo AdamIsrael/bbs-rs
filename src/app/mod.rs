@@ -135,6 +135,8 @@ pub struct App {
     pub mails: Vec<Mail>,
     pub mail_sel: usize,
     pub current_mail: Option<Mail>,
+    /// Where to return after a mail-delete confirmation (#70).
+    mail_delete_return: Screen,
 
     // Who's online
     pub online: Vec<OnlineUser>,
@@ -279,6 +281,7 @@ impl App {
             mails: Vec::new(),
             mail_sel: 0,
             current_mail: None,
+            mail_delete_return: Screen::Mailbox,
             online: Vec::new(),
             who_sel: 0,
             user_keys: Vec::new(),
@@ -332,7 +335,8 @@ impl App {
             Screen::ReadMessage => self.on_read_message(key).await,
             Screen::ComposePost => self.on_compose_post(key).await,
             Screen::Mailbox => self.on_mailbox(key).await,
-            Screen::ReadMail => self.on_reader(key, Screen::Mailbox),
+            Screen::ReadMail => self.on_read_mail(key).await,
+            Screen::ConfirmDeleteMail => self.on_confirm_delete_mail(key).await,
             Screen::ComposeMail => self.on_compose_mail(key).await,
             Screen::WhoOnline => self.on_who(key).await,
             Screen::Profile => self.on_profile(key).await,
@@ -1391,14 +1395,14 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('n') => {
-                self.form = Form::new(vec![
-                    Field::new("To (username)", false),
-                    Field::new("Subject", false),
-                ]);
-                self.body = crate::app::textarea::TextArea::new();
-                self.body_focused = false;
-                self.screen = Screen::ComposeMail;
+            KeyCode::Char('n') => self.begin_compose_mail(None),
+            // Delete the selected message from the list, with a confirm.
+            KeyCode::Char('d') => {
+                if let Some(m) = self.mails.get(self.mail_sel).cloned() {
+                    self.current_mail = Some(m);
+                    self.mail_delete_return = Screen::Mailbox;
+                    self.screen = Screen::ConfirmDeleteMail;
+                }
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
                 // Reading a message cleared its `read_at`; refresh so the
@@ -1408,6 +1412,87 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Reading a single message (#70): reply, forward, delete, or go back.
+    async fn on_read_mail(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('r') => self.begin_reply_mail(),
+            KeyCode::Char('f') => self.begin_forward_mail(),
+            KeyCode::Char('d') => {
+                if self.current_mail.is_some() {
+                    self.mail_delete_return = Screen::Mailbox;
+                    self.screen = Screen::ConfirmDeleteMail;
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter => {
+                self.screen = Screen::Mailbox;
+            }
+            _ => {}
+        }
+    }
+
+    /// Deleting mail is irreversible and the recipient's only copy, so it asks.
+    async fn on_confirm_delete_mail(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') => {
+                let Some(m) = self.current_mail.clone() else {
+                    self.screen = self.mail_delete_return;
+                    return;
+                };
+                match mail::delete_mail(&self.pool, m.id, self.user.id).await {
+                    Ok(true) => {
+                        self.current_mail = None;
+                        self.refresh_unread().await;
+                        self.open_mailbox().await; // reload the list and land there
+                        self.status = "Message deleted.".into();
+                    }
+                    Ok(false) => {
+                        self.screen = self.mail_delete_return;
+                        self.status = "Message already gone.".into();
+                    }
+                    Err(e) => {
+                        self.screen = self.mail_delete_return;
+                        self.status = format!("Could not delete: {e}");
+                    }
+                }
+            }
+            _ => {
+                self.screen = self.mail_delete_return;
+                self.status = "Kept.".into();
+            }
+        }
+    }
+
+    /// Open the mail composer, optionally prefilled (reply/forward, #70).
+    /// `prefill` is `(to, subject, body)`; a blank field is left for the user.
+    fn begin_compose_mail(&mut self, prefill: Option<(String, String, String)>) {
+        let (to, subject, body) = prefill.unwrap_or_default();
+        let mut to_field = Field::new("To (username)", false);
+        to_field.value = to;
+        let mut subject_field = Field::new("Subject", false);
+        subject_field.value = subject;
+        self.form = Form::new(vec![to_field, subject_field]);
+        self.body = crate::app::textarea::TextArea::from_text(&body);
+        // Start on whichever field still needs input: the recipient for a
+        // forward (blank To), the body for a reply (To and subject filled).
+        self.body_focused = !self.form.value(0).is_empty() && !self.form.value(1).is_empty();
+        self.screen = Screen::ComposeMail;
+    }
+
+    fn begin_reply_mail(&mut self) {
+        let Some(m) = self.current_mail.clone() else {
+            return;
+        };
+        self.begin_compose_mail(Some(mail::reply_prefill(&m)));
+    }
+
+    fn begin_forward_mail(&mut self) {
+        let Some(m) = self.current_mail.clone() else {
+            return;
+        };
+        let (subject, body) = mail::forward_prefill(&m);
+        self.begin_compose_mail(Some((String::new(), subject, body)));
     }
 
     async fn on_compose_mail(&mut self, key: KeyEvent) {

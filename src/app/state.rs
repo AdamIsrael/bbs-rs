@@ -21,6 +21,7 @@ pub enum Screen {
     Mailbox,
     ReadMail,
     ComposeMail,
+    ConfirmDeleteMail,
     WhoOnline,
     Profile,
     EditProfile,
