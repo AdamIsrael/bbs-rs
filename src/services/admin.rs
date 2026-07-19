@@ -218,3 +218,41 @@ pub async fn banned_ips(pool: &SqlitePool) -> Result<HashSet<String>> {
             .await?;
     Ok(rows.into_iter().collect())
 }
+
+// ---- Sysop broadcasts (#69) ------------------------------------------------
+
+/// Queue a broadcast for the server to deliver, returning the new row id. Used
+/// by `bbsctl broadcast`, which runs in its own process and so can't reach the
+/// in-memory presence registry directly — the server's sweeper picks it up.
+pub async fn queue_broadcast(pool: &SqlitePool, text: &str) -> Result<i64> {
+    let id = sqlx::query("INSERT INTO broadcasts (text, created_at) VALUES (?, ?)")
+        .bind(text)
+        .bind(now_unix())
+        .execute(pool)
+        .await?
+        .last_insert_rowid();
+    Ok(id)
+}
+
+/// The highest broadcast id, or 0 if none. The sweeper seeds its high-water mark
+/// with this at startup so broadcasts queued *before* it came up aren't replayed
+/// to whoever connects next.
+pub async fn latest_broadcast_id(pool: &SqlitePool) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM broadcasts")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// Broadcasts queued after `after_id`, oldest first, as `(id, text)`. The
+/// sweeper delivers each and advances its high-water mark to the last id.
+pub async fn broadcasts_after(pool: &SqlitePool, after_id: i64) -> Result<Vec<(i64, String)>> {
+    let rows = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, text FROM broadcasts WHERE id > ? ORDER BY id",
+    )
+    .bind(after_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}

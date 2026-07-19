@@ -2014,3 +2014,67 @@ async fn paging_an_offline_user_delivers_to_nobody() {
         .await;
     assert_eq!(delivered, 0, "nobody by that name is online");
 }
+
+// ---- #69: sysop broadcast ---------------------------------------------------
+
+#[tokio::test]
+async fn broadcast_reaches_every_live_session() {
+    use bbs_rs::services::presence::Presence;
+    use bbs_rs::transport::Event;
+    use tokio::sync::mpsc;
+
+    let presence = Presence::new();
+    let (a_tx, mut a_rx) = mpsc::channel(4);
+    let (b_tx, mut b_rx) = mpsc::channel(4);
+    presence.join(1, "alice".into(), None, a_tx).await;
+    presence.join(2, "bob".into(), None, b_tx).await;
+
+    let n = presence
+        .broadcast(Event::Broadcast {
+            text: "down in 5".into(),
+        })
+        .await;
+    assert_eq!(n, 2, "both sessions, regardless of user");
+
+    for rx in [&mut a_rx, &mut b_rx] {
+        match rx.try_recv() {
+            Ok(Event::Broadcast { text }) => assert_eq!(text, "down in 5"),
+            other => panic!("expected a broadcast, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn queued_broadcasts_are_read_back_in_order_after_a_high_water_mark() {
+    use bbs_rs::services::admin;
+    let pool = setup().await;
+
+    assert_eq!(
+        admin::latest_broadcast_id(&pool).await.unwrap(),
+        0,
+        "none yet"
+    );
+
+    let id1 = admin::queue_broadcast(&pool, "first").await.unwrap();
+    let id2 = admin::queue_broadcast(&pool, "second").await.unwrap();
+    assert!(id2 > id1);
+    assert_eq!(admin::latest_broadcast_id(&pool).await.unwrap(), id2);
+
+    // From the start, both come back oldest-first.
+    let all = admin::broadcasts_after(&pool, 0).await.unwrap();
+    assert_eq!(
+        all,
+        vec![(id1, "first".to_string()), (id2, "second".to_string())]
+    );
+    // Past the first, only the second — this is how the sweeper avoids
+    // re-delivering what it already sent.
+    let rest = admin::broadcasts_after(&pool, id1).await.unwrap();
+    assert_eq!(rest, vec![(id2, "second".to_string())]);
+    // Past the last, nothing.
+    assert!(
+        admin::broadcasts_after(&pool, id2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
