@@ -15,6 +15,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Message boards** — browse boards, read messages, and (registered users) post; **reply threads**
   render as an indented conversation tree, and **unread posts** ("new since last call") are flagged
   per board and highlighted in the message list.
+- **Edit & delete your own posts** — authors can `e` edit or `d` delete their own messages (from the
+  list or while reading); an edited post is marked `(edited …)`. A locked board freezes even your own
+  posts. Full-text search stays in step with edits automatically.
 - **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
@@ -409,6 +412,14 @@ lock/unlock the selected board, and on a board's message list `p` to pin/unpin a
 selected post. Pinned posts sort to the top. A locked board rejects new posts from regular users
 (admins can still post, e.g. to add a closing note); boards a user can't read are hidden from their
 board list.
+
+**Editing & deleting your own posts.** Any author can revise or remove their own messages: `e` opens
+the post back in the composer (prefilled), and `d` deletes it — both from the message list and while
+reading a post. An edited post shows an `(edited …)` marker on its date line. Authorization lives in
+the SQL (`WHERE … author_id = ?`), so you can only touch your own posts, and a **locked board** freezes
+even the author's own posts — moderation is an admin's job once a board is closed. Editing a post keeps
+full-text search in step automatically. (Admins delete via the moderation path above and don't edit
+others' text.)
 
 ## Upgrading & migrations
 

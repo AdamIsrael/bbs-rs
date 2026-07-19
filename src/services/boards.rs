@@ -46,7 +46,7 @@ pub async fn get_board(pool: &SqlitePool, id: i64) -> Result<Board> {
 pub async fn list_messages(pool: &SqlitePool, board_id: i64) -> Result<Vec<Message>> {
     let messages = sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
-         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id, m.edited_at \
          FROM messages m JOIN users u ON u.id = m.author_id \
          WHERE m.board_id = ? ORDER BY m.pinned DESC, m.id DESC",
     )
@@ -66,7 +66,7 @@ pub async fn root_posts(
 ) -> Result<(Vec<Message>, i64)> {
     let rows = sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
-         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id, m.edited_at \
          FROM messages m JOIN users u ON u.id = m.author_id \
          WHERE m.board_id = ? AND m.parent_id IS NULL ORDER BY m.id DESC LIMIT ?",
     )
@@ -97,7 +97,7 @@ pub async fn board_posts(
 ) -> Result<(Vec<Message>, i64)> {
     let rows = sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
-         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id, m.edited_at \
          FROM messages m JOIN users u ON u.id = m.author_id \
          WHERE m.board_id = ? ORDER BY m.id DESC LIMIT ?",
     )
@@ -214,7 +214,7 @@ pub async fn unread_counts(
 pub async fn get_message(pool: &SqlitePool, id: i64) -> Result<Message> {
     sqlx::query_as::<_, Message>(
         "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
-         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id, m.edited_at \
          FROM messages m JOIN users u ON u.id = m.author_id \
          WHERE m.id = ?",
     )
@@ -349,6 +349,62 @@ pub async fn author_post_count_since(pool: &SqlitePool, author_id: i64, since: i
             .fetch_one(pool)
             .await?,
     )
+}
+
+// ---- Author actions on their own posts (#92) ----------------------------
+//
+// Authorization is in the SQL, not a check-then-act: `author_id = ?` means only
+// the author matches, and the `board_id NOT IN (locked)` subquery enforces the
+// board lock in the same statement. A row that isn't yours, or is on a locked
+// board, simply doesn't match — indistinguishable from "already gone", which is
+// exactly right. Admins have their own ungated paths below and don't come
+// through here.
+
+/// Edit a post's subject and body, by its author, unless the board is locked.
+///
+/// Returns whether a row was changed. Length caps are enforced first, so an
+/// over-long edit is refused rather than truncated. The `edited_at` stamp lets
+/// the UI mark the post; the `messages_fts` update trigger keeps search in step
+/// with the new text on its own.
+pub async fn edit_own_message(
+    pool: &SqlitePool,
+    id: i64,
+    author: &User,
+    subject: &str,
+    body: &str,
+    limits: &Limits,
+) -> Result<bool> {
+    enforce_len("Subject", subject, limits.max_subject_chars)?;
+    enforce_len("Message", body, limits.max_body_chars)?;
+    let affected = sqlx::query(
+        "UPDATE messages SET subject = ?, body = ?, edited_at = ? \
+         WHERE id = ? AND author_id = ? \
+           AND board_id NOT IN (SELECT id FROM boards WHERE locked = 1)",
+    )
+    .bind(subject)
+    .bind(body)
+    .bind(now_unix())
+    .bind(id)
+    .bind(author.id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// Delete a post, by its author, unless the board is locked. Returns whether a
+/// row was removed.
+pub async fn delete_own_message(pool: &SqlitePool, id: i64, author: &User) -> Result<bool> {
+    let affected = sqlx::query(
+        "DELETE FROM messages WHERE id = ? AND author_id = ? \
+           AND board_id NOT IN (SELECT id FROM boards WHERE locked = 1)",
+    )
+    .bind(id)
+    .bind(author.id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
 }
 
 // ---- Moderation (ungated; callers must be admins) -----------------------

@@ -65,7 +65,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
         Screen::ReadMessage => render_read_message(f, body, app),
-        Screen::ComposePost => render_compose(f, body, " New Post ", app),
+        Screen::ComposePost => {
+            let title = if app.is_editing_post() {
+                " Edit Post "
+            } else {
+                " New Post "
+            };
+            render_compose(f, body, title, app)
+        }
         Screen::Mailbox => render_mailbox(f, body, app),
         Screen::ReadMail => render_read_mail(f, body, app),
         Screen::ConfirmDeleteMail => render_confirm_delete_mail(f, body, app),
@@ -567,10 +574,15 @@ fn render_read_message(f: &mut Frame, area: Rect, app: &App) {
     let Some(m) = &app.current_message else {
         return placeholder(f, area, " Message ", "Nothing to show.");
     };
+    let edited = m
+        .edited_at
+        .map(|t| format!("  (edited {})", fmt_time(t)))
+        .unwrap_or_default();
     let mut body = format!(
-        "From: {}\nDate: {}\n\n{}",
+        "From: {}\nDate: {}{}\n\n{}",
         m.author_name,
         fmt_time(m.created_at),
+        edited,
         m.body
     );
     // Append the author's signature (usenet-style), if they have one.
@@ -1258,16 +1270,16 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         }
         Screen::MessageList => {
             if is_admin {
-                " ↑/↓ · Enter read · n post · r reply · p pin · d delete · Esc back "
+                " ↑/↓ · Enter read · n post · r reply · e edit · p pin · d delete · Esc back "
             } else {
-                " ↑/↓ · Enter read · n post · r reply · Esc back "
+                " ↑/↓ · Enter read · n post · r reply · e/d edit·delete own · Esc back "
             }
         }
         Screen::ReadMessage => {
             if is_admin {
-                " r reply · d delete · Esc back "
+                " r reply · e edit · d delete · Esc back "
             } else {
-                " r reply · Esc back "
+                " r reply · e edit own · d delete own · Esc back "
             }
         }
         Screen::ReadMail => " r reply · f forward · d delete · Esc back ",

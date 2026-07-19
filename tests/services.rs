@@ -1770,3 +1770,191 @@ async fn forward_prefills_subject_and_verbatim_body_without_a_recipient() {
     m2.subject = "Fwd: Notice".into();
     assert_eq!(mail::forward_prefill(&m2).0, "Fwd: Notice");
 }
+
+// ---- #92: author edit/delete own posts --------------------------------------
+
+#[tokio::test]
+async fn an_author_can_edit_their_own_post() {
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let board = boards::list_boards(&pool).await.unwrap().remove(0);
+    let id = boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Subj",
+        "original",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        boards::edit_own_message(&pool, id, &alice, "New subj", "edited", &Default::default())
+            .await
+            .unwrap()
+    );
+    let m = boards::get_message(&pool, id).await.unwrap();
+    assert_eq!(m.subject, "New subj");
+    assert_eq!(m.body, "edited");
+    assert!(m.edited_at.is_some(), "edit stamps edited_at");
+
+    // The edit reaches full-text search too (the FTS update trigger).
+    let hits = bbs_rs::services::search::search_messages(&pool, "alice", "edited", 10)
+        .await
+        .unwrap();
+    assert!(hits.iter().any(|h| h.id == id), "edited body is searchable");
+    let stale = bbs_rs::services::search::search_messages(&pool, "alice", "original", 10)
+        .await
+        .unwrap();
+    assert!(
+        !stale.iter().any(|h| h.id == id),
+        "old body no longer matches"
+    );
+}
+
+#[tokio::test]
+async fn a_user_cannot_edit_someone_elses_post() {
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    let board = boards::list_boards(&pool).await.unwrap().remove(0);
+    let id = boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "S",
+        "alice's",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !boards::edit_own_message(&pool, id, &bob, "hijack", "bob's", &Default::default())
+            .await
+            .unwrap(),
+        "bob can't edit alice's post"
+    );
+    assert_eq!(
+        boards::get_message(&pool, id).await.unwrap().body,
+        "alice's"
+    );
+}
+
+#[tokio::test]
+async fn an_author_can_delete_their_own_post_but_not_anothers() {
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    let board = boards::list_boards(&pool).await.unwrap().remove(0);
+    let id = boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "S",
+        "body",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !boards::delete_own_message(&pool, id, &bob).await.unwrap(),
+        "not bob's to delete"
+    );
+    assert!(boards::delete_own_message(&pool, id, &alice).await.unwrap());
+    assert!(
+        boards::list_messages(&pool, board.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "gone once the author deletes it"
+    );
+}
+
+#[tokio::test]
+async fn a_locked_board_blocks_author_edit_and_delete() {
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let board = boards::list_boards(&pool).await.unwrap().remove(0);
+    let id = boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "S",
+        "body",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    boards::set_locked(&pool, board.id, true).await.unwrap();
+
+    assert!(
+        !boards::edit_own_message(&pool, id, &alice, "S", "changed", &Default::default())
+            .await
+            .unwrap(),
+        "a locked board freezes even the author's own posts"
+    );
+    assert!(!boards::delete_own_message(&pool, id, &alice).await.unwrap());
+    // Admins still moderate a locked board — the ungated path ignores the lock.
+    assert!(boards::delete_message(&pool, id).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_over_long_edit_is_refused() {
+    use bbs_rs::config::Limits;
+    use bbs_rs::services::{auth, boards};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let board = boards::list_boards(&pool).await.unwrap().remove(0);
+    let id = boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "S",
+        "ok",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let limits = Limits {
+        max_body_chars: 5,
+        ..Default::default()
+    };
+
+    assert!(
+        boards::edit_own_message(&pool, id, &alice, "S", "way too long", &limits)
+            .await
+            .is_err(),
+        "the length cap applies to edits, not just new posts"
+    );
+    assert_eq!(
+        boards::get_message(&pool, id).await.unwrap().body,
+        "ok",
+        "unchanged"
+    );
+}

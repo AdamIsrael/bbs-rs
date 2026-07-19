@@ -178,6 +178,8 @@ pub struct Message {
     pub pinned: bool,
     /// The message this one replies to, or `None` for a top-level post.
     pub parent_id: Option<i64>,
+    /// When the author last edited the post (#92), or `None` if never edited.
+    pub edited_at: Option<i64>,
 }
 
 /// A private message joined with the sender's name (`from_name`).
