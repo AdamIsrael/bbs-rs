@@ -2,6 +2,8 @@
 
 # Runtime artifacts (generated on first run)
 /bbs.toml
+# bbscfg writes this before every save (#141).
+/bbs.toml.bak
 /bbs.db
 /bbs.db-journal
 /bbs.db-wal
