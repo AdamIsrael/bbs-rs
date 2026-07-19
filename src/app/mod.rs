@@ -143,6 +143,8 @@ pub struct App {
     // Who's online
     pub online: Vec<OnlineUser>,
     pub who_sel: usize,
+    /// The user being paged, while the page-compose screen is open (#68).
+    page_target: Option<String>,
 
     // SSH keys (the current user's own)
     pub user_keys: Vec<UserKey>,
@@ -287,6 +289,7 @@ impl App {
             mail_delete_return: Screen::Mailbox,
             online: Vec::new(),
             who_sel: 0,
+            page_target: None,
             user_keys: Vec::new(),
             key_sel: 0,
             file_areas: Vec::new(),
@@ -342,6 +345,7 @@ impl App {
             Screen::ConfirmDeleteMail => self.on_confirm_delete_mail(key).await,
             Screen::ComposeMail => self.on_compose_mail(key).await,
             Screen::WhoOnline => self.on_who(key).await,
+            Screen::ComposePage => self.on_compose_page(key).await,
             Screen::Profile => self.on_profile(key).await,
             Screen::EditProfile => self.on_edit_profile(key).await,
             Screen::Stats => self.on_stats(key).await,
@@ -1190,6 +1194,11 @@ impl App {
         self.edit_target.is_some()
     }
 
+    /// The user currently being paged, for the page composer's title (#68).
+    pub fn page_target(&self) -> Option<&str> {
+        self.page_target.as_deref()
+    }
+
     /// Whether the current user may edit this post: its author, on an unlocked
     /// board. (Admins moderate via delete/pin, not by editing others' text.)
     fn can_edit(&self, m: &Message) -> bool {
@@ -1697,9 +1706,75 @@ impl App {
                     self.open_profile_by_name(&name, Screen::WhoOnline).await;
                 }
             }
+            KeyCode::Char('p') => self.begin_page(),
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
         }
+    }
+
+    // ---- Paging ("yell") -------------------------------------------------
+
+    /// Open the page composer for the selected online user (#68), explaining up
+    /// front why it's not allowed rather than failing only at submit.
+    fn begin_page(&mut self) {
+        if self.user.is_guest() {
+            self.status = "Guests cannot page — register an account first.".into();
+            return;
+        }
+        let Some(target) = self.online.get(self.who_sel).map(|u| u.username.clone()) else {
+            return;
+        };
+        // Paging yourself would just echo back to your own sessions; skip it.
+        if target == self.user.username {
+            self.status = "You can't page yourself.".into();
+            return;
+        }
+        self.form = Form::new(vec![Field::new("Message", false)]);
+        self.page_target = Some(target);
+        self.screen = Screen::ComposePage;
+    }
+
+    async fn on_compose_page(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.page_target = None;
+                self.screen = Screen::WhoOnline;
+            }
+            KeyCode::Enter => self.submit_page().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    /// Deliver the page to every live session of the target user. A page is a
+    /// transient toast, not stored — if the target has since disconnected, we
+    /// say so rather than pretending it landed.
+    async fn submit_page(&mut self) {
+        let Some(target) = self.page_target.take() else {
+            self.screen = Screen::WhoOnline;
+            return;
+        };
+        let body = self.form.value(0).trim().to_string();
+        if body.is_empty() {
+            self.status = "Say something first.".into();
+            self.page_target = Some(target); // keep composing
+            return;
+        }
+        let event = Event::Paged {
+            from: self.user.username.clone(),
+            body,
+        };
+        let delivered = self.presence.send_to_user(&target, event).await;
+        self.status = if delivered > 0 {
+            format!("Paged {target}.")
+        } else {
+            format!("{target} is no longer online.")
+        };
+        // Refresh the roster in case they left, then return to it.
+        self.online = self.presence.list().await;
+        self.who_sel = self.who_sel.min(self.online.len().saturating_sub(1));
+        self.screen = Screen::WhoOnline;
     }
 
     // ---- Profiles --------------------------------------------------------
@@ -2510,6 +2585,13 @@ pub async fn run<W: std::io::Write>(
                 let _ = terminal.resize(Rect::new(0, 0, w, h));
             }
             Event::Quit => app.should_quit = true,
+            // A page from another user: ring the bell and surface it as a toast
+            // in the status bar, wherever the recipient currently is. It clears
+            // on their next keypress, like other status messages.
+            Event::Paged { from, body } => {
+                let _ = raw_out.send(b"\x07".to_vec());
+                app.status = format!("\u{1F4DF} {from} pages you: {body}");
+            }
         }
 
         // A door launch was requested: suspend the TUI, bridge the program's

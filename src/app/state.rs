@@ -23,6 +23,7 @@ pub enum Screen {
     ComposeMail,
     ConfirmDeleteMail,
     WhoOnline,
+    ComposePage,
     Profile,
     EditProfile,
     Stats,
