@@ -172,6 +172,8 @@ Doors are also editable in **`bbscfg`** — a list you can add to, remove from, 
 what callers see in the menu), with a field screen per door. Removing one takes it out of the config
 only; files on disk are left alone. Per-screen art (`[art.screens]`) is editable there too, and `bbscfg`
 flags a filename that isn't in the art directory — a typo that would otherwise fail silently at runtime.
+Seeded boards (`[seed] boards`) round out the set; since seeding only runs on a fresh database, `bbscfg`
+checks the configured database and tells you plainly when your edits there won't take effect.
 
 A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-style RPG — ships in
 [`doors/`](doors/) (a self-contained workspace built on a reusable `doorkit` library). See

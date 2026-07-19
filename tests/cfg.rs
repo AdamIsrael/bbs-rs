@@ -1193,3 +1193,214 @@ mod art_screens {
         assert!(after.contains("mailbox = \"mail.ans\""));
     }
 }
+
+// ---- #147: seeded boards + first-run detection ------------------------------
+
+mod seed_boards {
+    use super::*;
+    use bbs_rs::cfg::editor::{Editor, Screen};
+    use bbs_rs::cfg::seed::{self, SeedStatus};
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    fn ed(scratch: &Scratch) -> Editor {
+        Editor::new(ConfigDoc::load(scratch.path()).unwrap())
+    }
+    fn press(e: &mut Editor, code: KeyCode) {
+        e.on_key(KeyEvent::from(code));
+    }
+    fn typed(e: &mut Editor, text: &str) {
+        for c in text.chars() {
+            press(e, KeyCode::Char(c));
+        }
+    }
+    fn open_seed(e: &mut Editor) {
+        e.screen = Screen::Sections;
+        e.section_sel = 0;
+        while e.section().name != "seed" {
+            press(e, KeyCode::Down);
+        }
+        press(e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::SeedBoards);
+    }
+    fn retype(e: &mut Editor, text: &str) {
+        for _ in 0..40 {
+            press(e, KeyCode::Backspace);
+        }
+        typed(e, text);
+        press(e, KeyCode::Enter);
+    }
+
+    /// Adding a board writes an inline table into `[seed] boards` and reparses.
+    #[test]
+    fn adding_a_seed_board_writes_an_inline_table() {
+        let scratch = Scratch::new("seed-add");
+        let mut e = ed(&scratch);
+        open_seed(&mut e);
+
+        press(&mut e, KeyCode::Char('a'));
+        assert_eq!(e.screen, Screen::SeedBoardFields);
+        // Name it (field 0): open the editor, then type.
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::Edit);
+        retype(&mut e, "News");
+        assert_eq!(e.screen, Screen::SeedBoardFields);
+        // Set min_write (field 3) to admin — an announcement board.
+        press(&mut e, KeyCode::Down);
+        press(&mut e, KeyCode::Down);
+        press(&mut e, KeyCode::Down);
+        assert_eq!(e.seed_board_field().unwrap().key, "min_write");
+        press(&mut e, KeyCode::Enter); // enum cycles user -> admin
+        assert_eq!(
+            e.doc.seed_board_get(0, "min_write"),
+            Some(FieldValue::Str("admin".into()))
+        );
+        assert_eq!(
+            e.doc.seed_board_get(0, "name"),
+            Some(FieldValue::Str("News".into()))
+        );
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+
+        let parsed: bbs_rs::config::Settings = toml::from_str(&scratch.text()).unwrap();
+        let boards = parsed.seed.boards.expect("boards set");
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].name, "News");
+        assert_eq!(boards[0].min_write, "admin");
+    }
+
+    /// An empty boards list is meaningful — "seed no boards", distinct from the
+    /// absent key that means "use the built-in defaults" — so removing the last
+    /// board leaves `boards = []`, not an absent key.
+    #[test]
+    fn removing_the_last_seed_board_leaves_an_empty_list() {
+        let scratch = Scratch::new("seed-empty");
+        let mut e = ed(&scratch);
+        open_seed(&mut e);
+
+        press(&mut e, KeyCode::Char('a'));
+        press(&mut e, KeyCode::Esc); // back to the list; board is row 1
+        assert_eq!(e.doc.seed_board_count(), Some(1));
+
+        e.seed_sel = 1;
+        e.seed_on_password = false;
+        press(&mut e, KeyCode::Char('d'));
+        assert_eq!(e.screen, Screen::ConfirmRemoveSeedBoard);
+        press(&mut e, KeyCode::Char('y'));
+
+        assert_eq!(
+            e.doc.seed_board_count(),
+            Some(0),
+            "explicit empty list, not the absent key"
+        );
+        let parsed: bbs_rs::config::Settings = toml::from_str(&e.doc.to_text()).unwrap();
+        assert_eq!(parsed.seed.boards, Some(vec![]), "seeds no boards");
+    }
+
+    /// A config that never mentions seed boards leaves the key absent, so the
+    /// built-in defaults still apply.
+    #[test]
+    fn an_untouched_config_leaves_seed_boards_unset() {
+        let scratch = Scratch::new("seed-untouched");
+        let mut e = ed(&scratch);
+        open_seed(&mut e);
+        press(&mut e, KeyCode::Esc);
+
+        assert!(!e.doc.is_dirty(), "opening the seed screen changes nothing");
+        let parsed: bbs_rs::config::Settings = toml::from_str(&e.doc.to_text()).unwrap();
+        assert_eq!(parsed.seed.boards, None, "defaults still apply");
+    }
+
+    // ---- the first-run detection: the substance of this issue ---------------
+
+    /// A database that doesn't exist yet: seeding will run.
+    #[test]
+    fn a_missing_database_will_seed() {
+        let dir = std::env::temp_dir().join(format!("seed-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = seed::status("sqlite://nope.db?mode=rwc", &dir);
+        assert_eq!(status, SeedStatus::WillSeed);
+        // And the check must NOT have created it — bbscfg opens configs, not DBs.
+        assert!(
+            !dir.join("nope.db").exists(),
+            "checking must not create the database"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A database that already has boards: seeding is skipped, and we report the
+    /// count so the operator understands why their edit does nothing.
+    #[test]
+    fn a_database_with_boards_is_reported_as_already_seeded() {
+        let dir = std::env::temp_dir().join(format!("seed-has-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("bbs.db");
+        let url = format!("sqlite://{}?mode=rwc", db.display());
+
+        // Build a real migrated database with two seed boards, in a throwaway
+        // runtime that's gone before the sync check runs (seed::status uses
+        // block_on internally, so it can't be called from inside a runtime).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pool = bbs_rs::db::connect(&url).await.unwrap();
+            bbs_rs::db::run_migrations(&pool).await.unwrap();
+            bbs_rs::services::boards::ensure_default_boards(
+                &pool,
+                &[seed_board("General"), seed_board("Announcements")],
+            )
+            .await
+            .unwrap();
+            pool.close().await;
+        });
+        drop(rt);
+
+        assert_eq!(
+            seed::status(&url, &dir),
+            SeedStatus::AlreadySeeded { boards: 2 }
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A migrated but board-less database still counts as "will seed" — that's
+    /// exactly the state a fresh `bbsctl migrate` leaves it in.
+    #[test]
+    fn a_migrated_but_empty_database_will_seed() {
+        let dir = std::env::temp_dir().join(format!("seed-empty-db-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("bbs.db");
+        let url = format!("sqlite://{}?mode=rwc", db.display());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let pool = bbs_rs::db::connect(&url).await.unwrap();
+            bbs_rs::db::run_migrations(&pool).await.unwrap();
+            pool.close().await;
+        });
+        drop(rt);
+        assert_eq!(seed::status(&url, &dir), SeedStatus::WillSeed);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An in-memory or otherwise non-file URL can't be inspected; we say so
+    /// rather than guess either way.
+    #[test]
+    fn a_non_file_database_is_unknown() {
+        let dir = std::env::temp_dir();
+        assert!(matches!(
+            seed::status("sqlite::memory:", &dir),
+            SeedStatus::Unknown { .. }
+        ));
+        assert!(matches!(
+            seed::status("postgres://localhost/bbs", &dir),
+            SeedStatus::Unknown { .. }
+        ));
+    }
+
+    fn seed_board(name: &str) -> bbs_rs::config::SeedBoard {
+        bbs_rs::config::SeedBoard {
+            name: name.into(),
+            description: String::new(),
+            min_read: "guest".into(),
+            min_write: "user".into(),
+        }
+    }
+}

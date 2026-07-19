@@ -54,6 +54,8 @@ pub enum SectionKind {
     /// The `[art.screens]` table: a fixed set of known keys, each holding a
     /// filename (#146).
     ArtScreens,
+    /// `[seed]`: the `guest_password` field plus a list of seeded boards (#147).
+    SeedBoards,
 }
 
 /// A `[section]` of the config.
@@ -693,15 +695,44 @@ pub static SECTIONS: &[Section] = &[
     Section {
         name: "seed",
         title: "First-run seeding",
-        help: "Applied only to a fresh database. Custom boards ([seed] boards) are edited in the file.",
+        help: "Applied only to a fresh database. On a board that already has boards these settings change the file but nothing else, since seeding is first-run only.",
         restart_only: true,
-        kind: SectionKind::Fields,
+        kind: SectionKind::SeedBoards,
         fields: &[Field {
             key: "guest_password",
             label: "Guest password",
             kind: FieldKind::Str,
-            help: "Password for the shared guest account.",
+            help: "Password for the shared guest account, used on first run.",
         }],
+    },
+];
+
+/// The fields of one `[seed] boards` entry (#147). `min_read`/`min_write` are
+/// role enums; the rest is free text.
+pub static SEED_BOARD_FIELDS: &[Field] = &[
+    Field {
+        key: "name",
+        label: "Board name",
+        kind: FieldKind::Str,
+        help: "The board's name, shown in the board list.",
+    },
+    Field {
+        key: "description",
+        label: "Description",
+        kind: FieldKind::Str,
+        help: "A one-line description shown beside the name.",
+    },
+    Field {
+        key: "min_read",
+        label: "Min role to read",
+        kind: FieldKind::Enum(ROLES),
+        help: "The lowest role that can see this board. guest lets anyone read.",
+    },
+    Field {
+        key: "min_write",
+        label: "Min role to post",
+        kind: FieldKind::Enum(ROLES),
+        help: "The lowest role that can post. user is the usual choice; admin makes a read-only announcement board.",
     },
 ];
 
