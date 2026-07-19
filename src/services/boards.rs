@@ -83,6 +83,35 @@ pub async fn root_posts(
     Ok((rows, total))
 }
 
+/// Every post on a board, replies included, newest first — the read model
+/// behind the Group outbox (#139).
+///
+/// Distinct from [`root_posts`] because the outbox must list what the board
+/// actually announces, and since #139 that includes replies. A collection that
+/// silently omits a whole class of the board's activity is worse than useless
+/// to a peer backfilling from it.
+pub async fn board_posts(
+    pool: &SqlitePool,
+    board_id: i64,
+    limit: i64,
+) -> Result<(Vec<Message>, i64)> {
+    let rows = sqlx::query_as::<_, Message>(
+        "SELECT m.id, m.board_id, m.author_id, u.username AS author_name, \
+         m.subject, m.body, m.created_at, m.pinned, m.parent_id \
+         FROM messages m JOIN users u ON u.id = m.author_id \
+         WHERE m.board_id = ? ORDER BY m.id DESC LIMIT ?",
+    )
+    .bind(board_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE board_id = ?")
+        .bind(board_id)
+        .fetch_one(pool)
+        .await?;
+    Ok((rows, total))
+}
+
 /// A message plus its depth in the reply tree (0 = top-level thread root).
 #[derive(Debug, Clone)]
 pub struct ThreadItem {

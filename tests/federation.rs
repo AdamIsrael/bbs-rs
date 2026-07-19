@@ -2055,7 +2055,7 @@ async fn a_board_post_announces_to_subscribers() {
     assert_eq!(page["content"], "<p>world &amp; &lt;friends&gt;</p>");
     assert_eq!(page["attributedTo"], "https://bbs.example.com/u/alice");
 
-    // A reply is a Note, not a Page — it doesn't syndicate in this slice.
+    // A reply syndicates too (#139), as a Note carrying inReplyTo.
     let rid = boards::post_message(
         &pool,
         general.id,
@@ -2071,9 +2071,28 @@ async fn a_board_post_announces_to_subscribers() {
         outbound::deliver_board_post(&pool, &origin, rid)
             .await
             .unwrap(),
-        0,
-        "replies don't syndicate yet"
+        1,
+        "replies syndicate to the same subscribers"
     );
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&due.last().unwrap().activity).unwrap();
+    let note = &v["object"]["object"];
+    assert_eq!(note["type"], "Note", "a reply is a Note, not a Page");
+    assert_eq!(
+        note["inReplyTo"], page["id"],
+        "points at the parent's permanent URI"
+    );
+    assert_eq!(
+        note["audience"], keys.actor_uri,
+        "still addressed to the board"
+    );
+    assert_eq!(
+        note["name"], "re",
+        "subject kept on the Note so a bbs-rs peer loses nothing"
+    );
+    // The root carries no inReplyTo at all, rather than an empty one.
+    assert!(page.get("inReplyTo").is_none(), "root has no inReplyTo");
 }
 
 // ---- #111c: mirror a followed remote board ---------------------------------
@@ -3881,5 +3900,293 @@ async fn an_announce_of_a_remote_post_is_still_our_activity() {
         del.id.starts_with("https://bbs.example.com/"),
         "same rule for Announce{{Delete}}, got {}",
         del.id
+    );
+}
+
+// ---- #139a: outbound reply syndication --------------------------------------
+
+/// **The bug #139 is really about.** A reply arriving at a board we host must be
+/// relayed to the board's *other* subscribers.
+///
+/// We are that board's hub. Before this, the inbound path stored the reply
+/// correctly and then called a fan-out that returned `0` for anything with a
+/// parent — so every subscriber except the sender was left with a thread missing
+/// replies, permanently, with nothing logged. The `Ok(0)` arm is
+/// indistinguishable from "no subscribers", which is why it went unnoticed.
+#[tokio::test]
+async fn an_inbound_reply_is_relayed_to_the_boards_other_subscribers() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::queue;
+
+    let pool = setup().await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    // A *third* instance subscribes to our board — the one that used to lose out.
+    let watcher = insert_follower(&pool, "watcher@third.example", "third.example", None).await;
+    bbs_rs::services::federation::follows::accept(
+        &pool,
+        &watcher,
+        &keys.actor_uri,
+        "https://third.example/f/1",
+    )
+    .await
+    .unwrap();
+
+    let data = fed_data(&pool).await;
+    // A root post from bob, then a reply to it from bob.
+    board_post_from(
+        &bob,
+        "https://remote.social/p/1",
+        Some(&keys.actor_uri),
+        &[],
+        "Root",
+        "<p>root body</p>",
+        None,
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    let queued_after_root = queue::pending(&pool).await.unwrap();
+
+    board_post_from(
+        &bob,
+        "https://remote.social/p/2",
+        Some(&keys.actor_uri),
+        &[],
+        "Re: Root",
+        "<p>a reply</p>",
+        Some("https://remote.social/p/1"),
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        queue::pending(&pool).await.unwrap(),
+        queued_after_root + 1,
+        "the reply was relayed onward, not silently dropped"
+    );
+    let due = queue::due(&pool, 10).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&due.last().unwrap().activity).unwrap();
+    let note = &v["object"]["object"];
+    assert_eq!(note["type"], "Note");
+    assert_eq!(
+        note["inReplyTo"], "https://remote.social/p/1",
+        "the reply points at the parent's own URI — the thread stays joined up \
+         across instances instead of forking at our boundary"
+    );
+    assert_eq!(
+        note["attributedTo"], bob,
+        "bob still authored it; relaying is not authoring"
+    );
+}
+
+/// Deleting a syndicated reply withdraws it too. Before #139 replies never got
+/// an `ap_id`, so this had nothing to withdraw; now that they syndicate, a
+/// deleted reply that stayed in every mirror would be the same divergence in
+/// reverse.
+#[tokio::test]
+async fn deleting_a_syndicated_reply_announces_the_withdrawal() {
+    use bbs_rs::services::federation::{Origin, outbound};
+
+    let pool = setup().await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let alice = mint_local(&pool, "alice").await;
+    let keys = mint_general_group(&pool).await;
+    let sub = insert_follower(&pool, "carol@remote.social", "remote.social", None).await;
+    bbs_rs::services::federation::follows::accept(
+        &pool,
+        &sub,
+        &keys.actor_uri,
+        "https://remote.social/f/1",
+    )
+    .await
+    .unwrap();
+    let board = bbs_rs::services::boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let root = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Root",
+        "body",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let reply = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Re",
+        "reply body",
+        Some(root),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    outbound::deliver_board_post(&pool, &origin, reply)
+        .await
+        .unwrap();
+
+    let prepared = outbound::prepare_board_delete(&pool, &origin, reply)
+        .await
+        .unwrap();
+    assert!(
+        prepared.is_some(),
+        "a syndicated reply has a withdrawal to announce"
+    );
+}
+
+/// A reply that never syndicated has nothing to withdraw — the `ap_id` check is
+/// what keeps the previous test's change from announcing deletes for old replies.
+#[tokio::test]
+async fn deleting_an_unsyndicated_reply_announces_nothing() {
+    use bbs_rs::services::federation::{Origin, outbound};
+
+    let pool = setup().await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let alice = mint_local(&pool, "alice").await;
+    let board = bbs_rs::services::boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let root = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Root",
+        "body",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let reply = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Re",
+        "reply",
+        Some(root),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        outbound::prepare_board_delete(&pool, &origin, reply)
+            .await
+            .unwrap()
+            .is_none(),
+        "never federated, nothing to withdraw"
+    );
+}
+
+/// The Group outbox must publish what the board actually announces: replies
+/// included, and every post attributed to whoever really wrote it.
+///
+/// Both halves were wrong. The outbox listed roots only, and it built
+/// `attributedTo` from *our* origin for every author — so a post by
+/// `bob@remote.social` was published as `https://ours/u/bob@remote.social`,
+/// claiming a peer's content as ours. It had drifted from the fan-out because
+/// each hand-built its own item; they now share one builder.
+#[tokio::test]
+async fn the_group_outbox_matches_what_the_board_announces() {
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let keys = mint_general_group(&pool).await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    let board = bbs_rs::services::boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+
+    let root = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Root",
+        "body",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Re: Root",
+        "reply",
+        Some(root),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    // And a post by a remote author, as inbound ingestion stores it.
+    let bob_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE actor_uri = ?")
+        .bind(&bob)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    bbs_rs::services::boards::store_remote_post(
+        &pool,
+        board.id,
+        bob_id,
+        "From bob",
+        "bob's body",
+        "https://remote.social/p/9",
+        None,
+    )
+    .await
+    .unwrap();
+
+    let base = serve_ap(pool.clone(), enabled_fed()).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/c/{}/outbox", keys.slug))
+        .header("Accept", "application/activity+json")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let items = body["orderedItems"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "roots AND replies are listed");
+
+    let kinds: Vec<&str> = items
+        .iter()
+        .map(|i| i["object"]["object"]["type"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"Note"),
+        "the reply appears, as a Note: {kinds:?}"
+    );
+    assert!(kinds.contains(&"Page"), "roots appear as Pages: {kinds:?}");
+
+    let attributions: Vec<&str> = items
+        .iter()
+        .map(|i| i["object"]["object"]["attributedTo"].as_str().unwrap())
+        .collect();
+    assert!(
+        attributions.contains(&bob.as_str()),
+        "bob's post keeps bob's actor URI, got {attributions:?}"
+    );
+    assert!(
+        !attributions
+            .iter()
+            .any(|a| a.contains("bbs.example.com/u/bob@")),
+        "must not mint a local URI for a remote author: {attributions:?}"
     );
 }
