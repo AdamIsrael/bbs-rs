@@ -3,11 +3,31 @@
 //! The first test here is the load-bearing one: if a round trip isn't
 //! byte-identical, the whole approach is wrong and we'd be silently destroying
 //! the operator's file every time they saved.
+//!
+//! Everything is exercised against [`DEFAULT_CONFIG_TOML`] — the annotated
+//! config the binary itself writes on first run, which is committed in
+//! `src/config.rs`. Deliberately **not** the `bbs.toml` in the working
+//! directory: that file is gitignored (a runtime artifact), so it's absent in
+//! CI and, on a developer's machine, silently drifts from the shipped default
+//! as settings are added. Testing against it means testing whatever happens to
+//! be on disk.
 
 use bbs_rs::cfg::{ConfigDoc, FieldValue, SECTIONS};
+use bbs_rs::config::DEFAULT_CONFIG_TOML;
 use std::path::PathBuf;
 
-/// A scratch copy of the shipped `bbs.toml`, cleaned up on drop.
+/// How many lines of the shipped config are comments. Asserted rather than
+/// computed so the point survives: this file is *mostly documentation*, which
+/// is the entire reason we edit it in place instead of regenerating it.
+const COMMENT_LINES: usize = 128;
+
+fn comment_lines(text: &str) -> usize {
+    text.lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .count()
+}
+
+/// A scratch copy of the shipped default config, cleaned up on drop.
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -15,7 +35,7 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("bbscfg-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bbs.toml");
-        std::fs::copy("bbs.toml", &path).unwrap();
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
         Scratch(path)
     }
     fn path(&self) -> &std::path::Path {
@@ -50,11 +70,8 @@ fn saving_an_unchanged_config_rewrites_it_byte_for_byte() {
 
     assert_eq!(scratch.text(), before, "round trip must be byte-identical");
     assert_eq!(
-        before
-            .lines()
-            .filter(|l| l.trim_start().starts_with('#'))
-            .count(),
-        125,
+        comment_lines(&before),
+        COMMENT_LINES,
         "and the file really is mostly comments — if this number moves, \
          the test above is protecting something different than it was"
     );
@@ -112,14 +129,7 @@ fn setting_a_commented_out_key_keeps_the_comment() {
         "the explanatory comment survives"
     );
     assert!(after.contains("tls_cert = \"/etc/ssl/bbs.pem\""));
-    assert_eq!(
-        after
-            .lines()
-            .filter(|l| l.trim_start().starts_with('#'))
-            .count(),
-        125,
-        "no comments lost"
-    );
+    assert_eq!(comment_lines(&after), COMMENT_LINES, "no comments lost");
 }
 
 /// Shapes the field editor doesn't model must survive untouched. This is the
@@ -331,8 +341,7 @@ fn an_unparseable_config_fails_to_load() {
 /// invisible in review, since nothing else references the schema.
 #[test]
 fn the_schema_covers_the_shipped_config() {
-    let text = std::fs::read_to_string("bbs.toml").unwrap();
-    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    let doc: toml_edit::DocumentMut = DEFAULT_CONFIG_TOML.parse().unwrap();
 
     for section in SECTIONS {
         let Some(table) = doc.get(section.name).and_then(|i| i.as_table()) else {
@@ -341,7 +350,7 @@ fn the_schema_covers_the_shipped_config() {
         for (key, _) in table.iter() {
             assert!(
                 section.field(key).is_some(),
-                "[{}] {key} is in bbs.toml but missing from the schema — a setting \
+                "[{}] {key} is in the shipped config but missing from the schema — a setting \
                  the editor can't see is one an operator can't configure",
                 section.name
             );
