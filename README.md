@@ -168,6 +168,10 @@ max_length = 500       # max chars per oneliner (0 = no cap; 500 matches Mastodo
 # drop_file = "dorinfo1.def"   # or "door.sys"; blank = none
 ```
 
+Doors are also editable in **`bbscfg`** — a list you can add to, remove from, and reorder (the order is
+what callers see in the menu), with a field screen per door. Removing one takes it out of the config
+only; files on disk are left alone.
+
 A ready-to-run example door — **Legend of the Indigo Dragon**, a small LORD-style RPG — ships in
 [`doors/`](doors/) (a self-contained workspace built on a reusable `doorkit` library). See
 [`doors/README.md`](doors/README.md) to build it and wire it up, or to write your own.

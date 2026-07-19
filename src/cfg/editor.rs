@@ -12,7 +12,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::doc::{ConfigDoc, FieldValue, Issue};
-use super::schema::{self, FieldKind, SECTIONS, Section};
+use super::schema::{self, DOOR_FIELDS, FieldKind, SECTIONS, Section, SectionKind};
 
 /// What the editor is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,12 @@ pub enum Screen {
     Fields,
     /// Editing one setting.
     Edit,
+    /// The list of configured door games (#145).
+    Doors,
+    /// The settings of one door.
+    DoorFields,
+    /// Confirming removal of a door.
+    ConfirmRemoveDoor,
     /// Reviewing what's about to be written.
     Save,
     /// Confirming a quit that would discard changes.
@@ -47,6 +53,16 @@ pub struct Editor {
     pub status: String,
     /// Validation results, refreshed when the save screen opens.
     pub issues: Vec<Issue>,
+    /// Which door is selected in the list, and which of its fields.
+    pub door_sel: usize,
+    pub door_field_sel: usize,
+    /// Whether the text editor was opened from a door rather than a section.
+    ///
+    /// The `Edit` screen is shared, but the two write to different places — a
+    /// door's fields live in an array entry, and the doors *section* has no
+    /// fields of its own, so committing to the wrong one would silently write
+    /// nothing.
+    editing_door: bool,
 }
 
 impl Editor {
@@ -64,6 +80,9 @@ impl Editor {
             input: String::new(),
             status,
             issues: Vec::new(),
+            door_sel: 0,
+            door_field_sel: 0,
+            editing_door: false,
         }
     }
 
@@ -98,6 +117,9 @@ impl Editor {
             Screen::Edit => self.on_edit(key),
             Screen::Save => self.on_save(key),
             Screen::ConfirmQuit => self.on_confirm_quit(key),
+            Screen::Doors => self.on_doors(key),
+            Screen::DoorFields => self.on_door_fields(key),
+            Screen::ConfirmRemoveDoor => self.on_confirm_remove_door(key),
         }
     }
 
@@ -111,10 +133,16 @@ impl Editor {
                     self.section_sel += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Right => {
-                self.field_sel = 0;
-                self.screen = Screen::Fields;
-            }
+            KeyCode::Enter | KeyCode::Right => match self.section().kind {
+                SectionKind::Fields => {
+                    self.field_sel = 0;
+                    self.screen = Screen::Fields;
+                }
+                SectionKind::Doors => {
+                    self.door_sel = 0;
+                    self.screen = Screen::Doors;
+                }
+            },
             KeyCode::Char('s') => self.open_save(),
             KeyCode::Char('q') | KeyCode::Esc => return self.request_quit(),
             _ => {}
@@ -176,6 +204,7 @@ impl Editor {
                     .effective(section, field.key)
                     .map(|v| v.display())
                     .unwrap_or_default();
+                self.editing_door = false;
                 self.screen = Screen::Edit;
                 self.status = field.help.to_string();
             }
@@ -200,7 +229,7 @@ impl Editor {
     fn on_edit(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => {
-                self.screen = Screen::Fields;
+                self.screen = self.edit_origin();
                 self.status = "Cancelled.".into();
             }
             KeyCode::Enter => self.commit_edit(),
@@ -213,10 +242,35 @@ impl Editor {
         Action::None
     }
 
+    /// The field the shared `Edit` screen is currently editing, whichever kind
+    /// it came from — what a renderer needs to label the input and show help.
+    pub fn edit_field(&self) -> Option<&'static schema::Field> {
+        if self.editing_door {
+            self.door_field()
+        } else {
+            self.field()
+        }
+    }
+
+    /// Where Esc and a successful commit return to.
+    fn edit_origin(&self) -> Screen {
+        if self.editing_door {
+            Screen::DoorFields
+        } else {
+            Screen::Fields
+        }
+    }
+
     /// Apply the typed value, refusing anything the schema says is out of range
     /// rather than writing a config the server would reject at boot.
     fn commit_edit(&mut self) {
-        let Some(field) = self.field() else { return };
+        let Some(field) = (if self.editing_door {
+            self.door_field()
+        } else {
+            self.field()
+        }) else {
+            return;
+        };
         let section = self.section().name;
         let raw = self.input.trim().to_string();
 
@@ -241,9 +295,148 @@ impl Editor {
             _ => FieldValue::Str(raw),
         };
 
-        self.doc.set(section, field.key, value);
-        self.screen = Screen::Fields;
+        if self.editing_door {
+            self.doc.door_set(self.door_sel, field.key, value);
+        } else {
+            self.doc.set(section, field.key, value);
+        }
+        self.screen = self.edit_origin();
         self.status = format!("{} updated", field.key);
+    }
+
+    // ---- Door games (#145) ----------------------------------------------
+
+    /// The field of the door currently being edited.
+    pub fn door_field(&self) -> Option<&'static schema::Field> {
+        DOOR_FIELDS.get(self.door_field_sel)
+    }
+
+    /// A door's value for display, and whether it's set at all.
+    pub fn door_shown_value(&self, key: &str) -> (String, bool) {
+        match self.doc.door_get(self.door_sel, key) {
+            Some(v) => (v.display(), true),
+            None => (String::new(), false),
+        }
+    }
+
+    fn on_doors(&mut self, key: KeyEvent) -> Action {
+        let count = self.doc.door_count();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.door_sel = self.door_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.door_sel + 1 < count {
+                    self.door_sel += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Right if count > 0 => {
+                self.door_field_sel = 0;
+                self.screen = Screen::DoorFields;
+            }
+            KeyCode::Char('a') => {
+                // Pre-filled so the entry is valid the moment it exists; an
+                // operator who adds a door and quits shouldn't leave a config
+                // that won't parse.
+                self.door_sel = self.doc.door_add("New door", "/path/to/program");
+                self.door_field_sel = 0;
+                self.screen = Screen::DoorFields;
+                self.status = "Added a door — set its command.".into();
+            }
+            KeyCode::Char('d') if count > 0 => self.screen = Screen::ConfirmRemoveDoor,
+            // Menu order is what callers see, so it's worth being able to change.
+            KeyCode::Char('K') => {
+                if let Some(to) = self.doc.door_move(self.door_sel, true) {
+                    self.door_sel = to;
+                }
+            }
+            KeyCode::Char('J') => {
+                if let Some(to) = self.doc.door_move(self.door_sel, false) {
+                    self.door_sel = to;
+                }
+            }
+            KeyCode::Char('s') => self.open_save(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::Sections,
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn on_door_fields(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.door_field_sel = self.door_field_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.door_field_sel + 1 < DOOR_FIELDS.len() {
+                    self.door_field_sel += 1;
+                }
+            }
+            KeyCode::Enter => self.begin_door_edit(),
+            KeyCode::Char('s') => self.open_save(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::Doors,
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Same rules as a section field: enums cycle in place, everything else
+    /// opens the text editor primed with the current value.
+    fn begin_door_edit(&mut self) {
+        let Some(field) = self.door_field() else {
+            return;
+        };
+        match field.kind {
+            FieldKind::Enum(options) => {
+                let current = self
+                    .doc
+                    .door_get(self.door_sel, field.key)
+                    .map(|v| v.display())
+                    .unwrap_or_default();
+                let idx = options.iter().position(|o| *o == current).unwrap_or(0);
+                let next = options[(idx + 1) % options.len()];
+                self.doc
+                    .door_set(self.door_sel, field.key, FieldValue::Str(next.to_string()));
+                self.status = if next.is_empty() {
+                    format!("{} = (none)", field.key)
+                } else {
+                    format!("{} = {next}", field.key)
+                };
+            }
+            _ => {
+                self.input = self
+                    .doc
+                    .door_get(self.door_sel, field.key)
+                    .map(|v| v.display())
+                    .unwrap_or_default();
+                self.editing_door = true;
+                self.screen = Screen::Edit;
+                self.status = field.help.to_string();
+            }
+        }
+    }
+
+    /// Removing a door is the one destructive action in the editor, so it asks.
+    fn on_confirm_remove_door(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Char('y') => {
+                let name = self
+                    .doc
+                    .door_names()
+                    .get(self.door_sel)
+                    .cloned()
+                    .unwrap_or_default();
+                self.doc.door_remove(self.door_sel);
+                self.door_sel = self.door_sel.min(self.doc.door_count().saturating_sub(1));
+                self.screen = Screen::Doors;
+                self.status = format!("Removed {name}. Its files on disk are untouched.");
+            }
+            _ => {
+                self.screen = Screen::Doors;
+                self.status = "Kept.".into();
+            }
+        }
+        Action::None
     }
 
     fn open_save(&mut self) {

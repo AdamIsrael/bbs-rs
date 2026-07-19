@@ -27,7 +27,7 @@ use ratatui::{Frame, Terminal};
 
 use bbs_rs::cfg::ConfigDoc;
 use bbs_rs::cfg::editor::{Action, Editor, Screen};
-use bbs_rs::cfg::schema::{FieldKind, SECTIONS};
+use bbs_rs::cfg::schema::{DOOR_FIELDS, FieldKind, SECTIONS};
 
 #[derive(Parser)]
 #[command(
@@ -102,6 +102,9 @@ fn draw(f: &mut Frame, editor: &Editor) {
         Screen::Edit => edit(f, chunks[1], editor),
         Screen::Save => save(f, chunks[1], editor),
         Screen::ConfirmQuit => confirm_quit(f, chunks[1], editor),
+        Screen::Doors => doors(f, chunks[1], editor),
+        Screen::DoorFields => door_fields(f, chunks[1], editor),
+        Screen::ConfirmRemoveDoor => confirm_remove_door(f, chunks[1], editor),
     }
     help_pane(f, chunks[2], editor);
     status_bar(f, chunks[3], editor);
@@ -231,7 +234,9 @@ fn fields(f: &mut Frame, area: Rect, editor: &Editor) {
 }
 
 fn edit(f: &mut Frame, area: Rect, editor: &Editor) {
-    let Some(field) = editor.field() else { return };
+    let Some(field) = editor.edit_field() else {
+        return;
+    };
     let hint = match field.kind {
         FieldKind::Int { min, max } => format!("a number from {min} to {max}"),
         FieldKind::StrList => "comma-separated".to_string(),
@@ -318,6 +323,136 @@ fn save(f: &mut Frame, area: Rect, editor: &Editor) {
     );
 }
 
+fn doors(f: &mut Frame, area: Rect, editor: &Editor) {
+    let names = editor.doc.door_names();
+    if names.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from("No door games configured."),
+                Line::from(""),
+                Line::from("Press 'a' to add one."),
+            ])
+            .block(Block::default().borders(Borders::ALL).title(" Door games ")),
+            area,
+        );
+        return;
+    }
+    let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0) + 2;
+    let lines: Vec<Line> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let command = editor
+                .doc
+                .door_get(i, "command")
+                .map(|v| v.display())
+                .unwrap_or_default();
+            let style = if i == editor.door_sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::raw(format!(
+                    "{} {:<width$}",
+                    if i == editor.door_sel { ">" } else { " " },
+                    name
+                )),
+                Span::styled(command, Style::default().add_modifier(Modifier::DIM)),
+            ])
+            .style(style)
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Door games ({}) ", names.len())),
+        ),
+        area,
+    );
+}
+
+fn door_fields(f: &mut Frame, area: Rect, editor: &Editor) {
+    let label_width = DOOR_FIELDS
+        .iter()
+        .map(|f| f.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let lines: Vec<Line> = DOOR_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let (value, set) = editor.door_shown_value(field.key);
+            let shown = if !set || value.is_empty() {
+                match field.kind {
+                    FieldKind::StrList => "(none)".to_string(),
+                    FieldKind::Int { .. } => "0".to_string(),
+                    _ => "(blank)".to_string(),
+                }
+            } else {
+                value
+            };
+            let style = if i == editor.door_field_sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::raw(format!(
+                    "{} {:<label_width$}",
+                    if i == editor.door_field_sel { ">" } else { " " },
+                    field.label
+                )),
+                Span::raw(shown),
+            ])
+            .style(style)
+        })
+        .collect();
+    let name = editor
+        .doc
+        .door_names()
+        .get(editor.door_sel)
+        .cloned()
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Door: {name} ")),
+        ),
+        area,
+    );
+}
+
+fn confirm_remove_door(f: &mut Frame, area: Rect, editor: &Editor) {
+    let name = editor
+        .doc
+        .door_names()
+        .get(editor.door_sel)
+        .cloned()
+        .unwrap_or_default();
+    let lines = vec![
+        Line::from(format!("Remove the door \"{name}\"?")),
+        Line::from(""),
+        // Worth saying: bbscfg edits the config and nothing else. Deleting a
+        // sysop's game directory because they removed a menu entry would be a
+        // genuinely bad surprise.
+        Line::from("This removes it from the config only — files on disk are untouched."),
+        Line::from(""),
+        Line::from("y = remove    any other key = keep"),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Remove door "),
+        ),
+        area,
+    );
+}
+
 fn confirm_quit(f: &mut Frame, area: Rect, _editor: &Editor) {
     let lines = vec![
         Line::from("You have unsaved changes."),
@@ -335,8 +470,18 @@ fn confirm_quit(f: &mut Frame, area: Rect, _editor: &Editor) {
 fn help_pane(f: &mut Frame, area: Rect, editor: &Editor) {
     let text = match editor.screen {
         Screen::Sections => editor.section().help.to_string(),
-        Screen::Fields | Screen::Edit => editor
+        Screen::Doors => editor.section().help.to_string(),
+        Screen::DoorFields => editor
+            .door_field()
+            .map(|f| f.help.to_string())
+            .unwrap_or_default(),
+        Screen::Fields => editor
             .field()
+            .map(|f| f.help.to_string())
+            .unwrap_or_default(),
+        // The Edit screen is shared between section fields and door fields.
+        Screen::Edit => editor
+            .edit_field()
             .map(|f| f.help.to_string())
             .unwrap_or_default(),
         _ => String::new(),
@@ -356,6 +501,11 @@ fn status_bar(f: &mut Frame, area: Rect, editor: &Editor) {
         Screen::Edit => " type · Enter apply · Esc cancel ",
         Screen::Save => " y save · n back ",
         Screen::ConfirmQuit => " y quit · s save · any key back ",
+        Screen::Doors => {
+            " ↑/↓ move · Enter edit · a add · d remove · K/J reorder · s save · Esc back "
+        }
+        Screen::DoorFields => " ↑/↓ move · Enter edit · s save · Esc back ",
+        Screen::ConfirmRemoveDoor => " y remove · any key keep ",
     };
     let line = format!("{keys}  {}", editor.status);
     f.render_widget(

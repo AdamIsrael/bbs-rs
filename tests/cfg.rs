@@ -21,6 +21,15 @@ use std::path::PathBuf;
 /// is the entire reason we edit it in place instead of regenerating it.
 const COMMENT_LINES: usize = 128;
 
+/// Real `[[doors]]` entries, ignoring the commented-out example the shipped
+/// config carries — a plain `contains("[[doors]]")` matches that comment and
+/// passes for the wrong reason.
+fn uncommented_doors(text: &str) -> usize {
+    text.lines()
+        .filter(|l| l.trim_start().starts_with("[[doors]]"))
+        .count()
+}
+
 fn comment_lines(text: &str) -> usize {
     text.lines()
         .filter(|l| l.trim_start().starts_with('#'))
@@ -668,5 +677,322 @@ mod editor {
         assert_eq!(comment_lines(&after), COMMENT_LINES);
         assert!(after.contains("sysop = \"Adam\""));
         assert!(after.contains("oneliners = false"));
+    }
+}
+
+// ---- #145: door games (an array of tables) ----------------------------------
+
+mod doors {
+    use super::*;
+    use bbs_rs::cfg::editor::{Editor, Screen};
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    fn ed(scratch: &Scratch) -> Editor {
+        Editor::new(ConfigDoc::load(scratch.path()).unwrap())
+    }
+    fn press(e: &mut Editor, code: KeyCode) {
+        e.on_key(KeyEvent::from(code));
+    }
+    fn typed(e: &mut Editor, text: &str) {
+        for c in text.chars() {
+            press(e, KeyCode::Char(c));
+        }
+    }
+    /// Open the Doors section from the section list.
+    fn open_doors(e: &mut Editor) {
+        e.screen = Screen::Sections;
+        e.section_sel = 0;
+        while e.section().name != "doors" {
+            press(e, KeyCode::Down);
+        }
+        press(e, KeyCode::Enter);
+        assert_eq!(
+            e.screen,
+            Screen::Doors,
+            "the doors section is a list, not fields"
+        );
+    }
+    /// Move to a door field by key and open it.
+    fn open_door_field(e: &mut Editor, key: &str) {
+        while e.door_field().is_some_and(|f| f.key != key) {
+            press(e, KeyCode::Down);
+        }
+        press(e, KeyCode::Enter);
+    }
+    fn retype(e: &mut Editor, text: &str) {
+        for _ in 0..60 {
+            press(e, KeyCode::Backspace);
+        }
+        typed(e, text);
+        press(e, KeyCode::Enter);
+    }
+
+    /// Adding a door writes a complete, parseable entry immediately — an
+    /// operator who adds one and walks away must not be left with a config
+    /// that won't load.
+    #[test]
+    fn adding_a_door_writes_a_valid_entry() {
+        let scratch = Scratch::new("door-add");
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+
+        press(&mut e, KeyCode::Char('a'));
+        assert_eq!(e.screen, Screen::DoorFields, "drops you into its settings");
+        assert_eq!(e.doc.door_count(), 1);
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+
+        let text = scratch.text();
+        assert!(
+            uncommented_doors(&text) == 1,
+            "wrote exactly one real [[doors]] entry (the shipped config also has \
+             a commented-out example, which a substring check would match)"
+        );
+        let parsed: bbs_rs::config::Settings = toml::from_str(&text).expect("must parse");
+        assert_eq!(parsed.doors.len(), 1);
+        assert_eq!(parsed.doors[0].name, "New door");
+    }
+
+    /// Editing a door's fields writes into that entry — not into the section,
+    /// which has no fields of its own. The `Edit` screen is shared between the
+    /// two, so committing to the wrong target would silently write nothing.
+    #[test]
+    fn editing_a_door_field_writes_into_that_entry() {
+        let scratch = Scratch::new("door-edit");
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+        press(&mut e, KeyCode::Char('a'));
+
+        open_door_field(&mut e, "name");
+        assert_eq!(e.screen, Screen::Edit);
+        retype(&mut e, "Adventure");
+        assert_eq!(
+            e.screen,
+            Screen::DoorFields,
+            "returns to the door, not the section"
+        );
+
+        open_door_field(&mut e, "command");
+        retype(&mut e, "/usr/games/adventure");
+        open_door_field(&mut e, "args");
+        retype(&mut e, "-q, --no-color");
+        open_door_field(&mut e, "time_limit_secs");
+        retype(&mut e, "900");
+
+        assert_eq!(
+            e.doc.door_get(0, "name"),
+            Some(FieldValue::Str("Adventure".into()))
+        );
+        assert_eq!(
+            e.doc.door_get(0, "args"),
+            Some(FieldValue::List(vec!["-q".into(), "--no-color".into()]))
+        );
+        assert_eq!(
+            e.doc.door_get(0, "time_limit_secs"),
+            Some(FieldValue::Int(900))
+        );
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+        let parsed: bbs_rs::config::Settings = toml::from_str(&scratch.text()).unwrap();
+        assert_eq!(parsed.doors[0].command, "/usr/games/adventure");
+        assert_eq!(parsed.doors[0].time_limit_secs, 900);
+    }
+
+    /// The drop file cycles through its valid values, blank included.
+    #[test]
+    fn the_drop_file_cycles_including_blank() {
+        let scratch = Scratch::new("door-drop");
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+        press(&mut e, KeyCode::Char('a'));
+
+        open_door_field(&mut e, "drop_file");
+        assert_eq!(
+            e.doc.door_get(0, "drop_file"),
+            Some(FieldValue::Str("door.sys".into()))
+        );
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(
+            e.doc.door_get(0, "drop_file"),
+            Some(FieldValue::Str("dorinfo1.def".into()))
+        );
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(
+            e.doc.door_get(0, "drop_file"),
+            Some(FieldValue::Str(String::new())),
+            "wraps back to blank — writing no drop file is a real choice"
+        );
+    }
+
+    /// Removing a door asks first, and takes only that entry.
+    #[test]
+    fn removing_a_door_leaves_the_others_intact() {
+        let scratch = Scratch::new("door-remove");
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+
+        for name in ["First", "Second", "Third"] {
+            press(&mut e, KeyCode::Char('a'));
+            open_door_field(&mut e, "name");
+            retype(&mut e, name);
+            press(&mut e, KeyCode::Esc); // back to the list
+        }
+        assert_eq!(e.doc.door_names(), vec!["First", "Second", "Third"]);
+
+        e.door_sel = 1;
+        press(&mut e, KeyCode::Char('d'));
+        assert_eq!(e.screen, Screen::ConfirmRemoveDoor, "asks before removing");
+
+        press(&mut e, KeyCode::Char('n'));
+        assert_eq!(e.doc.door_count(), 3, "any other key keeps it");
+
+        press(&mut e, KeyCode::Char('d'));
+        press(&mut e, KeyCode::Char('y'));
+        assert_eq!(e.doc.door_names(), vec!["First", "Third"]);
+        assert!(
+            e.status.contains("files on disk are untouched"),
+            "says what it did and didn't do: {}",
+            e.status
+        );
+    }
+
+    /// Removing the last door leaves no `[[doors]]` header behind, and the
+    /// result reparses as a board with no doors.
+    ///
+    /// Note this holds because an empty `ArrayOfTables` serializes to nothing,
+    /// not because of any cleanup we do — a mutation test proved an explicit
+    /// removal changed nothing, so that code is gone.
+    #[test]
+    fn removing_the_last_door_leaves_no_trace() {
+        let scratch = Scratch::new("door-last");
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+        press(&mut e, KeyCode::Char('a'));
+        press(&mut e, KeyCode::Esc);
+
+        press(&mut e, KeyCode::Char('d'));
+        press(&mut e, KeyCode::Char('y'));
+        assert_eq!(e.doc.door_count(), 0);
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+        let text = scratch.text();
+        assert_eq!(uncommented_doors(&text), 0, "no empty array left behind");
+        let parsed: bbs_rs::config::Settings = toml::from_str(&text).unwrap();
+        assert!(parsed.doors.is_empty(), "and it reparses with no doors");
+    }
+
+    /// Menu order is what callers see, so it can be changed without deleting
+    /// and re-adding.
+    #[test]
+    fn doors_can_be_reordered() {
+        let scratch = Scratch::new("door-order");
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+
+        for name in ["A", "B", "C"] {
+            press(&mut e, KeyCode::Char('a'));
+            open_door_field(&mut e, "name");
+            retype(&mut e, name);
+            press(&mut e, KeyCode::Esc);
+        }
+
+        e.door_sel = 2;
+        press(&mut e, KeyCode::Char('K')); // move C up
+        assert_eq!(e.doc.door_names(), vec!["A", "C", "B"]);
+        assert_eq!(e.door_sel, 1, "selection follows the door");
+
+        press(&mut e, KeyCode::Char('K'));
+        assert_eq!(e.doc.door_names(), vec!["C", "A", "B"]);
+        press(&mut e, KeyCode::Char('K'));
+        assert_eq!(
+            e.doc.door_names(),
+            vec!["C", "A", "B"],
+            "can't go past the top"
+        );
+
+        press(&mut e, KeyCode::Char('J'));
+        assert_eq!(e.doc.door_names(), vec!["A", "C", "B"]);
+    }
+
+    /// A hand-written door keeps its own comments through an unrelated edit,
+    /// and through an edit to a *different* door.
+    #[test]
+    fn hand_written_doors_keep_their_comments() {
+        let scratch = Scratch::new("door-comments");
+        let mut text = scratch.text();
+        text.push_str(
+            "\n# The good one\n[[doors]]\nname = \"Adventure\"\ncommand = \"/usr/games/adventure\"\n\
+             \n# Needs the old terminal\n[[doors]]\nname = \"Trade Wars\"\ncommand = \"/opt/tw2002\"\n",
+        );
+        std::fs::write(scratch.path(), &text).unwrap();
+
+        let mut e = ed(&scratch);
+        open_doors(&mut e);
+        assert_eq!(e.doc.door_names(), vec!["Adventure", "Trade Wars"]);
+
+        // Edit the second door only.
+        e.door_sel = 1;
+        press(&mut e, KeyCode::Enter);
+        open_door_field(&mut e, "time_limit_secs");
+        retype(&mut e, "1200");
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+
+        let after = scratch.text();
+        assert!(
+            after.contains("# The good one"),
+            "the first door's comment survives"
+        );
+        assert!(after.contains("# Needs the old terminal"));
+        assert!(after.contains("time_limit_secs = 1200"));
+        assert_eq!(
+            comment_lines(&after),
+            COMMENT_LINES + 2,
+            "only the two added comments, nothing lost"
+        );
+    }
+
+    /// Round trip with doors present: load, save unchanged, byte-identical.
+    /// The Slice A test only proved doors survive an *unrelated* edit.
+    #[test]
+    fn a_config_with_doors_round_trips() {
+        let scratch = Scratch::new("door-roundtrip");
+        let mut text = scratch.text();
+        text.push_str(
+            "\n[[doors]]\nname = \"Adventure\"\ncommand = \"/usr/games/adventure\"\n\
+             args = [\"-q\"]\ntime_limit_secs = 900\ndrop_file = \"dorinfo1.def\"\n",
+        );
+        std::fs::write(scratch.path(), &text).unwrap();
+
+        let mut doc = ConfigDoc::load(scratch.path()).unwrap();
+        assert!(!doc.is_dirty());
+        doc.save().unwrap();
+        assert_eq!(scratch.text(), text, "byte-identical with doors present");
+    }
+
+    /// The door schema covers every field of the Door config struct — the same
+    /// guarantee the section schema has, so a new door setting can't be
+    /// silently unconfigurable.
+    #[test]
+    fn the_door_schema_covers_every_door_field() {
+        let sample = "[[doors]]\nname = \"x\"\ncommand = \"y\"\nargs = []\ncwd = \"/tmp\"\n\
+                      time_limit_secs = 60\ndrop_file = \"door.sys\"\n";
+        // Proves the sample names real fields and nothing more.
+        let parsed: bbs_rs::config::Settings = toml::from_str(sample).unwrap();
+        assert_eq!(parsed.doors.len(), 1);
+
+        let doc: toml_edit::DocumentMut = sample.parse().unwrap();
+        let table = doc["doors"].as_array_of_tables().unwrap().get(0).unwrap();
+        for (key, _) in table.iter() {
+            assert!(
+                bbs_rs::cfg::schema::DOOR_FIELDS
+                    .iter()
+                    .any(|f| f.key == key),
+                "door field {key:?} is missing from DOOR_FIELDS"
+            );
+        }
     }
 }
