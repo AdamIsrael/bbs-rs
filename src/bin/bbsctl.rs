@@ -85,6 +85,8 @@ enum Cmd {
     UnbanIp { ip: String },
     /// List banned IP addresses.
     IpBans,
+    /// Broadcast a message to every live session (e.g. a maintenance notice).
+    Broadcast { message: String },
     /// Set a user's role (guest | user | admin).
     Role { username: String, role: String },
     /// List a user's registered SSH public keys.
@@ -348,6 +350,17 @@ async fn main() -> anyhow::Result<()> {
                     b.reason
                 );
             }
+        }
+        Cmd::Broadcast { message } => {
+            let msg = message.trim();
+            if msg.is_empty() {
+                anyhow::bail!("broadcast message is empty");
+            }
+            let id = admin::queue_broadcast(&pool, msg).await?;
+            println!(
+                "queued broadcast #{id}; the running server will deliver it to live sessions \
+                 within one sweep interval"
+            );
         }
         Cmd::Role { username, role } => {
             admin::set_role(&pool, &username, &role).await?;

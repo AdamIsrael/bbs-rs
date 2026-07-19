@@ -42,6 +42,7 @@ pub enum Screen {
     Help,
     AdminUsers,
     AdminLogins,
+    ComposeBroadcast,
 }
 
 /// Actions reachable from the main menu.

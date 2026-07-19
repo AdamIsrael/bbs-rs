@@ -364,6 +364,7 @@ impl App {
             Screen::Help => self.on_reader(key, Screen::MainMenu),
             Screen::AdminUsers => self.on_admin_users(key).await,
             Screen::AdminLogins => self.on_admin_logins(key).await,
+            Screen::ComposeBroadcast => self.on_compose_broadcast(key).await,
         }
     }
 
@@ -896,9 +897,41 @@ impl App {
             KeyCode::Char('b') => self.admin_ban_selected().await,
             KeyCode::Char('u') => self.admin_unban_selected().await,
             KeyCode::Char('l') => self.open_admin_logins().await,
+            KeyCode::Char('w') => {
+                // Broadcast to everyone (#69) — "wall". Reuse the single-field
+                // compose form.
+                self.form = Form::new(vec![Field::new("Broadcast", false)]);
+                self.screen = Screen::ComposeBroadcast;
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
             _ => {}
         }
+    }
+
+    async fn on_compose_broadcast(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::AdminUsers,
+            KeyCode::Enter => self.submit_broadcast().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    /// Fan a sysop broadcast out to every live session immediately (#69). An
+    /// in-BBS admin has the live presence registry to hand, so — like an in-BBS
+    /// ban kicking at once — it delivers directly rather than via the durable
+    /// queue the `bbsctl` path uses.
+    async fn submit_broadcast(&mut self) {
+        let text = self.form.value(0).trim().to_string();
+        if text.is_empty() {
+            self.status = "Nothing to broadcast.".into();
+            return;
+        }
+        let n = self.presence.broadcast(Event::Broadcast { text }).await;
+        // `n` includes this admin's own session, which also sees the toast.
+        self.status = format!("Broadcast reached {n} session(s).");
+        self.screen = Screen::AdminUsers;
     }
 
     async fn admin_ban_selected(&mut self) {
@@ -2591,6 +2624,12 @@ pub async fn run<W: std::io::Write>(
             Event::Paged { from, body } => {
                 let _ = raw_out.send(b"\x07".to_vec());
                 app.status = format!("\u{1F4DF} {from} pages you: {body}");
+            }
+            // A sysop broadcast to everyone (#69): same toast treatment as a
+            // page, with a bell.
+            Event::Broadcast { text } => {
+                let _ = raw_out.send(b"\x07".to_vec());
+                app.status = format!("\u{1F4E2} Broadcast: {text}");
             }
         }
 

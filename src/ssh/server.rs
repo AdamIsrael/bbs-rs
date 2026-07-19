@@ -369,8 +369,25 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<ArcSwap<S
     // The sweep interval is fixed at startup; the abuse policy is re-read each
     // tick, so tightening/loosening it hot-reloads without a restart.
     let mut ticker = tokio::time::interval(config.load().network.ban_sweep_interval());
+    // High-water mark for sysop broadcasts (#69): seed with the current max so
+    // messages queued before this process started aren't replayed.
+    let mut last_broadcast = admin::latest_broadcast_id(&pool).await.unwrap_or(0);
     loop {
         ticker.tick().await;
+
+        // Deliver any broadcasts queued out-of-process (by `bbsctl`) since the
+        // last tick. Done before the ban logic's early-continue so a broadcast
+        // still goes out on a tick with no bans to sweep.
+        match admin::broadcasts_after(&pool, last_broadcast).await {
+            Ok(pending) => {
+                for (id, text) in pending {
+                    let n = presence.broadcast(Event::Broadcast { text }).await;
+                    tracing::info!("broadcast #{id} delivered to {n} session(s)");
+                    last_broadcast = id;
+                }
+            }
+            Err(e) => tracing::warn!("broadcast poll failed: {e}"),
+        }
 
         let _ = admin::purge_expired_ip_bans(&pool).await;
         auto_ban(&pool, &config.load().abuse).await;

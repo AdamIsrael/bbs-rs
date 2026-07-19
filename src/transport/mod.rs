@@ -42,4 +42,8 @@ pub enum Event {
     /// through the presence fan-out and surfaced as a toast wherever the
     /// recipient currently is, regardless of their screen.
     Paged { from: String, body: String },
+    /// A sysop broadcast to every live session (#69), e.g. a maintenance
+    /// notice. Fanned out via [`crate::services::presence::Presence::broadcast`]
+    /// and surfaced as a toast like [`Event::Paged`].
+    Broadcast { text: String },
 }

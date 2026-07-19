@@ -257,6 +257,7 @@ bbsctl unban <user>
 bbsctl ban-ip <ip> [--reason R]  # ban / unban an IP
 bbsctl unban-ip <ip>
 bbsctl ip-bans                   # list IP bans
+bbsctl broadcast "<message>"     # push a notice to every live session (e.g. maintenance)
 bbsctl keys <user>               # list a user's SSH public keys
 bbsctl add-key <user> "<ssh-… key line>" [--label L]   # register a key (or --file <path>)
 bbsctl rm-key <id>               # remove a registered key
@@ -293,8 +294,14 @@ normal account, then run `bbsctl role <that-user> admin`. Registration refuses r
 
 A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
-an in-BBS **Admin** menu to list users, ban/unban, and view recent logins. Every login attempt
-(success or failure) is recorded with username, IP, and timestamp.
+an in-BBS **Admin** menu to list users, ban/unban, **broadcast to all sessions** (`w`), and view recent
+logins. Every login attempt (success or failure) is recorded with username, IP, and timestamp.
+
+**Broadcasts** push a one-line notice — e.g. "going down for maintenance" — to every connected session
+as a toast, with a bell. An in-BBS admin's broadcast (`w` on the Admin screen) goes out immediately;
+`bbsctl broadcast "<message>"` runs in its own process, so it hands the message to the running server
+through the database and the ban sweeper delivers it on its next tick (within `ban_sweep_interval_secs`).
+Broadcasts are transient — a session that connects afterward won't see an earlier one.
 
 **Public-key auth.** Registered users can log in with an SSH key instead of a password. Register a key
 from the in-BBS **SSH Keys** menu (press `n`, then paste your `~/.ssh/id_ed25519.pub` line), or an

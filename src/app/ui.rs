@@ -99,6 +99,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Register => render_form(f, body, " Register ", app),
         Screen::Help => render_help(f, body, app),
         Screen::AdminUsers => render_admin_users(f, body, app),
+        Screen::ComposeBroadcast => render_form(f, body, " Broadcast to all sessions ", app),
         Screen::AdminLogins => render_admin_logins(f, body, app),
     }
 
@@ -1251,6 +1252,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Register => "Register",
         Screen::Help => "Help",
         Screen::AdminUsers => "Admin · Users",
+        Screen::ComposeBroadcast => "Broadcast",
         Screen::AdminLogins => "Admin · Logins",
     }
 }
@@ -1323,7 +1325,8 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::FileView => " ↑/↓ scroll · PgUp/PgDn · Home top · Esc back ",
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
-        Screen::AdminUsers => " ↑/↓ move · b ban · u unban · l logins · Esc back ",
+        Screen::AdminUsers => " ↑/↓ move · b ban · u unban · w broadcast · l logins · Esc back ",
+        Screen::ComposeBroadcast => " type your message · Enter send to all · Esc cancel ",
         Screen::AdminLogins => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
     };
     base.to_string()

@@ -96,6 +96,18 @@ impl Presence {
         delivered
     }
 
+    /// Deliver an event to *every* live session, returning how many received
+    /// it. Used by sysop broadcast (#69) to push a notice to the whole board.
+    pub async fn broadcast(&self, event: Event) -> usize {
+        let mut delivered = 0;
+        for session in self.inner.read().await.values() {
+            if session.tx.send(event.clone()).await.is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     /// Ask every session whose user or IP is banned to quit. The app loop
     /// exits on [`Event::Quit`] and the SSH wrapper closes the channel.
     /// Returns the number of sessions signalled.
