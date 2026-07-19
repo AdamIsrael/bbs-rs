@@ -30,6 +30,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   `isatty`), with the user's info in the environment + an optional classic drop file, and a time limit.
 - **Full-text search** — keyword search across board messages (SQLite FTS5), scoped to boards you can read;
   jump straight from a hit to the message.
+- **Multi-line compose** — board posts and mail are written in a full-screen editor with word-wrap,
+  cursor movement, and line breaks (Enter for a new line, `^D` to send). Oneliners stay single-line.
 - **Guest guardrails** — the guest account is read-only: no posting, no mail.
 - **Access control** — three roles (`guest` / `user` / `admin`); admins get an in-BBS admin view.
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.
