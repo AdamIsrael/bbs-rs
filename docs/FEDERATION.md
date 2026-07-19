@@ -203,6 +203,72 @@ Phase 6 (#112) is sliced:
   effect of a policy change. Operator surface: `ap-reports`, `ap-resolve`, `ap-block --severity`,
   `ap-purge`.
 
+### #131 — posting into a followed remote board (post-epic follow-up)
+
+The receiving half has worked since #112a; this is the sending half. The asymmetry with our own boards is
+the point: when we *host* a board we `Announce` from the Group because we're the hub, but here we're a
+contributor, so the **author** signs a plain `Create{Page}` addressed `to: [group]`, `cc: [Public]`,
+`audience: group`.
+
+**A submission is not a mirrored post, and not a local post either**, which is why migration 0020 adds a
+third table (`ap_outbox_posts`). `messages` is our boards — filing it there would put it on a local board
+it isn't on. `ap_board_posts` is the mirror of foreign objects — writing it there would assert the remote
+board had published something it hasn't. The new table also supplies the post's permanent `ap_id`, minted
+from its row id.
+
+So a submission is shown as **awaiting the board** until that board announces it back, at which point the
+announced copy lands in `ap_board_posts` under the same `ap_id` and supersedes it. `pending()` is an
+anti-join against the mirror rather than a status column, so nothing has to be kept in sync — publication
+is observed, not recorded. Optimistically showing it as published would be asserting something only the
+remote board can say.
+
+#### The bug this uncovered
+
+The two-instance run failed at first with the author's instance returning 500 and logging
+`Activity was sent from local instance`. Cause: `board_announce` minted the `Announce`'s id by deriving it
+from the **post's** URI. That was invisible while every announced post originated on the announcing
+instance — the derived id was on the right domain by accident. Once a board announces a post authored
+*elsewhere* (which #112a introduced, and #131 exercises), the activity id lands under the author's domain,
+and the author's own server correctly rejects it as spoofing its domain.
+
+The effect was that **the one instance guaranteed to care about a post was the one instance that could
+never receive the announcement** — and it failed silently, as a delivery-queue error nobody reads. An
+activity's id must belong to whoever created it; the id is now minted from our own origin and the local
+row id. Same fix for `Announce{Delete}`. Pinned by `an_announce_of_a_remote_post_is_still_our_activity`.
+
+**Replies are still out of scope**, deliberately: our own boards don't syndicate replies yet either
+(#111b), so shipping outbound replies alone would make BBS↔BBS threading half-work in one direction.
+
+### #132 — in-BBS screen for mirrored remote boards (post-epic follow-up)
+
+Mirrored posts were reachable only through `bbsctl ap-board-posts`, so board syndication was invisible
+to the users it's for. **Remote Boards** on the main menu lists subscribed boards and their mirrored
+posts.
+
+**A sibling screen, not a reuse of the board screens.** Mirrored posts live in `ap_board_posts`, outside
+`messages`, because they're foreign objects we cache rather than content we're the authority for.
+Rendering them through the local board UI would blur exactly the line that design decision draws — so the
+screen is separate, its titles say "mirrored", and it offers no post or moderate action.
+
+**What the work actually turned on: nothing recorded that an actor was a `Group`.** Remote `Person`s and
+`Group`s are both `users` rows, which was fine while both were only ever reached *by* their actor URI —
+but "which of my follows are boards?" had no answer. Migration 0019 adds `users.actor_kind`, filled from
+the fetched actor document (which is why `Person::kind` is a lenient `String`).
+
+Two deliberate choices there:
+
+- **Nullable, not defaulted to `'Person'`.** A default would be a guess about rows we never recorded a
+  type for, and a wrong guess silently hides a board from its own screen. NULL honestly means "unknown".
+- **Backfill on evidence, not assumption.** The migration marks as `Group` only those actors that have
+  actually announced a board post to us. For anything it can't prove, `mirror::boards` falls back to the
+  same evidence at query time, so a board followed before the upgrade doesn't vanish.
+
+Follow state is surfaced (`pending` vs `accepted`) because a board awaiting the remote server's `Accept`
+is legitimately empty, and an unexplained empty screen reads as a bug. Where several local users follow
+the same board in different states, the query takes `MIN(state)` — mirroring is instance-wide, so if any
+edge is accepted the board is live for everyone; without an aggregate SQLite would return an arbitrary
+row's state, which is a coin flip in precisely the case the screen is trying to explain.
+
 ### #133 — `Announce`-wrapped lifecycle (post-epic follow-up)
 
 A board relays its members' `Delete`/`Update` so a post withdrawn upstream doesn't linger in every

@@ -3332,6 +3332,7 @@ async fn our_announced_delete_is_one_we_would_honor() {
         &origin,
         "general",
         &author_uri,
+        42,
         page_id,
     ))
     .unwrap();
@@ -3343,5 +3344,542 @@ async fn our_announced_delete_is_one_we_would_honor() {
         mirror::count(&pool, &group_uri).await.unwrap(),
         0,
         "the post we announced as deleted left the mirror"
+    );
+}
+
+// ---- #132: in-BBS screen for mirrored remote boards -------------------------
+
+/// A subscribed board is listed with its post count and newest-post time.
+#[tokio::test]
+async fn subscribed_remote_boards_are_listed_with_stats() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    for (i, ts) in [(1, 1_782_907_200_i64), (2, 1_782_993_600)] {
+        mirror::insert(
+            &pool,
+            &format!("https://remote.social/p/{i}"),
+            &group,
+            "rustaceans@remote.social",
+            "bob@remote.social",
+            "https://remote.social/users/bob",
+            "Subject",
+            "body",
+            None,
+            ts,
+        )
+        .await
+        .unwrap();
+    }
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0].handle, "rustaceans@remote.social");
+    assert_eq!(boards[0].state, "accepted");
+    assert_eq!(boards[0].posts, 2);
+    assert_eq!(boards[0].latest, Some(1_782_993_600));
+}
+
+/// A followed *person* is not a board — the screen must not list them.
+#[tokio::test]
+async fn followed_people_are_not_listed_as_boards() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let person = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Person' WHERE actor_uri = ?")
+        .bind(&person)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &person,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        mirror::boards(&pool).await.unwrap().is_empty(),
+        "following a Person is not subscribing to a board"
+    );
+}
+
+/// A board subscribed *before* migration 0019 recorded actor types has a NULL
+/// kind. It must still appear, on the evidence of what it has announced —
+/// otherwise upgrading would silently empty this screen.
+#[tokio::test]
+async fn a_board_predating_actor_kind_is_still_listed() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "legacy@remote.social", "remote.social", None).await;
+    // Explicitly NULL: the state an upgraded install is actually in.
+    sqlx::query("UPDATE users SET actor_kind = NULL WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    mirror::insert(
+        &pool,
+        "https://remote.social/p/1",
+        &group,
+        "legacy@remote.social",
+        "bob@remote.social",
+        "https://remote.social/users/bob",
+        "Subject",
+        "body",
+        None,
+        1_782_907_200,
+    )
+    .await
+    .unwrap();
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1, "proven a board by what it announced");
+    assert_eq!(boards[0].posts, 1);
+}
+
+/// A pending subscription is listed with its state, so an empty board reads as
+/// "not accepted yet" rather than as a bug.
+#[tokio::test]
+async fn a_pending_board_subscription_is_listed_as_pending() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "slow@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::request(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0].state, "pending");
+    assert_eq!(boards[0].posts, 0);
+    assert_eq!(boards[0].latest, None);
+}
+
+/// When two local users follow the same board in different states, the board is
+/// live for the instance — so it must not be a coin flip which state shows.
+#[tokio::test]
+async fn a_board_followed_twice_reports_the_accepted_state() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    mint_local(&pool, "bob").await;
+    let group = insert_follower(&pool, "busy@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::request(
+        &pool,
+        "https://bbs.example.com/u/bob",
+        &group,
+        "https://bbs.example.com/f/2",
+    )
+    .await
+    .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1, "one board, not one row per follower");
+    assert_eq!(boards[0].state, "accepted");
+}
+
+/// Fetching a remote actor records what kind it is (migration 0019), which is
+/// what lets a board be listed before it has announced anything.
+#[tokio::test]
+async fn fetching_a_group_actor_records_its_kind() {
+    use activitypub_federation::traits::Object;
+
+    let pool = setup().await;
+    let data = fed_data(&pool).await;
+    let doc: bbs_rs::web::ap_object::Person = serde_json::from_value(serde_json::json!({
+        "type": "Group",
+        "id": "https://remote.social/c/rustaceans",
+        "preferredUsername": "rustaceans",
+        "inbox": "https://remote.social/c/rustaceans/inbox",
+        "publicKey": {
+            "id": "https://remote.social/c/rustaceans#main-key",
+            "owner": "https://remote.social/c/rustaceans",
+            "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----\n",
+        },
+    }))
+    .unwrap();
+    bbs_rs::web::ap_object::FedActor::from_json(doc, &data)
+        .await
+        .unwrap();
+
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT actor_kind FROM users WHERE actor_uri = ?")
+            .bind("https://remote.social/c/rustaceans")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kind.as_deref(), Some("Group"));
+}
+
+// ---- #131: posting into a followed remote board -----------------------------
+
+/// Subscribe (accepted) to a remote board with a known inbox. Returns its URI.
+async fn subscribe_to_board(pool: &SqlitePool, handle: &str) -> String {
+    use bbs_rs::services::federation::follows;
+
+    let group = insert_follower(pool, handle, handle.split('@').nth(1).unwrap(), None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(pool)
+        .await
+        .unwrap();
+    follows::accept(
+        pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    group
+}
+
+/// A submission queues the author's signed `Create{Page}` to the board's inbox,
+/// addressed so the board routes it.
+#[tokio::test]
+async fn posting_to_a_remote_board_queues_a_create_for_its_inbox() {
+    use bbs_rs::services::federation::{Origin, queue, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = subscribe_to_board(&pool, "rustaceans@remote.social").await;
+
+    let ap_id = remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "Hello from bbs-rs",
+        "posting across the fediverse",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(ap_id.starts_with("https://bbs.example.com/p/"), "{ap_id}");
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        due[0].inbox_url, "https://remote.social/users/rustaceans/inbox",
+        "delivered to the board's own inbox, not a shared one — this is a \
+         targeted submission, not a fan-out"
+    );
+    assert_eq!(
+        due[0].actor_uri, "https://bbs.example.com/u/alice",
+        "the author signs — we're a contributor to that board, not its hub"
+    );
+
+    let body: serde_json::Value = serde_json::from_str(&due[0].activity).unwrap();
+    assert_eq!(body["type"], "Create");
+    assert_eq!(body["actor"], "https://bbs.example.com/u/alice");
+    assert_eq!(body["object"]["type"], "Page");
+    assert_eq!(body["object"]["id"], ap_id);
+    assert_eq!(body["object"]["name"], "Hello from bbs-rs");
+    assert_eq!(
+        body["object"]["audience"], group,
+        "audience is what routes it to the board"
+    );
+    assert_eq!(body["object"]["to"][0], group);
+    assert_eq!(
+        body["object"]["cc"][0],
+        "https://www.w3.org/ns/activitystreams#Public"
+    );
+    assert_eq!(
+        body["object"]["content"], "<p>posting across the fediverse</p>",
+        "body is HTML-escaped into its wrapper"
+    );
+}
+
+/// Until the board announces it back, a submission shows as pending — we are not
+/// the authority for that board and don't get to call it published.
+#[tokio::test]
+async fn a_submission_is_pending_until_the_board_announces_it_back() {
+    use bbs_rs::services::federation::{Origin, mirror, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = subscribe_to_board(&pool, "rustaceans@remote.social").await;
+
+    let ap_id = remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "Hello",
+        "body",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    let pending = remote_posting::pending(&pool, &group).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].subject, "Hello");
+    assert_eq!(pending[0].author_handle, "alice");
+
+    // The board publishes it: same ap_id arrives through the normal mirror path.
+    mirror::insert(
+        &pool,
+        &ap_id,
+        &group,
+        "rustaceans@remote.social",
+        "alice@bbs.example.com",
+        "https://bbs.example.com/u/alice",
+        "Hello",
+        "body",
+        None,
+        1_782_907_200,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        remote_posting::pending(&pool, &group)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the published copy supersedes the pending one, with no status to sync"
+    );
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+}
+
+/// Posting into a board that hasn't accepted the subscription fails loudly.
+/// A fan-out can no-op silently; a direct user action must not.
+#[tokio::test]
+async fn posting_to_an_unaccepted_board_is_refused() {
+    use bbs_rs::services::federation::{Origin, follows, queue, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = insert_follower(&pool, "slow@remote.social", "remote.social", None).await;
+    follows::request(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    let err = remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        &group,
+        "Hello",
+        "body",
+        &Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err}").contains("accepted"), "got: {err}");
+    assert_eq!(queue::pending(&pool).await.unwrap(), 0, "nothing queued");
+}
+
+/// A board nobody subscribes to can't be posted to.
+#[tokio::test]
+async fn posting_to_an_unsubscribed_board_is_refused() {
+    use bbs_rs::services::federation::{Origin, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+
+    let err = remote_posting::submit(
+        &pool,
+        &origin,
+        &alice,
+        "https://elsewhere.example/c/strangers",
+        "Hello",
+        "body",
+        &Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err}").contains("not subscribed"), "got: {err}");
+}
+
+/// Guests never federate — including into someone else's board.
+#[tokio::test]
+async fn a_guest_cannot_post_to_a_remote_board() {
+    use bbs_rs::services::federation::{Origin, remote_posting};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = subscribe_to_board(&pool, "rustaceans@remote.social").await;
+    let guest = bbs_rs::services::auth::find_user(&pool, "guest")
+        .await
+        .unwrap()
+        .expect("the guest account exists by default");
+
+    let err = remote_posting::submit(
+        &pool,
+        &origin,
+        &guest,
+        &group,
+        "Hello",
+        "body",
+        &Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, bbs_rs::error::AppError::GuestNotAllowed));
+}
+
+/// Federating isn't a way around the local rate limit.
+#[tokio::test]
+async fn remote_board_posts_are_rate_limited_like_local_ones() {
+    use bbs_rs::config::Limits;
+    use bbs_rs::services::federation::{Origin, remote_posting};
+
+    let pool = setup().await;
+    let alice = mint_local(&pool, "alice").await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let group = subscribe_to_board(&pool, "rustaceans@remote.social").await;
+    let limits = Limits {
+        max_posts: 1,
+        ..Default::default()
+    };
+
+    // A local post uses up the budget.
+    let board = bbs_rs::services::boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    bbs_rs::services::boards::post_message(&pool, board.id, &alice, "local", "body", None, &limits)
+        .await
+        .unwrap();
+
+    let err = remote_posting::submit(&pool, &origin, &alice, &group, "Hi", "body", &limits)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, bbs_rs::error::AppError::RateLimited),
+        "got: {err}"
+    );
+}
+
+/// An `Announce` we emit must carry an id on **our** origin, even when the post
+/// it wraps belongs to someone else.
+///
+/// Regression test. The id used to be derived from the post's URI, so
+/// re-announcing an inbound post (#112a) minted an activity id under the
+/// *author's* domain. The author's own instance then rejected the delivery
+/// outright — `Activity was sent from local instance` — meaning the one server
+/// guaranteed to care about that post was the one server that could never
+/// receive it. Found by the #131 two-instance run.
+#[tokio::test]
+async fn an_announce_of_a_remote_post_is_still_our_activity() {
+    use bbs_rs::services::federation::{Origin, objects};
+
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    // A post authored on, and hosted at, another instance.
+    let foreign_page = objects::board_page(
+        &origin,
+        "general",
+        "https://peer.example/p/7",
+        "https://peer.example/u/bob",
+        "From elsewhere",
+        "body",
+        1_782_907_200,
+    );
+    let announce = objects::board_announce(
+        &origin,
+        "general",
+        "https://peer.example/u/bob",
+        5,
+        foreign_page,
+    );
+
+    assert!(
+        announce.id.starts_with("https://bbs.example.com/"),
+        "the Announce is our activity and must live on our origin, got {}",
+        announce.id
+    );
+    assert!(
+        !announce.id.starts_with("https://peer.example/"),
+        "must not mint an activity id under the author's domain"
+    );
+    // The post itself keeps its own identity and attribution — only the
+    // wrapper is ours.
+    assert_eq!(announce.object.object.id, "https://peer.example/p/7");
+    assert_eq!(
+        announce.object.object.attributed_to,
+        "https://peer.example/u/bob"
+    );
+
+    let del = objects::board_delete(
+        &origin,
+        "general",
+        "https://peer.example/u/bob",
+        5,
+        "https://peer.example/p/7",
+    );
+    assert!(
+        del.id.starts_with("https://bbs.example.com/"),
+        "same rule for Announce{{Delete}}, got {}",
+        del.id
     );
 }

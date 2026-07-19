@@ -254,12 +254,13 @@ impl Object for FedActor {
         sqlx::query(
             "INSERT INTO users \
                (username, password_hash, role, created_at, domain, is_remote, \
-                actor_uri, inbox_url, public_key, actor_refreshed_at) \
-             VALUES (?, '!', 'user', ?, ?, 1, ?, ?, ?, ?) \
+                actor_uri, inbox_url, public_key, actor_refreshed_at, actor_kind) \
+             VALUES (?, '!', 'user', ?, ?, 1, ?, ?, ?, ?, ?) \
              ON CONFLICT(actor_uri) DO UPDATE SET \
                inbox_url = excluded.inbox_url, \
                public_key = excluded.public_key, \
-               actor_refreshed_at = excluded.actor_refreshed_at",
+               actor_refreshed_at = excluded.actor_refreshed_at, \
+               actor_kind = excluded.actor_kind",
         )
         .bind(&handle)
         .bind(now)
@@ -268,6 +269,10 @@ impl Object for FedActor {
         .bind(inbox.as_str())
         .bind(&public_key)
         .bind(now)
+        // Straight from the fetched document, which is why `Person::kind` is a
+        // lenient String — a `Group` (remote board, #111) arrives through this
+        // same path and is what the mirrored-boards screen lists (#132).
+        .bind(&json.kind)
         .execute(&data.pool)
         .await?;
 
