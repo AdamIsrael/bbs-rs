@@ -40,6 +40,19 @@ pub struct Field {
     pub help: &'static str,
 }
 
+/// How a section is edited.
+///
+/// Most sections are a flat list of settings. `[[doors]]` is an **array of
+/// tables** — a list of entries, each with its own fields — which needs list
+/// operations (add, remove, reorder) that a field list has no place for (#145).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionKind {
+    /// A flat list of settings.
+    Fields,
+    /// A list of entries, each edited with [`DOOR_FIELDS`].
+    Doors,
+}
+
 /// A `[section]` of the config.
 pub struct Section {
     pub name: &'static str,
@@ -52,10 +65,57 @@ pub struct Section {
     /// applies them to the shared settings but they don't take effect. Everything
     /// else reaches new sessions on the next connect.
     pub restart_only: bool,
+    pub kind: SectionKind,
     pub fields: &'static [Field],
 }
 
 const ROLES: &[&str] = &["guest", "user", "admin"];
+/// Blank means "write no drop file", which is why it's an option rather than an
+/// absent value — the operator picks it explicitly.
+const DROP_FILES: &[&str] = &["", "door.sys", "dorinfo1.def"];
+
+/// The fields of one `[[doors]]` entry (#145).
+pub static DOOR_FIELDS: &[Field] = &[
+    Field {
+        key: "name",
+        label: "Menu label",
+        kind: FieldKind::Str,
+        help: "What callers see in the Doors menu.",
+    },
+    Field {
+        key: "command",
+        label: "Command",
+        kind: FieldKind::Path,
+        help: "The program to run. It gets a pseudo-terminal and the caller's details in the environment (BBS_USER, BBS_TIME_LEFT_SECS, ...).",
+    },
+    Field {
+        key: "args",
+        label: "Arguments",
+        kind: FieldKind::StrList,
+        help: "Passed to the program, comma-separated here. Each is one argument — they are not run through a shell, so quoting and globs do not apply.",
+    },
+    Field {
+        key: "cwd",
+        label: "Working directory",
+        kind: FieldKind::Path,
+        help: "Where the program runs, and where a drop file is written. Blank uses the BBS's own working directory.",
+    },
+    Field {
+        key: "time_limit_secs",
+        label: "Time limit (s)",
+        kind: FieldKind::Int {
+            min: 0,
+            max: 86_400,
+        },
+        help: "Kill the program after this long. 0 means no limit.",
+    },
+    Field {
+        key: "drop_file",
+        label: "Drop file",
+        kind: FieldKind::Enum(DROP_FILES),
+        help: "Classic BBS handoff file written before launch, for doors that expect one. Blank writes none.",
+    },
+];
 const PRESETS: &[&str] = &["classic", "mono", "amber", "matrix"];
 
 pub static SECTIONS: &[Section] = &[
@@ -64,6 +124,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Board identity",
         help: "Names and text shown to callers.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "name",
@@ -96,6 +157,7 @@ pub static SECTIONS: &[Section] = &[
         title: "SSH & database",
         help: "Where the BBS listens and what it stores to. CLI flags override these.",
         restart_only: true,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "host",
@@ -167,6 +229,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Features",
         help: "Turn whole areas of the BBS on or off.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "registration",
@@ -223,6 +286,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Abuse protection",
         help: "Automatic IP bans after repeated failed logins.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "max_failures",
@@ -255,6 +319,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Accounts",
         help: "Registration policy.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[Field {
             key: "reserved_usernames",
             label: "Reserved usernames",
@@ -267,6 +332,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Rate limits",
         help: "Per-user caps. Admins are never throttled; 0 disables a cap.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "window_secs",
@@ -329,6 +395,7 @@ pub static SECTIONS: &[Section] = &[
         title: "File areas",
         help: "Storage and limits for uploaded files.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "storage_dir",
@@ -385,6 +452,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Theme",
         help: "Colors. Pick a preset, then override individual colors if you want. A color is a name (cyan, darkgray, …), a 256-palette index (\"208\"), or hex (\"#ff8800\").",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "preset",
@@ -441,6 +509,7 @@ pub static SECTIONS: &[Section] = &[
         title: "ANSI art",
         help: "CP437 .ans art and UTF-8 text with ANSI escapes both work. Per-screen art ([art.screens]) is edited in the file.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "dir",
@@ -461,6 +530,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Web frontend",
         help: "A browser terminal over WebSocket that reuses the whole TUI. Required for federation — every ActivityPub endpoint is served here.",
         restart_only: true,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "enabled",
@@ -535,6 +605,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Federation (ActivityPub)",
         help: "Syndicate boards to other bbs-rs instances and make users user@host, followable from Mastodon. Requires the web frontend.",
         restart_only: true,
+        kind: SectionKind::Fields,
         fields: &[
             Field {
                 key: "enabled",
@@ -585,6 +656,7 @@ pub static SECTIONS: &[Section] = &[
         title: "Oneliners",
         help: "Graffiti-wall policy, separate from the on/off toggle in Features. The wall does not auto-trim: oneliners are federated posts with permanent URIs.",
         restart_only: false,
+        kind: SectionKind::Fields,
         fields: &[Field {
             key: "max_length",
             label: "Max length",
@@ -596,10 +668,21 @@ pub static SECTIONS: &[Section] = &[
         }],
     },
     Section {
+        name: "doors",
+        title: "Door games",
+        help: "External programs callers can run. Each gets a pseudo-terminal and the caller's details in the environment. A Doors menu appears when at least one is configured.",
+        restart_only: false,
+        kind: SectionKind::Doors,
+        // Per-entry fields live in DOOR_FIELDS; this list is empty because a
+        // door section has entries, not settings of its own.
+        fields: &[],
+    },
+    Section {
         name: "seed",
         title: "First-run seeding",
         help: "Applied only to a fresh database. Custom boards ([seed] boards) are edited in the file.",
         restart_only: true,
+        kind: SectionKind::Fields,
         fields: &[Field {
             key: "guest_password",
             label: "Guest password",

@@ -1,0 +1,204 @@
+# bbs-rs configuration.
+# CLI flags (--host, --port, --database-url, --host-key) override these values.
+
+[bbs]
+# Board name — shown in the title bar, startup log, and help.
+name = "bbs-rs"
+# Short subtitle shown on the main menu and help screen.
+tagline = "a tiny bulletin board over SSH"
+# Sysop name shown in the help footer (blank to hide).
+sysop = ""
+# Message-of-the-day banner shown on the main menu (blank to hide).
+welcome = "Welcome to the board."
+
+[network]
+host = "0.0.0.0"
+port = 2222
+# Public hostname clients use to reach the BBS, shown in connect instructions
+# (e.g. the SFTP download hint). Blank falls back to host, or localhost when
+# host is a wildcard address.
+hostname = ""
+database_url = "sqlite://bbs.db?mode=rwc"
+host_key = "host_key"
+# Disconnect idle sessions after this many seconds.
+inactivity_timeout_secs = 3600
+# Delay before an SSH auth rejection is returned.
+auth_rejection_time_secs = 2
+# How often to sweep for banned users/IPs and kick their live sessions.
+ban_sweep_interval_secs = 10
+# Fallback terminal size when a client reports 0x0.
+default_cols = 80
+default_rows = 24
+
+[features]
+# Allow new-account registration (from the guest session).
+registration = true
+# Allow the shared guest account to log in.
+guest = true
+# Enable private user-to-user mail.
+private_mail = true
+# Enable the who's-online view.
+who_online = true
+# Enable the oneliners / graffiti wall.
+oneliners = true
+# Allow SSH public-key authentication (users register keys in the BBS).
+pubkey_auth = true
+# Enable file areas (browse downloadable files).
+file_areas = true
+# Tell users about the other way in: browser users see the SSH address, SSH
+# users see the web URL (when [web] is enabled). Set the hostname fields below
+# for these to show a reachable address rather than localhost.
+advertise_transports = true
+
+[abuse]
+# Auto-ban an IP after this many failed logins within the window. 0 disables.
+max_failures = 10
+# Sliding window for counting failures, in seconds.
+window_secs = 600
+# How long an auto-ban lasts, in seconds. 0 = permanent.
+ban_secs = 3600
+
+[accounts]
+# Usernames that may not be registered (case-insensitive; whitespace-trimmed).
+# "guest" is always reserved regardless of this list.
+reserved_usernames = ["root", "admin"]
+
+[limits]
+# Per-user rate limits (admins are never throttled). A 0 cap disables that
+# limit. Counts the user's own rows created within the window.
+window_secs = 60
+# Max board posts per user per window.
+max_posts = 5
+# Max mail sent per user per window.
+max_mail = 10
+# Max oneliners per user per window.
+max_oneliners = 8
+# Max characters in a post/mail subject (0 disables).
+max_subject_chars = 120
+# Max characters in a post/mail body (0 disables).
+max_body_chars = 8000
+
+[files]
+# Where uploaded file blobs are stored (relative to the working dir).
+storage_dir = "files"
+# Maximum size of a single file, in bytes (0 = unlimited). Default 10 MiB.
+max_file_bytes = 10485760
+# Maximum total bytes one user may store (0 = unlimited). Default 100 MiB.
+user_quota_bytes = 104857600
+# Allowed file extensions (lowercase, no dot); empty allows any, e.g.
+# allowed_extensions = ["txt", "zip", "png"]
+allowed_extensions = []
+# Max bytes read/decompressed when previewing a file or archive entry in the BBS.
+max_preview_bytes = 262144
+# Max entries listed from an archive.
+max_archive_entries = 1000
+
+[theme]
+# Color theme. `preset` picks a built-in base: classic (default), mono, amber,
+# or matrix. Uncomment any field below to override just that color. Colors are
+# a name (black, red, green, yellow, blue, magenta, cyan, gray, darkgray, the
+# light* variants, white, reset), a 256-palette index ("208"), or hex
+# ("#ff8800").
+preset = "classic"
+# title_fg = "black"     # title-bar text
+# title_bg = "cyan"      # title-bar background
+# accent = "cyan"        # headings, tags, author names
+# highlight = "green"    # "new"/unread markers
+# warning_fg = "black"   # status/warning text
+# warning_bg = "yellow"  # status/warning background
+# dim = "darkgray"       # secondary text, hints, labels
+
+[art]
+# ANSI/text art. Files live under `dir` (relative to the working dir). Real
+# CP437 .ans art and UTF-8 text with ANSI color escapes both work.
+dir = "art"
+# Shown on the main menu (a file name under `dir`; blank = none).
+welcome = ""
+# Optional per-screen header art: map a screen key to a file under `dir`.
+# Keys: main_menu, bulletins, board_list, message_list, mailbox, who_online,
+# profile, stats, search, file_areas, file_list, keys, help, admin.
+# [art.screens]
+# board_list = "boards.ans"
+# file_areas = "files.ans"
+
+[web]
+# Browser frontend: a WebSocket + xterm.js terminal that reuses the whole TUI,
+# served alongside SSH. Off by default.
+enabled = false
+host = "0.0.0.0"
+port = 8088
+# Public hostname browsers use to reach the frontend, shown in connect
+# instructions (the mirror of [network] hostname). Blank falls back to the first
+# acme_domains entry, then host, or localhost when host is a wildcard address.
+# Set this when the frontend is behind a reverse proxy or on its own domain.
+hostname = ""
+# TLS (HTTPS/WSS). On by default: with no cert configured a persistent
+# self-signed cert is generated at tls_cert/tls_key (default web-cert.pem /
+# web-key.pem), so TLS works out of the box — browsers show a one-time trust
+# warning until you install a real cert. Set tls = false for plain HTTP.
+tls = true
+# Bring your own cert instead (real CA, mkcert, certbot output):
+# tls_cert = "web-cert.pem"
+# tls_key  = "web-key.pem"
+# Or fetch a trusted Let's Encrypt cert automatically (ACME). Takes precedence
+# over tls_cert/tls_key. Requires public DNS and reachability on port 443:
+# acme_domains = ["bbs.example.com"]
+# acme_email   = "sysop@example.com"
+# acme_cache   = "acme-cache"
+# acme_staging = false   # true = Let's Encrypt staging (untrusted, for testing)
+
+[federation]
+# ActivityPub federation: syndicate boards across bbs-rs instances, and make
+# users user@host — followable from Mastodon. Off by default. See
+# docs/FEDERATION.md.
+enabled = false
+# The public origin every actor URI is minted from, e.g.
+# "https://bbs.example.com". Scheme + host only: no port, no path.
+#
+# THIS IS PERMANENT. ActivityPub ids are primary keys across the whole network;
+# once delivered to a remote server they can never be rewritten, so changing
+# the origin later orphans every remote follow. It is validated fail-closed at
+# startup (https, a real domain, no port) — a board that can't federate
+# correctly refuses to federate at all.
+#
+# Note RFC 7565 acct: URIs have no port component, so the frontend must be
+# reachable on 443: set [web] port = 443 with acme_domains, or reverse-proxy.
+origin = ""
+# Only federate with domains explicitly allowed (bbsctl). On by default: open
+# federation means volunteering to moderate the entire internet.
+allowlist_only = true
+delivery_interval_secs = 30   # how often the outbound delivery queue drains
+delivery_max_attempts = 10    # give up on an activity after this many failures
+# debug_insecure = false      # LOCAL TESTING ONLY: allows http/localhost/ports
+
+[oneliners]
+# Graffiti-wall policy (separate from the [features] oneliners on/off toggle).
+# Oneliners are also this board's ActivityPub statuses, so the wall no longer
+# auto-trims: a federated post has a permanent URI, and deleting one out from
+# under remote servers would orphan their references. Use [limits]
+# max_oneliners and bbsctl rm-oneliner to keep the wall in hand.
+max_length = 500       # max characters per oneliner (0 = no cap; 500 = Mastodon parity)
+
+[seed]
+# First-run seeded content. Boards are created only when the board table is
+# empty (i.e. on a fresh database).
+# guest_password = "guest"   # password for the shared guest account
+# Uncomment to define your own boards (replaces the General + Announcements
+# defaults). min_read/min_write are guest|user|admin and default to guest/user.
+# boards = [
+#   { name = "General", description = "General chatter", min_write = "user" },
+#   { name = "Announcements", description = "System news", min_write = "admin" },
+#   { name = "Staff", description = "Admins only", min_read = "admin", min_write = "admin" },
+# ]
+
+# Door games / external programs. Each runs on a pseudo-terminal with the user's
+# info in the environment (BBS_USER, BBS_TIME_LEFT_SECS, …) and, if requested, a
+# drop file (door.sys / dorinfo1.def) in the working dir. A Doors menu appears
+# when at least one is configured. Uncomment to add some:
+# [[doors]]
+# name = "Adventure"
+# command = "/usr/games/adventure"
+# args = []
+# cwd = "/var/bbs/doors/adventure"
+# time_limit_secs = 900        # 0 = no limit
+# drop_file = "dorinfo1.def"   # or "door.sys"; blank = none

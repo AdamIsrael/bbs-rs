@@ -151,6 +151,155 @@ impl ConfigDoc {
         }
     }
 
+    // ---- Door games: an array of tables (#145) -------------------------
+    //
+    // `[[doors]]` is a list of entries rather than a set of settings, so it gets
+    // its own small API. Everything here goes through `ArrayOfTables`, which
+    // keeps each entry's own comments and formatting — removing door 2 leaves
+    // doors 1 and 3 exactly as the operator wrote them.
+
+    /// How many doors are configured.
+    pub fn door_count(&self) -> usize {
+        self.doc
+            .get("doors")
+            .and_then(|i| i.as_array_of_tables())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    }
+
+    /// Every door's menu label, for the list screen. A door with no `name` yet
+    /// shows as `(unnamed)` rather than vanishing.
+    pub fn door_names(&self) -> Vec<String> {
+        let Some(arr) = self.doc.get("doors").and_then(|i| i.as_array_of_tables()) else {
+            return Vec::new();
+        };
+        arr.iter()
+            .map(|t| {
+                t.get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("(unnamed)")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Read one field of one door.
+    pub fn door_get(&self, index: usize, key: &str) -> Option<FieldValue> {
+        let arr = self.doc.get("doors")?.as_array_of_tables()?;
+        let item = arr.get(index)?.get(key)?;
+        Some(match item {
+            Item::Value(Value::Boolean(b)) => FieldValue::Bool(*b.value()),
+            Item::Value(Value::Integer(i)) => FieldValue::Int(*i.value()),
+            Item::Value(Value::Array(a)) => FieldValue::List(
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+            ),
+            Item::Value(Value::String(s)) => FieldValue::Str(s.value().clone()),
+            other => FieldValue::Str(other.to_string().trim().to_string()),
+        })
+    }
+
+    /// Set one field of one door. Out-of-range indexes are ignored rather than
+    /// panicking — the UI and the document can disagree if something else edited
+    /// the file underneath us.
+    pub fn door_set(&mut self, index: usize, key: &str, value: FieldValue) {
+        let Some(arr) = self
+            .doc
+            .get_mut("doors")
+            .and_then(|i| i.as_array_of_tables_mut())
+        else {
+            return;
+        };
+        let Some(table) = arr.get_mut(index) else {
+            return;
+        };
+        table[key] = match value {
+            FieldValue::Bool(b) => toml_edit::value(b),
+            FieldValue::Int(i) => toml_edit::value(i),
+            FieldValue::Str(s) => toml_edit::value(s),
+            FieldValue::List(items) => {
+                let mut a = Array::new();
+                for i in items {
+                    a.push(i);
+                }
+                toml_edit::value(a)
+            }
+        };
+    }
+
+    /// Append a door, pre-filled so it's a valid entry from the moment it
+    /// exists — a half-written `[[doors]]` block would stop the whole config
+    /// parsing, and the operator might not save immediately.
+    pub fn door_add(&mut self, name: &str, command: &str) -> usize {
+        if self
+            .doc
+            .get("doors")
+            .and_then(|i| i.as_array_of_tables())
+            .is_none()
+        {
+            self.doc["doors"] = Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+        }
+        let arr = self.doc["doors"]
+            .as_array_of_tables_mut()
+            .expect("just set");
+        let mut table = toml_edit::Table::new();
+        table["name"] = toml_edit::value(name);
+        table["command"] = toml_edit::value(command);
+        table["args"] = toml_edit::value(Array::new());
+        table["time_limit_secs"] = toml_edit::value(0i64);
+        arr.push(table);
+        arr.len() - 1
+    }
+
+    /// Remove a door. Returns whether one was there.
+    pub fn door_remove(&mut self, index: usize) -> bool {
+        let Some(arr) = self
+            .doc
+            .get_mut("doors")
+            .and_then(|i| i.as_array_of_tables_mut())
+        else {
+            return false;
+        };
+        if index >= arr.len() {
+            return false;
+        }
+        arr.remove(index);
+        // No cleanup needed when the last one goes: an empty `ArrayOfTables`
+        // serializes to nothing, so the `[[doors]]` header disappears on its
+        // own. (I had a `doc.remove("doors")` here until a mutation test showed
+        // the output was identical without it — a line that looks defensive but
+        // does nothing is worse than no line.)
+        true
+    }
+
+    /// Move a door one place up or down. Menu order is what callers see, so it's
+    /// worth being able to change without deleting and re-adding.
+    pub fn door_move(&mut self, index: usize, up: bool) -> Option<usize> {
+        let arr = self
+            .doc
+            .get_mut("doors")
+            .and_then(|i| i.as_array_of_tables_mut())?;
+        let target = if up {
+            index.checked_sub(1)?
+        } else {
+            let t = index + 1;
+            (t < arr.len()).then_some(t)?
+        };
+        // `ArrayOfTables` has no swap, so rebuild in the new order. Each table
+        // moves whole, keeping its own comments.
+        let tables: Vec<toml_edit::Table> = arr.iter().cloned().collect();
+        let mut reordered = tables;
+        reordered.swap(index, target);
+        let mut fresh = toml_edit::ArrayOfTables::new();
+        for t in reordered {
+            fresh.push(t);
+        }
+        *arr = fresh;
+        Some(target)
+    }
+
     /// Which `[sections]` differ from the loaded file.
     pub fn changed_sections(&self) -> Vec<&'static str> {
         let before: DocumentMut = match self.original.parse() {
