@@ -16,7 +16,7 @@ use activitypub_federation::config::{Data, FederationConfig, UrlVerifier};
 use activitypub_federation::error::Error as ApFederationError;
 use activitypub_federation::fetch::object_id::ObjectId;
 use activitypub_federation::kinds::activity::{
-    AcceptType, AnnounceType, CreateType, FollowType, UndoType,
+    AcceptType, AnnounceType, CreateType, DeleteType, FollowType, UndoType, UpdateType,
 };
 use activitypub_federation::protocol::public_key::PublicKey;
 use activitypub_federation::protocol::verification::verify_domains_match;
@@ -31,8 +31,8 @@ use url::Url;
 
 use crate::config::Federation;
 use crate::services::federation::{
-    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, mirror, policy, queue,
-    split_handle, timeline,
+    AS_CONTEXT, Origin, PUBLIC, content, ensure_person_keys, follows, lifecycle, mirror, policy,
+    queue, split_handle, timeline,
 };
 use crate::util::now_unix;
 
@@ -467,6 +467,52 @@ pub struct Announce {
     object: AnnouncedCreate,
 }
 
+/// An object reference: either a bare URI or an embedded object with an `id`.
+/// `Delete` sends the former, `Update` the latter.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum ObjectRef {
+    Uri(String),
+    Embedded {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        content: String,
+    },
+}
+
+impl ObjectRef {
+    fn id(&self) -> &str {
+        match self {
+            ObjectRef::Uri(u) => u,
+            ObjectRef::Embedded { id, .. } => id,
+        }
+    }
+}
+
+/// A remote author withdrawing something they sent us (#112).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delete {
+    #[serde(rename = "type")]
+    kind: DeleteType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    object: ObjectRef,
+}
+
+/// A remote author editing something they sent us (#112).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Update {
+    #[serde(rename = "type")]
+    kind: UpdateType,
+    id: Url,
+    actor: ObjectId<FedActor>,
+    object: ObjectRef,
+}
+
 /// The catch-all for any activity we don't model yet — every well-formed one.
 /// [`receive_activity`](activitypub_federation::axum::inbox::receive_activity)
 /// still fetches the signing actor and verifies the HTTP signature before this
@@ -497,6 +543,8 @@ pub enum InboundActivity {
     Create(Create),
     Accept(AcceptFollow),
     Announce(Announce),
+    Delete(Delete),
+    Update(Update),
     Other(AnyActivity),
 }
 
@@ -978,6 +1026,7 @@ impl Activity for Announce {
             group_uri,
             &group_handle,
             &author_handle,
+            page.attributed_to.trim(),
             &subject,
             &content,
             page.url.as_deref(),
@@ -986,6 +1035,81 @@ impl Activity for Announce {
         .await?;
         if fresh {
             tracing::info!("mirror: cached board post {} from {group_handle}", page.id);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Activity for Delete {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Withdraw content on its owner's instruction. Authorization lives in the
+    /// SQL: an actor can only delete rows it owns, so an unknown object and
+    /// someone else's object are indistinguishable here — both are a no-op.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let actor = self.actor.inner().as_str();
+        match lifecycle::delete(&data.pool, actor, self.object.id()).await? {
+            Some(target) => tracing::info!(
+                "honored Delete of {} from {actor} ({target:?})",
+                self.object.id()
+            ),
+            None => tracing::debug!(
+                "Delete of {} from {actor} matched nothing we hold",
+                self.object.id()
+            ),
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Activity for Update {
+    type DataType = AppData;
+    type Error = ApError;
+
+    fn id(&self) -> &Url {
+        &self.id
+    }
+
+    fn actor(&self) -> &Url {
+        self.actor.inner()
+    }
+
+    async fn verify(&self, _data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Apply a remote edit, degrading the new content exactly like the original.
+    /// A bare-URI `Update` carries nothing to apply, so it's ignored.
+    async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
+        let actor = self.actor.inner().as_str();
+        let ObjectRef::Embedded { id, name, content } = &self.object else {
+            tracing::debug!("Update from {actor} carried no object body; ignoring");
+            return Ok(());
+        };
+        let body = content::html_to_text(content);
+        let subject = name
+            .as_deref()
+            .map(content::html_to_text)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(no subject)".to_string());
+        match lifecycle::update(&data.pool, actor, id, &subject, &body).await? {
+            Some(target) => tracing::info!("honored Update of {id} from {actor} ({target:?})"),
+            None => tracing::debug!("Update of {id} from {actor} matched nothing we hold"),
         }
         Ok(())
     }
@@ -1034,6 +1158,8 @@ impl Activity for InboundActivity {
             InboundActivity::Create(a) => a.id(),
             InboundActivity::Accept(a) => a.id(),
             InboundActivity::Announce(a) => a.id(),
+            InboundActivity::Delete(a) => a.id(),
+            InboundActivity::Update(a) => a.id(),
             InboundActivity::Other(a) => a.id(),
         }
     }
@@ -1045,6 +1171,8 @@ impl Activity for InboundActivity {
             InboundActivity::Create(a) => a.actor(),
             InboundActivity::Accept(a) => a.actor(),
             InboundActivity::Announce(a) => a.actor(),
+            InboundActivity::Delete(a) => a.actor(),
+            InboundActivity::Update(a) => a.actor(),
             InboundActivity::Other(a) => a.actor(),
         }
     }
@@ -1056,6 +1184,8 @@ impl Activity for InboundActivity {
             InboundActivity::Create(a) => a.verify(data).await,
             InboundActivity::Accept(a) => a.verify(data).await,
             InboundActivity::Announce(a) => a.verify(data).await,
+            InboundActivity::Delete(a) => a.verify(data).await,
+            InboundActivity::Update(a) => a.verify(data).await,
             InboundActivity::Other(a) => a.verify(data).await,
         }
     }
@@ -1067,6 +1197,8 @@ impl Activity for InboundActivity {
             InboundActivity::Create(a) => a.receive(data).await,
             InboundActivity::Accept(a) => a.receive(data).await,
             InboundActivity::Announce(a) => a.receive(data).await,
+            InboundActivity::Delete(a) => a.receive(data).await,
+            InboundActivity::Update(a) => a.receive(data).await,
             InboundActivity::Other(a) => a.receive(data).await,
         }
     }

@@ -284,11 +284,23 @@ Two properties worth knowing, because they're what keep this safe:
   the same `[limits] max_posts` per-window budget as a local one, so one peer
   can't flood a board even if its own server doesn't rate-limit.
 
+### When remote authors delete or edit
+
+Remote authors can withdraw or edit what they sent you, and bbs-rs honors it —
+across board posts, cached statuses, mirrored board posts, and inbound DMs. A
+deleted board post also leaves the search index.
+
+**Only the owner can do it.** Authorization is enforced in the query itself, so
+one instance can't delete another's content by asking. A mirrored board post can
+additionally be withdrawn by the board that announced it, which is the board
+acting as the authority for its own content.
+
 > **Still missing**, so you know where the edges are: posting from *here* into a
 > followed remote board; a browsable in-BBS screen for mirrored boards (they're
-> an operator-visible cache via `bbsctl` today); and remote `Delete`/`Update`
-> handling plus the moderation surface (inbound reports, domain-block severity).
-> Those are the remaining federation work.
+> an operator-visible cache via `bbsctl` today); `Announce`-wrapped lifecycle (a
+> board relaying one of its members' deletions); and the moderation surface
+> (inbound reports, domain-block severity). Those are the remaining federation
+> work.
 
 ---
 

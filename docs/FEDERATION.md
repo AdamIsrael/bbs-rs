@@ -183,7 +183,16 @@ Phase 6 (#112) is sliced:
   dedups on `ap_id`, `inReplyTo` threads a reply under its parent, and a remote author gets the same
   per-window post budget as a local one. We then **re-`Announce` as the Group** — we're the board's home, so
   subscribers hear it from us, with the original author's attribution preserved.
-- **112b — remote lifecycle**: honor `Delete` / `Update` / `Undo` for content we've accepted.
+- **112b — remote lifecycle** (this slice): honor `Delete` and `Update` for content we've accepted, across
+  all four federated stores — board posts (`messages`), cached statuses (`ap_timeline`), mirrored board
+  posts (`ap_board_posts`), and inbound DMs (`mail`). **Authorization lives in the SQL**: every statement's
+  `WHERE` requires the acting actor to own the row, so one actor can never touch another's content and an
+  unknown object is indistinguishable from someone else's. A mirrored post may also be withdrawn by the
+  board that announced it (in FEP-1b12 the Group is the authority for its own content), which is why
+  migration 0017 adds `ap_board_posts.author_uri` — a display handle isn't an identity to authorize
+  against. Deleting a board post also drops it from the FTS index, since the 0012 triggers fire.
+  `Undo` was already handled for `Follow`, the only `Undo` we act on; `Announce`-wrapped lifecycle
+  (a Group relaying a member's `Delete`) is **not** handled yet.
 - **112c — moderation surface**: inbound `Flag` (remote reports) surfaced to admins, and domain blocks with
   severity. Note defederation is **not retroactive** — dropping a peer stops updates, it doesn't delete
   what already arrived.

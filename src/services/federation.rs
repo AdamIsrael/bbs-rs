@@ -1439,6 +1439,7 @@ pub mod mirror {
         group_uri: &str,
         group_handle: &str,
         author_handle: &str,
+        author_uri: &str,
         subject: &str,
         content: &str,
         url: Option<&str>,
@@ -1446,14 +1447,15 @@ pub mod mirror {
     ) -> Result<bool> {
         let affected = sqlx::query(
             "INSERT INTO ap_board_posts \
-               (ap_id, group_uri, group_handle, author_handle, subject, content, url, \
+               (ap_id, group_uri, group_handle, author_handle, author_uri, subject, content, url, \
                 published, received_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
         )
         .bind(ap_id)
         .bind(group_uri)
         .bind(group_handle)
         .bind(author_handle)
+        .bind(author_uri)
         .bind(subject)
         .bind(content)
         .bind(url)
@@ -1487,6 +1489,158 @@ pub mod mirror {
                 .fetch_one(pool)
                 .await?,
         )
+    }
+}
+
+/// Honoring a remote author's `Delete` / `Update` of content we accepted (#112).
+///
+/// Federated content lives in four stores, each keyed by the object's AP id:
+/// board posts (`messages`), cached statuses (`ap_timeline`), mirrored board
+/// posts (`ap_board_posts`), and inbound DMs (`mail`). Every operation here is
+/// **authorized in the SQL itself** — the `WHERE` clause requires the acting
+/// actor to own the row — so an actor can never touch another's content, and a
+/// miss is indistinguishable from "not ours to change".
+///
+/// Deleting from `messages` also keeps the FTS index correct: the 0012 triggers
+/// fire on the delete, so removed remote posts drop out of search too.
+pub mod lifecycle {
+    use super::*;
+
+    /// Which store an operation landed in, for logging.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Target {
+        BoardPost,
+        Status,
+        MirroredPost,
+        Mail,
+    }
+
+    /// Delete a federated object on its owner's instruction. Returns where it
+    /// landed, or `None` when we don't have it (or the actor doesn't own it).
+    pub async fn delete(
+        pool: &SqlitePool,
+        actor_uri: &str,
+        object_id: &str,
+    ) -> Result<Option<Target>> {
+        let n = sqlx::query(
+            "DELETE FROM messages WHERE ap_id = ? \
+             AND author_id IN (SELECT id FROM users WHERE actor_uri = ?)",
+        )
+        .bind(object_id)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::BoardPost));
+        }
+
+        let n = sqlx::query("DELETE FROM ap_timeline WHERE ap_id = ? AND author_uri = ?")
+            .bind(object_id)
+            .bind(actor_uri)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::Status));
+        }
+
+        // A mirrored post may be withdrawn by its author *or* by the board that
+        // announced it — in FEP-1b12 the Group is the authority for its content.
+        let n = sqlx::query(
+            "DELETE FROM ap_board_posts WHERE ap_id = ? AND (author_uri = ? OR group_uri = ?)",
+        )
+        .bind(object_id)
+        .bind(actor_uri)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::MirroredPost));
+        }
+
+        let n = sqlx::query(
+            "DELETE FROM mail WHERE ap_id = ? \
+             AND from_id IN (SELECT id FROM users WHERE actor_uri = ?)",
+        )
+        .bind(object_id)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::Mail));
+        }
+        Ok(None)
+    }
+
+    /// Apply a remote edit. `subject` is ignored by stores that have none.
+    pub async fn update(
+        pool: &SqlitePool,
+        actor_uri: &str,
+        object_id: &str,
+        subject: &str,
+        content: &str,
+    ) -> Result<Option<Target>> {
+        let n = sqlx::query(
+            "UPDATE messages SET subject = ?, body = ? WHERE ap_id = ? \
+             AND author_id IN (SELECT id FROM users WHERE actor_uri = ?)",
+        )
+        .bind(subject)
+        .bind(content)
+        .bind(object_id)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::BoardPost));
+        }
+
+        let n =
+            sqlx::query("UPDATE ap_timeline SET content = ? WHERE ap_id = ? AND author_uri = ?")
+                .bind(content)
+                .bind(object_id)
+                .bind(actor_uri)
+                .execute(pool)
+                .await?
+                .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::Status));
+        }
+
+        let n = sqlx::query(
+            "UPDATE ap_board_posts SET subject = ?, content = ? WHERE ap_id = ? \
+             AND (author_uri = ? OR group_uri = ?)",
+        )
+        .bind(subject)
+        .bind(content)
+        .bind(object_id)
+        .bind(actor_uri)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::MirroredPost));
+        }
+
+        let n = sqlx::query(
+            "UPDATE mail SET subject = ?, body = ? WHERE ap_id = ? \
+             AND from_id IN (SELECT id FROM users WHERE actor_uri = ?)",
+        )
+        .bind(subject)
+        .bind(content)
+        .bind(object_id)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            return Ok(Some(Target::Mail));
+        }
+        Ok(None)
     }
 }
 
