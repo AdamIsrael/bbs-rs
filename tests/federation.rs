@@ -2855,3 +2855,493 @@ async fn purging_a_domain_removes_what_already_arrived() {
             .is_empty()
     );
 }
+
+// ---- #133: Announce-wrapped lifecycle ---------------------------------------
+
+/// Subscribe to a remote board and mirror one post from it. Returns the Group's
+/// actor URI.
+async fn subscribe_and_mirror(
+    pool: &SqlitePool,
+    group_handle: &str,
+    domain: &str,
+    author_uri: &str,
+    page_id: &str,
+) -> String {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    mint_local(pool, "alice").await;
+    let group = insert_follower(pool, group_handle, domain, None).await;
+    follows::accept(
+        pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        &format!("https://bbs.example.com/f/{group_handle}"),
+    )
+    .await
+    .unwrap();
+    mirror::insert(
+        pool,
+        page_id,
+        &group,
+        group_handle,
+        "bob@remote.social",
+        author_uri,
+        "Original subject",
+        "original body",
+        None,
+        1_782_907_200,
+    )
+    .await
+    .unwrap();
+    group
+}
+
+/// Wrap an activity in an `Announce` from `group_uri`.
+fn announce_wrapping(
+    group_uri: &str,
+    inner: serde_json::Value,
+) -> bbs_rs::web::ap_object::Announce {
+    serde_json::from_value(serde_json::json!({
+        "type": "Announce",
+        "id": format!("{group_uri}/announce/lifecycle"),
+        "actor": group_uri,
+        "object": inner,
+    }))
+    .unwrap()
+}
+
+fn delete_of(actor: &str, object: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "Delete",
+        "id": format!("{actor}/d/1"),
+        "actor": actor,
+        "object": object,
+    })
+}
+
+/// The case #133 exists for: a board relays one of its members' deletions, and
+/// the post leaves our mirror instead of lingering forever.
+#[tokio::test]
+async fn a_board_can_relay_its_members_delete() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let bob = "https://remote.social/users/bob";
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        bob,
+        "https://remote.social/p/1",
+    )
+    .await;
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+
+    let data = fed_data(&pool).await;
+    announce_wrapping(&group, delete_of(bob, "https://remote.social/p/1"))
+        .receive(&data)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mirror::count(&pool, &group).await.unwrap(),
+        0,
+        "the board's relayed Delete withdrew its member's post"
+    );
+}
+
+/// A board may withdraw a post it authored itself, not just its members'.
+#[tokio::test]
+async fn a_board_can_relay_a_delete_of_its_own_post() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        "https://remote.social/c/rustaceans",
+        "https://remote.social/p/2",
+    )
+    .await;
+
+    let data = fed_data(&pool).await;
+    announce_wrapping(&group, delete_of(&group, "https://remote.social/p/2"))
+        .receive(&data)
+        .await
+        .unwrap();
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 0);
+}
+
+/// The authorization #133 is really about: the Group signs the relay, but that
+/// does not let it withdraw content it does not host.
+#[tokio::test]
+async fn a_board_cannot_withdraw_another_boards_post() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    let bob = "https://remote.social/users/bob";
+    let host = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        bob,
+        "https://remote.social/p/3",
+    )
+    .await;
+    // A second board we also follow, which hosts nothing of bob's.
+    let meddler = insert_follower(&pool, "gossip@other.example", "other.example", None).await;
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &meddler,
+        "https://bbs.example.com/f/gossip",
+    )
+    .await
+    .unwrap();
+
+    let data = fed_data(&pool).await;
+    announce_wrapping(&meddler, delete_of(bob, "https://remote.social/p/3"))
+        .receive(&data)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mirror::count(&pool, &host).await.unwrap(),
+        1,
+        "a board can only act on posts it announced"
+    );
+}
+
+/// A board cannot relay a stranger's withdrawal of one of its members' posts —
+/// the inner actor is checked, not just the signing Group.
+#[tokio::test]
+async fn a_relayed_delete_from_a_third_party_is_refused() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        "https://remote.social/users/bob",
+        "https://remote.social/p/4",
+    )
+    .await;
+
+    let data = fed_data(&pool).await;
+    announce_wrapping(
+        &group,
+        delete_of(
+            "https://elsewhere.example/users/mallory",
+            "https://remote.social/p/4",
+        ),
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        mirror::count(&pool, &group).await.unwrap(),
+        1,
+        "the board vouches for its members, not for anyone who asks"
+    );
+}
+
+/// A remote board has no standing over a post on one of *our* boards, however it
+/// is addressed. This is the case the issue flagged as "probably not legitimate".
+#[tokio::test]
+async fn a_board_cannot_delete_a_post_on_our_own_board() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::follows;
+
+    let pool = setup().await;
+    let bob = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    // A post that lives on our board, with a permanent URI.
+    let board = seed_remote_board_post(&pool, &bob, "https://remote.social/p/5").await;
+    assert_eq!(boards::list_messages(&pool, board).await.unwrap().len(), 1);
+
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "gossip@other.example", "other.example", None).await;
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/gossip",
+    )
+    .await
+    .unwrap();
+
+    let data = fed_data(&pool).await;
+    // Even naming the real author as the inner actor doesn't help: the relay
+    // route only ever reaches mirrored posts.
+    announce_wrapping(&group, delete_of(&bob, "https://remote.social/p/5"))
+        .receive(&data)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        boards::list_messages(&pool, board).await.unwrap().len(),
+        1,
+        "our boards are ours; a relay cannot moderate them"
+    );
+}
+
+/// A relayed edit is applied, and its HTML is degraded exactly like a new post's.
+#[tokio::test]
+async fn a_board_can_relay_its_members_update() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let bob = "https://remote.social/users/bob";
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        bob,
+        "https://remote.social/p/6",
+    )
+    .await;
+
+    let data = fed_data(&pool).await;
+    announce_wrapping(
+        &group,
+        serde_json::json!({
+            "type": "Update",
+            "id": format!("{bob}/u/1"),
+            "actor": bob,
+            "object": {
+                "id": "https://remote.social/p/6",
+                "name": "Edited subject",
+                "content": "<p>edited &amp; degraded</p>",
+            },
+        }),
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    let posts = mirror::recent(&pool, &group, 10).await.unwrap();
+    assert_eq!(posts[0].subject, "Edited subject");
+    assert_eq!(posts[0].content, "edited & degraded", "HTML degraded");
+}
+
+/// An `Announce` wrapping something we have no handler for is accepted and
+/// ignored — the mirror is untouched and nothing errors.
+#[tokio::test]
+async fn an_announced_activity_we_dont_model_is_ignored() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        "https://remote.social/users/bob",
+        "https://remote.social/p/7",
+    )
+    .await;
+
+    let data = fed_data(&pool).await;
+    announce_wrapping(
+        &group,
+        serde_json::json!({
+            "type": "Like",
+            "id": "https://remote.social/l/1",
+            "actor": "https://remote.social/users/bob",
+            "object": "https://remote.social/p/7",
+        }),
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    assert_eq!(mirror::count(&pool, &group).await.unwrap(), 1);
+}
+
+/// The outbound half: deleting a syndicated board post queues the Group's
+/// `Announce{Delete}` to every subscriber, with the **author** as the inner
+/// actor so the receiver can authorize it against the post's attribution.
+#[tokio::test]
+async fn deleting_a_syndicated_post_announces_the_withdrawal() {
+    use bbs_rs::services::federation::{Origin, outbound, queue};
+
+    let pool = setup().await;
+    let fed = enabled_fed();
+    let origin = Origin::from_config(&fed).unwrap();
+    let alice = mint_local(&pool, "alice").await;
+    let board = bbs_rs::services::boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let msg_id = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Going away",
+        "temporary",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // A remote subscriber to the board Group.
+    let keys = bbs_rs::services::federation::ensure_group_keys(&pool, &origin, board.id)
+        .await
+        .unwrap();
+    let sub = insert_follower(
+        &pool,
+        "carol@remote.social",
+        "remote.social",
+        Some("https://remote.social/inbox"),
+    )
+    .await;
+    bbs_rs::services::federation::follows::accept(
+        &pool,
+        &sub,
+        &keys.actor_uri,
+        "https://remote.social/f/1",
+    )
+    .await
+    .unwrap();
+
+    // Syndicate it, so the post has a permanent URI to withdraw.
+    outbound::deliver_board_post(&pool, &origin, msg_id)
+        .await
+        .unwrap();
+    let before = queue::pending(&pool).await.unwrap();
+
+    let prepared = outbound::prepare_board_delete(&pool, &origin, msg_id)
+        .await
+        .unwrap()
+        .expect("a syndicated post has a withdrawal to announce");
+    assert!(
+        bbs_rs::services::boards::delete_message(&pool, msg_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(outbound::dispatch(&pool, &prepared).await.unwrap(), 1);
+    assert_eq!(queue::pending(&pool).await.unwrap(), before + 1);
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    let body: serde_json::Value = serde_json::from_str(&due.last().unwrap().activity).unwrap();
+    assert_eq!(body["type"], "Announce");
+    assert_eq!(body["actor"], keys.actor_uri, "the Group relays");
+    assert_eq!(body["object"]["type"], "Delete");
+    assert_eq!(
+        body["object"]["actor"], "https://bbs.example.com/u/alice",
+        "the author withdraws; the Group only carries it"
+    );
+    let withdrawn = body["object"]["object"].as_str().unwrap();
+    assert!(
+        withdrawn.starts_with("https://bbs.example.com/"),
+        "withdraws our own minted URI, got {withdrawn}"
+    );
+}
+
+/// A post that never federated has nothing to withdraw.
+#[tokio::test]
+async fn deleting_an_unsyndicated_post_announces_nothing() {
+    use bbs_rs::services::federation::{Origin, outbound};
+
+    let pool = setup().await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+    let alice = mint_local(&pool, "alice").await;
+    let board = bbs_rs::services::boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let msg_id = bbs_rs::services::boards::post_message(
+        &pool,
+        board.id,
+        &alice,
+        "Local only",
+        "never left",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        outbound::prepare_board_delete(&pool, &origin, msg_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "no subscribers and no ap_id — nothing to announce"
+    );
+}
+
+/// Close the loop: the `Announce{Delete}` we *emit* must deserialize as the
+/// `Announce{Delete}` we *accept*, and withdraw the post on the far side.
+///
+/// The two shapes are built by different code (`objects::board_delete` writes
+/// it, `ap_object::Announce` reads it), so nothing but a round trip proves they
+/// agree — this is the bbs-rs ↔ bbs-rs case the issue is really about.
+#[tokio::test]
+async fn our_announced_delete_is_one_we_would_honor() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{Origin, mirror, objects};
+
+    let pool = setup().await;
+    let origin = Origin::from_config(&enabled_fed()).unwrap();
+
+    // Stand in for the far side: we subscribe to a board whose actor URI is
+    // exactly what our own origin would mint for "general".
+    let group_uri = origin.group("general");
+    let author_uri = origin.person("alice");
+    let page_id = "https://bbs.example.com/m/42";
+    mint_local(&pool, "carol").await;
+    bbs_rs::services::federation::follows::accept(
+        &pool,
+        "https://bbs.example.com/u/carol",
+        &group_uri,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    mirror::insert(
+        &pool,
+        page_id,
+        &group_uri,
+        "general@bbs.example.com",
+        "alice@bbs.example.com",
+        &author_uri,
+        "Going away",
+        "temporary",
+        None,
+        1_782_907_200,
+    )
+    .await
+    .unwrap();
+
+    // Serialize what we would send, parse it as what we would receive.
+    let wire = serde_json::to_string(&objects::board_delete(
+        &origin,
+        "general",
+        &author_uri,
+        page_id,
+    ))
+    .unwrap();
+    let inbound: bbs_rs::web::ap_object::Announce = serde_json::from_str(&wire)
+        .expect("our own Announce{Delete} must parse as an inbound Announce");
+
+    inbound.receive(&fed_data(&pool).await).await.unwrap();
+    assert_eq!(
+        mirror::count(&pool, &group_uri).await.unwrap(),
+        0,
+        "the post we announced as deleted left the mirror"
+    );
+}
