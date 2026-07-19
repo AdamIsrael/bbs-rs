@@ -34,22 +34,30 @@ struct Cli {
 }
 
 impl Cli {
-    /// Load the full settings from the config file (defaults if missing/invalid).
+    /// Load the full settings from the config file. A missing file yields the
+    /// built-in defaults (the server writes one on first run, so bbsctl may run
+    /// before it exists); a file that exists but can't be read or parsed is a
+    /// hard error, since silently falling back would point commands like
+    /// `migrate` at a different database than the operator intended.
     /// Used for file-area commands that need `[files]` (storage dir + limits).
-    fn load_settings(&self) -> Settings {
-        std::fs::read_to_string(&self.config)
-            .ok()
-            .and_then(|text| toml::from_str::<Settings>(&text).ok())
-            .unwrap_or_default()
+    fn load_settings(&self) -> anyhow::Result<Settings> {
+        let text = match std::fs::read_to_string(&self.config) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading config {}", self.config.display()));
+            }
+        };
+        toml::from_str(&text).with_context(|| format!("parsing config {}", self.config.display()))
     }
 
     /// Resolve the database URL: `--database-url` wins, else the config file's
     /// value, else the built-in default.
-    fn resolve_database_url(&self) -> String {
+    fn resolve_database_url(&self, settings: &Settings) -> String {
         if let Some(url) = &self.database_url {
             return url.clone();
         }
-        self.load_settings().network.database_url
+        settings.network.database_url.clone()
     }
 }
 
@@ -264,8 +272,8 @@ async fn local_federatable_user(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let settings = cli.load_settings();
-    let pool = db::connect(&cli.resolve_database_url()).await?;
+    let settings = cli.load_settings()?;
+    let pool = db::connect(&cli.resolve_database_url(&settings)).await?;
 
     // Operational commands need a current schema, so auto-apply migrations for
     // them. `migrate` controls apply/report itself; `migrate --status` must not
@@ -828,4 +836,58 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
         }
     }
     Ok((files, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_with_config(path: &std::path::Path) -> Cli {
+        Cli::parse_from(["bbsctl", "--config", &path.to_string_lossy(), "users"])
+    }
+
+    /// A config file that exists but doesn't parse must be a hard error — never
+    /// a silent fall back to defaults, which would point the command at the
+    /// default database instead of the operator's.
+    #[test]
+    fn malformed_config_is_an_error() {
+        let path = std::env::temp_dir().join("bbsctl_malformed_config_test.toml");
+        std::fs::write(&path, "this is not = = toml [[[\n").unwrap();
+
+        let err = cli_with_config(&path).load_settings().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("parsing config"), "unexpected error: {msg}");
+        assert!(msg.contains(&*path.to_string_lossy()), "no path in: {msg}");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A duplicate key is the realistic trigger, and toml rejects it too.
+    #[test]
+    fn duplicate_key_is_an_error() {
+        let path = std::env::temp_dir().join("bbsctl_duplicate_key_test.toml");
+        std::fs::write(
+            &path,
+            "[federation]\nallowlist_only = true\nallowlist_only = false\n",
+        )
+        .unwrap();
+
+        assert!(cli_with_config(&path).load_settings().is_err());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A missing file still yields defaults: bbsctl may run before the server
+    /// has written its config, and that's not an operator error.
+    #[test]
+    fn missing_config_falls_back_to_defaults() {
+        let path = std::env::temp_dir().join("bbsctl_definitely_missing_config.toml");
+        std::fs::remove_file(&path).ok();
+
+        let settings = cli_with_config(&path).load_settings().unwrap();
+        assert_eq!(
+            settings.network.database_url,
+            Settings::default().network.database_url
+        );
+    }
 }
