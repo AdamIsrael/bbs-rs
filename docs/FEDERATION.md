@@ -203,6 +203,42 @@ Phase 6 (#112) is sliced:
   effect of a policy change. Operator surface: `ap-reports`, `ap-resolve`, `ap-block --severity`,
   `ap-purge`.
 
+### #131 — posting into a followed remote board (post-epic follow-up)
+
+The receiving half has worked since #112a; this is the sending half. The asymmetry with our own boards is
+the point: when we *host* a board we `Announce` from the Group because we're the hub, but here we're a
+contributor, so the **author** signs a plain `Create{Page}` addressed `to: [group]`, `cc: [Public]`,
+`audience: group`.
+
+**A submission is not a mirrored post, and not a local post either**, which is why migration 0020 adds a
+third table (`ap_outbox_posts`). `messages` is our boards — filing it there would put it on a local board
+it isn't on. `ap_board_posts` is the mirror of foreign objects — writing it there would assert the remote
+board had published something it hasn't. The new table also supplies the post's permanent `ap_id`, minted
+from its row id.
+
+So a submission is shown as **awaiting the board** until that board announces it back, at which point the
+announced copy lands in `ap_board_posts` under the same `ap_id` and supersedes it. `pending()` is an
+anti-join against the mirror rather than a status column, so nothing has to be kept in sync — publication
+is observed, not recorded. Optimistically showing it as published would be asserting something only the
+remote board can say.
+
+#### The bug this uncovered
+
+The two-instance run failed at first with the author's instance returning 500 and logging
+`Activity was sent from local instance`. Cause: `board_announce` minted the `Announce`'s id by deriving it
+from the **post's** URI. That was invisible while every announced post originated on the announcing
+instance — the derived id was on the right domain by accident. Once a board announces a post authored
+*elsewhere* (which #112a introduced, and #131 exercises), the activity id lands under the author's domain,
+and the author's own server correctly rejects it as spoofing its domain.
+
+The effect was that **the one instance guaranteed to care about a post was the one instance that could
+never receive the announcement** — and it failed silently, as a delivery-queue error nobody reads. An
+activity's id must belong to whoever created it; the id is now minted from our own origin and the local
+row id. Same fix for `Announce{Delete}`. Pinned by `an_announce_of_a_remote_post_is_still_our_activity`.
+
+**Replies are still out of scope**, deliberately: our own boards don't syndicate replies yet either
+(#111b), so shipping outbound replies alone would make BBS↔BBS threading half-work in one direction.
+
 ### #132 — in-BBS screen for mirrored remote boards (post-epic follow-up)
 
 Mirrored posts were reachable only through `bbsctl ap-board-posts`, so board syndication was invisible

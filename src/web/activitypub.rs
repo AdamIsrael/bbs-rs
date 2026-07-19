@@ -493,6 +493,7 @@ pub async fn group_outbox(State(state): State<WebState>, Path(slug): Path<String
             &origin,
             &slug,
             &author_uri,
+            m.id,
             page,
         ));
     }

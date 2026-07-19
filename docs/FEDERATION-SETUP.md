@@ -274,6 +274,22 @@ these are cached copies of someone else's board, which is why the titles say
 on the remote server's `Accept` is labelled `[pending — no posts until
 accepted]`, so an empty board reads as what it is rather than as a bug.
 
+**Users can post into a subscribed board** with `p` on that board's screen. The
+post is signed by its author (not by your instance) and sent to the remote
+board, which decides whether to publish it.
+
+Until it does, the post shows as `[sent — awaiting the board]`. That's not a
+delivery-status indicator: the remote board is the authority for its own
+content, so a post is genuinely not published until that board announces it
+back. When it does, the announced copy lands in your mirror and the pending
+marker disappears on its own. A post that stays pending indefinitely means the
+board hasn't published it — check `bbsctl ap-peers` and your logs for delivery
+failures.
+
+Posting is refused if the subscription hasn't been accepted yet, and remote
+posts count against the same `[limits] max_posts` budget as local ones — so
+federating isn't a way around your own rate limit.
+
 > Upgrade note: bbs-rs now records whether a remote actor is a `Person` or a
 > `Group`, which is how this screen tells a followed board from a followed
 > person. Boards you subscribed to *before* upgrading have no recorded type and
@@ -326,8 +342,8 @@ content and carry its members' decisions — it cannot withdraw a third party's
 post, another board's post, or anything on **your** boards. Attempts to reach
 your own content are refused and logged at `warn`.
 
-> **Still missing**, so you know where the edges are: posting from *here* into a
-> followed remote board. A subscribed board is read-only for now.
+> **Still missing**, so you know where the edges are: replies. Only top-level
+> posts syndicate, in either direction.
 
 ---
 

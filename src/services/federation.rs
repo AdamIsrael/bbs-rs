@@ -631,6 +631,52 @@ pub mod objects {
         }
     }
 
+    /// Build a `Page` addressed **to a remote board** (#131).
+    ///
+    /// Mirror image of [`board_page`], which addresses one of *our* Groups: here
+    /// the audience is someone else's Group, and the primary recipient is that
+    /// Group rather than the public. `to: [group]` + `cc: [Public]` is the
+    /// FEP-1b12 addressing a Lemmy-style board expects for a submission; our own
+    /// inbound routing reads `audience` first and falls back to to/cc, so a
+    /// bbs-rs peer accepts it either way.
+    pub fn remote_board_page(
+        ap_id: &str,
+        author_uri: &str,
+        group_uri: &str,
+        subject: &str,
+        body: &str,
+        published_unix: i64,
+    ) -> Page {
+        Page {
+            context: AS_CONTEXT,
+            kind: "Page",
+            id: ap_id.to_string(),
+            attributed_to: author_uri.to_string(),
+            name: subject.to_string(),
+            content: format!("<p>{}</p>", html_escape(body)),
+            published: crate::util::fmt_rfc3339(published_unix),
+            to: vec![group_uri.to_string()],
+            cc: vec![PUBLIC.to_string()],
+            audience: group_uri.to_string(),
+        }
+    }
+
+    /// Wrap a submission in the author's `Create`. Unlike [`board_announce`],
+    /// the **author** signs and owns this — we're a contributor to that board,
+    /// not its hub.
+    pub fn remote_board_create(page: Page) -> CreatePage {
+        CreatePage {
+            context: AS_CONTEXT,
+            kind: "Create",
+            id: format!("{}/activity", page.id),
+            actor: page.attributed_to.clone(),
+            to: page.to.clone(),
+            cc: page.cc.clone(),
+            audience: page.audience.clone(),
+            object: page,
+        }
+    }
+
     /// A `Delete` as a board relays it: the **author** is the actor (they're the
     /// one withdrawing), and the object is the post's permanent URI.
     #[derive(Debug, Clone, Serialize)]
@@ -670,6 +716,7 @@ pub mod objects {
         origin: &Origin,
         slug: &str,
         author_uri: &str,
+        local_id: i64,
         post_ap_id: &str,
     ) -> AnnounceDelete {
         let group_uri = origin.group(slug);
@@ -688,7 +735,9 @@ pub mod objects {
         AnnounceDelete {
             context: AS_CONTEXT,
             kind: "Announce",
-            id: format!("{post_ap_id}/delete/announce"),
+            // From our origin, not the post's — see [`board_announce`] for why
+            // deriving an activity id from the object breaks on remote content.
+            id: format!("{group_uri}/announce/delete/{local_id}"),
             actor: group_uri,
             to,
             cc,
@@ -699,7 +748,23 @@ pub mod objects {
     /// Wrap a board `Page` in the Group's `Announce{Create{Page}}` — the object a
     /// subscriber receives (and the outbox item). The Group signs and owns the
     /// Announce; the inner Create keeps the author's attribution intact.
-    pub fn board_announce(origin: &Origin, slug: &str, author_uri: &str, page: Page) -> Announce {
+    /// `local_id` is the post's row id in `messages`, and it is what the
+    /// `Announce`'s own id is minted from — **not** the post's URI.
+    ///
+    /// That distinction matters as soon as the post came from somewhere else.
+    /// An activity's id must belong to the instance that created it, and *we*
+    /// create this Announce; deriving it from the post would put our activity
+    /// under the author's domain. When the announcement then reaches that
+    /// author's instance, it sees an id on its own domain and rejects the whole
+    /// thing as spoofed ("Activity was sent from local instance") — so the
+    /// author's own server is the one instance that can never receive it.
+    pub fn board_announce(
+        origin: &Origin,
+        slug: &str,
+        author_uri: &str,
+        local_id: i64,
+        page: Page,
+    ) -> Announce {
         let group_uri = origin.group(slug);
         let followers = origin.group_followers(slug);
         let create = CreatePage {
@@ -715,7 +780,7 @@ pub mod objects {
         Announce {
             context: AS_CONTEXT,
             kind: "Announce",
-            id: format!("{}/announce", create.id),
+            id: format!("{group_uri}/announce/{local_id}"),
             actor: group_uri,
             to: vec![PUBLIC.to_string()],
             cc: vec![followers],
@@ -1264,7 +1329,7 @@ pub mod outbound {
             &msg.body,
             msg.created_at,
         );
-        let announce = objects::board_announce(origin, &keys.slug, &author_uri, page);
+        let announce = objects::board_announce(origin, &keys.slug, &author_uri, msg.id, page);
         let activity = serde_json::to_string(&announce)
             .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce: {e}")))?;
 
@@ -1329,7 +1394,7 @@ pub mod outbound {
                 .await?
                 .flatten()
                 .unwrap_or_else(|| origin.person(&msg.author_name));
-        let announce = objects::board_delete(origin, &keys.slug, &author_uri, &ap_id);
+        let announce = objects::board_delete(origin, &keys.slug, &author_uri, message_id, &ap_id);
         let activity = serde_json::to_string(&announce)
             .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce{{Delete}}: {e}")))?;
         Ok(Some(Prepared {
@@ -1723,6 +1788,149 @@ pub mod mirror {
                 .fetch_one(pool)
                 .await?,
         )
+    }
+}
+
+/// Publishing into a board we don't own (#131).
+///
+/// The receiving half of this has worked since #112a — a `Create{Page}` whose
+/// `audience` names a board Group is filed on that board. This is the sending
+/// half, and the asymmetry with our own boards is deliberate: when *we* host a
+/// board we `Announce` from the Group, because we're the hub. Here we're a
+/// contributor, so the **author** signs a plain `Create` and the remote board
+/// decides whether to publish it.
+///
+/// Which is also why a submission doesn't go straight into the mirror. We are
+/// not the authority for that board, so a post is "awaiting the board" until the
+/// board announces it back — at which point it lands in `ap_board_posts` under
+/// the same `ap_id` and stops being pending. Showing it as published the moment
+/// we queued it would be asserting something only the remote board can say.
+pub mod remote_posting {
+    use super::*;
+    use crate::db::models::User;
+    use crate::services::enforce_rate;
+    use crate::util::now_unix;
+
+    /// A post we've published into a remote board that the board hasn't
+    /// announced back to us yet.
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct Pending {
+        pub id: i64,
+        pub ap_id: String,
+        pub group_uri: String,
+        pub author_handle: String,
+        pub subject: String,
+        pub body: String,
+        pub created_at: i64,
+    }
+
+    /// Submit a post to a remote board: record it, mint its permanent URI, and
+    /// queue the signed `Create{Page}` to the board's inbox.
+    ///
+    /// Returns the minted `ap_id`. Errors rather than silently no-oping when the
+    /// board is unknown or the subscription isn't accepted — unlike a fan-out,
+    /// this is a direct user action and deserves to be told it failed.
+    pub async fn submit(
+        pool: &SqlitePool,
+        origin: &Origin,
+        author: &User,
+        group_uri: &str,
+        subject: &str,
+        body: &str,
+        limits: &crate::config::Limits,
+    ) -> Result<String> {
+        if author.is_guest() {
+            return Err(AppError::GuestNotAllowed);
+        }
+        // Same per-window budget as posting locally: federating shouldn't be a
+        // way around the rate limit.
+        let since = now_unix() - 3600;
+        let count =
+            crate::services::boards::author_post_count_since(pool, author.id, since).await?;
+        enforce_rate(count, limits.max_posts)?;
+
+        // The board must be one we actually subscribe to *and* that accepted us
+        // — posting into a board that hasn't accepted our follow would be
+        // shouting into a void the board is entitled to ignore.
+        let state: Option<String> = sqlx::query_scalar(
+            "SELECT MIN(state) FROM ap_follows WHERE object_uri = ? GROUP BY object_uri",
+        )
+        .bind(group_uri)
+        .fetch_optional(pool)
+        .await?;
+        match state.as_deref() {
+            Some("accepted") => {}
+            Some(other) => {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "that board hasn't accepted the subscription yet ({other})"
+                )));
+            }
+            None => {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "not subscribed to that board"
+                )));
+            }
+        }
+        let inbox: String =
+            sqlx::query_scalar("SELECT inbox_url FROM users WHERE actor_uri = ? AND is_remote = 1")
+                .bind(group_uri)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+                .ok_or_else(|| anyhow::anyhow!("no inbox known for that board"))?;
+
+        let created_at = now_unix();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO ap_outbox_posts (group_uri, author_id, subject, body, created_at) \
+             VALUES (?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(group_uri)
+        .bind(author.id)
+        .bind(subject)
+        .bind(body)
+        .bind(created_at)
+        .fetch_one(pool)
+        .await?;
+
+        // The URI is minted from the row id, so it's stable from here on — an
+        // AP object's id is a permanent primary key and can never be rewritten.
+        let ap_id = origin.post(id);
+        sqlx::query("UPDATE ap_outbox_posts SET ap_id = ? WHERE id = ?")
+            .bind(&ap_id)
+            .bind(id)
+            .execute(pool)
+            .await?;
+
+        let author_uri = origin.person(&author.username);
+        let page =
+            objects::remote_board_page(&ap_id, &author_uri, group_uri, subject, body, created_at);
+        let create = objects::remote_board_create(page);
+        let activity = serde_json::to_string(&create)
+            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Create{{Page}}: {e}")))?;
+        queue::enqueue(pool, &author_uri, &inbox, &activity, Some(&create.id)).await?;
+        Ok(ap_id)
+    }
+
+    /// Posts we've submitted to `group_uri` that the board hasn't announced back.
+    ///
+    /// The anti-join on `ap_board_posts` is what makes a pending post disappear
+    /// on its own: once the board publishes it, the mirror copy is the real one
+    /// and this stops returning it. No status column to keep in sync.
+    pub async fn pending(pool: &SqlitePool, group_uri: &str) -> Result<Vec<Pending>> {
+        let rows = sqlx::query_as::<_, Pending>(
+            "SELECT o.id, o.ap_id, o.group_uri, u.username AS author_handle, \
+                    o.subject, o.body, o.created_at \
+               FROM ap_outbox_posts o \
+               JOIN users u ON u.id = o.author_id \
+              WHERE o.group_uri = ? \
+                AND o.ap_id IS NOT NULL \
+                AND NOT EXISTS (SELECT 1 FROM ap_board_posts p WHERE p.ap_id = o.ap_id) \
+              ORDER BY o.id DESC",
+        )
+        .bind(group_uri)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
     }
 }
 
@@ -2249,7 +2457,7 @@ mod tests {
             0,
         );
         let author = page.attributed_to.clone();
-        let announce = super::objects::board_announce(&o, "rust", &author, page);
+        let announce = super::objects::board_announce(&o, "rust", &author, 1, page);
         let v = serde_json::to_value(&announce).unwrap();
 
         // The Group is the actor of the Announce; the inner Create keeps the author.
