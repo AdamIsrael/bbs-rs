@@ -82,6 +82,20 @@ impl Presence {
         users
     }
 
+    /// Deliver an event to every live session belonging to `username` (a user
+    /// may be connected more than once). Returns how many sessions received it,
+    /// so a caller can tell "delivered" from "that user isn't online". Used by
+    /// user paging (#68) to fan an [`Event::Paged`] to the target.
+    pub async fn send_to_user(&self, username: &str, event: Event) -> usize {
+        let mut delivered = 0;
+        for session in self.inner.read().await.values() {
+            if session.username == username && session.tx.send(event.clone()).await.is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     /// Ask every session whose user or IP is banned to quit. The app loop
     /// exits on [`Event::Quit`] and the SSH wrapper closes the channel.
     /// Returns the number of sessions signalled.

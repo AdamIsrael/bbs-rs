@@ -1958,3 +1958,59 @@ async fn an_over_long_edit_is_refused() {
         "unchanged"
     );
 }
+
+// ---- #68: user paging (presence fan-out) ------------------------------------
+
+#[tokio::test]
+async fn a_page_reaches_only_the_named_users_sessions() {
+    use bbs_rs::services::presence::Presence;
+    use bbs_rs::transport::Event;
+    use tokio::sync::mpsc;
+
+    let presence = Presence::new();
+    // bob is connected twice (two sessions); carol once.
+    let (bob1_tx, mut bob1_rx) = mpsc::channel(4);
+    let (bob2_tx, mut bob2_rx) = mpsc::channel(4);
+    let (carol_tx, mut carol_rx) = mpsc::channel(4);
+    presence.join(1, "bob".into(), None, bob1_tx).await;
+    presence.join(2, "bob".into(), None, bob2_tx).await;
+    presence.join(3, "carol".into(), None, carol_tx).await;
+
+    let event = Event::Paged {
+        from: "alice".into(),
+        body: "coffee?".into(),
+    };
+    let delivered = presence.send_to_user("bob", event).await;
+    assert_eq!(delivered, 2, "both of bob's sessions get it");
+
+    // Each of bob's sessions received the page …
+    for rx in [&mut bob1_rx, &mut bob2_rx] {
+        match rx.try_recv() {
+            Ok(Event::Paged { from, body }) => {
+                assert_eq!(from, "alice");
+                assert_eq!(body, "coffee?");
+            }
+            other => panic!("bob should have been paged, got {other:?}"),
+        }
+    }
+    // … and carol, who wasn't the target, got nothing.
+    assert!(carol_rx.try_recv().is_err(), "carol is not paged");
+}
+
+#[tokio::test]
+async fn paging_an_offline_user_delivers_to_nobody() {
+    use bbs_rs::services::presence::Presence;
+    use bbs_rs::transport::Event;
+
+    let presence = Presence::new();
+    let delivered = presence
+        .send_to_user(
+            "ghost",
+            Event::Paged {
+                from: "alice".into(),
+                body: "hi".into(),
+            },
+        )
+        .await;
+    assert_eq!(delivered, 0, "nobody by that name is online");
+}

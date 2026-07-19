@@ -38,4 +38,8 @@ pub enum Event {
     /// frontend can signal an explicit close here.)
     #[allow(dead_code)]
     Quit,
+    /// Another online user paged ("yelled at") this session (#68). Delivered
+    /// through the presence fan-out and surfaced as a toast wherever the
+    /// recipient currently is, regardless of their screen.
+    Paged { from: String, body: String },
 }

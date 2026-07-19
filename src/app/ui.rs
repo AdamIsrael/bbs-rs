@@ -78,6 +78,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ConfirmDeleteMail => render_confirm_delete_mail(f, body, app),
         Screen::ComposeMail => render_compose(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
+        Screen::ComposePage => {
+            let title = format!(" Page {} ", app.page_target().unwrap_or("user"));
+            render_form(f, body, &title, app)
+        }
         Screen::Profile => render_profile(f, body, app),
         Screen::EditProfile => render_form(f, body, " Edit Profile ", app),
         Screen::Stats => render_stats(f, body, app),
@@ -1229,6 +1233,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ConfirmDeleteMail => "Delete Mail",
         Screen::ComposeMail => "Compose Mail",
         Screen::WhoOnline => "Who's Online",
+        Screen::ComposePage => "Page User",
         Screen::Profile => "Profile",
         Screen::EditProfile => "Edit Profile",
         Screen::Stats => "Stats",
@@ -1290,7 +1295,8 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · d delete · Esc back ",
         Screen::ConfirmDeleteMail => " y delete · any key keep ",
-        Screen::WhoOnline => " ↑/↓ move · Enter profile · r refresh · Esc back ",
+        Screen::WhoOnline => " ↑/↓ move · Enter profile · p page · r refresh · Esc back ",
+        Screen::ComposePage => " type your message · Enter send · Esc cancel ",
         Screen::Profile => {
             if can_edit_profile {
                 " e edit · Esc back "

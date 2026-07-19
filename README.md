@@ -27,7 +27,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **User profiles** — real name, location, tagline, and a **signature** shown beneath your posts;
   a profile screen also shows member-since, last-on, and post count. View others' profiles from Who's Online.
 - **Private mail** — send and read user-to-user messages.
-- **Who's online** — a live view of currently-connected users; open a user's profile from here.
+- **Who's online** — a live view of currently-connected users; open a user's profile from here, or
+  **page ("yell at")** a user with `p` — a one-line notice that pops up on their screen wherever they
+  are, with a bell. Transient (not stored): if they've since disconnected, you're told so.
 - **Stats** — board totals, a top-posters leaderboard, and a recent-callers list.
 - **Door games** — launch operator-configured external programs on a pseudo-terminal (full-screen ANSI,
   `isatty`), with the user's info in the environment + an optional classic drop file, and a time limit.
