@@ -239,6 +239,32 @@ post looks like on the wire, and both callers use it.
 The general lesson, which cost two bugs to learn: **two hand-written copies of a wire format will drift,
 and the drift is silent** — nothing fails loudly when an outbox and a fan-out disagree.
 
+### #139 Slice B — mirroring announced replies (post-epic follow-up)
+
+Slice A made replies syndicate; this makes them arrive usefully. Migration 0021 adds
+`ap_board_posts.in_reply_to`, and `mirror::thread` assembles the same shape `boards::list_thread`
+produces for a local board — roots newest-first, replies depth-first under them.
+
+**The parent is stored as a URI, not a local row id.** Mirrored posts are foreign objects that arrive in
+delivery order, which is not thread order: a reply routinely lands before the post it answers. A URI
+resolves whenever the parent turns up, and a foreign key would have forced us to either reject the reply
+or invent a placeholder parent.
+
+**An unattached reply is shown as a root, never hidden.** A mirror is a partial view by construction — we
+only hold what a board announced while we were subscribed — so a reply whose parent we never saw is
+normal, not corruption. Dropping it would silently lose real content; showing it unattached is honest
+about what we know. This matches what `boards::list_thread` already does locally for a reply whose parent
+was deleted.
+
+**Subject fallback.** A bbs-rs peer sends `name` even on a reply `Note`, so BBS↔BBS keeps the real
+subject. Everyone else omits it, so a nameless reply takes `Re: <parent>` from the parent we hold, and
+only falls back to a placeholder when we hold neither. `reply_subject` moved to `util` and is now shared
+with the compose path rather than copied — the same duplication that produced two federation bugs
+already.
+
+`bbsctl ap-board-posts` threads its output too. A flat rendering of a conversation misrepresents it, and
+having the operator view disagree with the in-BBS view is the outbox/fan-out drift all over again.
+
 ### #131 — posting into a followed remote board (post-epic follow-up)
 
 The receiving half has worked since #112a; this is the sending half. The asymmetry with our own boards is

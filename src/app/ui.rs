@@ -449,9 +449,15 @@ fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
         }
         lines.push(Line::from(""));
     }
-    for p in &app.mirror_posts {
+    for item in &app.mirror_posts {
+        let p = &item.post;
         header_rows.push(lines.len());
+        // Indent replies exactly like a local thread, so a mirrored board reads
+        // the same as one of ours (#139).
+        let indent = "  ".repeat(item.depth as usize);
+        let lead = if item.depth > 0 { "↳ " } else { "" };
         lines.push(Line::from(vec![
+            Span::raw(format!("{indent}{lead}")),
             Span::styled(p.subject.clone(), Style::default().fg(app.theme.accent)),
             Span::styled(
                 format!("  · @{} · {}", p.author_handle, fmt_time(p.published)),

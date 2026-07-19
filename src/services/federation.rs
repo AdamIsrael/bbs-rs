@@ -1772,6 +1772,18 @@ pub mod mirror {
         pub content: String,
         pub url: Option<String>,
         pub published: i64,
+        /// The parent's URI when this is a reply (#139). A URI rather than a
+        /// local id because mirrored posts arrive out of order — a reply
+        /// routinely lands before the post it answers.
+        pub in_reply_to: Option<String>,
+    }
+
+    /// A mirrored post with its depth in the reply tree (0 = thread root),
+    /// mirroring `boards::ThreadItem` for local boards.
+    #[derive(Debug, Clone)]
+    pub struct ThreadedPost {
+        pub post: Post,
+        pub depth: u16,
     }
 
     /// Store a mirrored board post. Idempotent on the Page's `ap_id`: a
@@ -1789,12 +1801,13 @@ pub mod mirror {
         content: &str,
         url: Option<&str>,
         published: i64,
+        in_reply_to: Option<&str>,
     ) -> Result<bool> {
         let affected = sqlx::query(
             "INSERT INTO ap_board_posts \
                (ap_id, group_uri, group_handle, author_handle, author_uri, subject, content, url, \
-                published, received_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
+                published, received_at, in_reply_to) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ap_id) DO NOTHING",
         )
         .bind(ap_id)
         .bind(group_uri)
@@ -1806,6 +1819,7 @@ pub mod mirror {
         .bind(url)
         .bind(published)
         .bind(now_unix())
+        .bind(in_reply_to)
         .execute(pool)
         .await?
         .rows_affected();
@@ -1816,7 +1830,7 @@ pub mod mirror {
     pub async fn recent(pool: &SqlitePool, group_uri: &str, limit: i64) -> Result<Vec<Post>> {
         let rows = sqlx::query_as::<_, Post>(
             "SELECT id, ap_id, group_uri, group_handle, author_handle, subject, content, url, \
-             published FROM ap_board_posts WHERE group_uri = ? \
+             published, in_reply_to FROM ap_board_posts WHERE group_uri = ? \
              ORDER BY published DESC, id DESC LIMIT ?",
         )
         .bind(group_uri)
@@ -1872,6 +1886,65 @@ pub mod mirror {
         .fetch_all(pool)
         .await?;
         Ok(rows)
+    }
+
+    /// A mirrored board's posts arranged as reply threads (#139 Slice B).
+    ///
+    /// Deliberately the same shape as [`crate::services::boards::list_thread`]:
+    /// roots newest-first, each followed depth-first by its replies oldest-first,
+    /// and **a reply whose parent we don't have becomes a root** rather than
+    /// disappearing.
+    ///
+    /// That last rule matters more here than it does locally. A mirror is a
+    /// partial view by construction — we only hold what a board announced while
+    /// we were subscribed — so a reply arriving before (or without) its parent
+    /// is normal, not corruption. Hiding it would silently drop real content;
+    /// showing it unattached is honest about what we know.
+    pub async fn thread(
+        pool: &SqlitePool,
+        group_uri: &str,
+        limit: i64,
+    ) -> Result<Vec<ThreadedPost>> {
+        use std::collections::{HashMap, HashSet};
+
+        let all = recent(pool, group_uri, limit).await?;
+        let known: HashSet<String> = all.iter().map(|p| p.ap_id.clone()).collect();
+
+        let mut children: HashMap<Option<String>, Vec<Post>> = HashMap::new();
+        for p in all {
+            // An `inReplyTo` we don't hold is treated as no parent at all.
+            let parent = p
+                .in_reply_to
+                .clone()
+                .filter(|uri| known.contains(uri.as_str()));
+            children.entry(parent).or_default().push(p);
+        }
+
+        let mut roots = children.remove(&None).unwrap_or_default();
+        let mut stack: Vec<(Post, u16)> = roots.drain(..).rev().map(|p| (p, 0)).collect();
+        let mut order = Vec::new();
+        while let Some((p, depth)) = stack.pop() {
+            let ap_id = p.ap_id.clone();
+            order.push(ThreadedPost { post: p, depth });
+            if let Some(mut kids) = children.remove(&Some(ap_id)) {
+                kids.sort_by_key(|k| (k.published, k.id));
+                for k in kids.into_iter().rev() {
+                    stack.push((k, depth + 1));
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    /// The subject of a mirrored post, by URI — used to build `Re: <parent>`
+    /// for a remote reply that carried no subject of its own.
+    pub async fn subject_of(pool: &SqlitePool, ap_id: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT subject FROM ap_board_posts WHERE ap_id = ?")
+                .bind(ap_id)
+                .fetch_optional(pool)
+                .await?,
+        )
     }
 
     /// How many mirrored posts a board has (operator visibility / tests).

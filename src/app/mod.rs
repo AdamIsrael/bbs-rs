@@ -34,7 +34,7 @@ use crate::services::stats::{self, Stats};
 use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
-use crate::util::now_unix;
+use crate::util::{now_unix, reply_subject};
 
 use state::{Field, Form, MenuItem, Screen};
 
@@ -79,7 +79,7 @@ pub struct App {
     // someone else's board, not content we're the authority for.
     pub remote_boards: Vec<crate::services::federation::mirror::Board>,
     pub remote_board_sel: usize,
-    pub mirror_posts: Vec<crate::services::federation::mirror::Post>,
+    pub mirror_posts: Vec<crate::services::federation::mirror::ThreadedPost>,
     /// Posts we submitted to this board that it hasn't announced back yet (#131).
     pub mirror_pending: Vec<crate::services::federation::remote_posting::Pending>,
     pub mirror_sel: usize,
@@ -684,7 +684,7 @@ impl App {
         let Some(board) = self.remote_boards.get(self.remote_board_sel).cloned() else {
             return;
         };
-        match crate::services::federation::mirror::recent(&self.pool, &board.group_uri, 100).await {
+        match crate::services::federation::mirror::thread(&self.pool, &board.group_uri, 200).await {
             Ok(posts) => {
                 self.mirror_pending = crate::services::federation::remote_posting::pending(
                     &self.pool,
@@ -2044,17 +2044,6 @@ impl App {
     }
 }
 
-/// Trim a subject/title for inclusion in the one-line status bar.
-/// The subject for a reply: the parent's, prefixed with `Re: ` unless it
-/// already starts with one.
-fn reply_subject(subject: &str) -> String {
-    if subject.to_ascii_lowercase().starts_with("re:") {
-        subject.to_string()
-    } else {
-        format!("Re: {subject}")
-    }
-}
-
 /// Map an `[art.screens]` config key to the screen it heads. Unknown keys
 /// return `None` (skipped with a warning).
 fn screen_from_art_key(key: &str) -> Option<Screen> {
@@ -2123,6 +2112,7 @@ fn load_art(cfg: &crate::config::Art) -> HashMap<Screen, Text<'static>> {
     out
 }
 
+/// Trim a subject/title for inclusion in the one-line status bar.
 fn truncate_status(s: &str) -> String {
     const MAX: usize = 40;
     if s.chars().count() <= MAX {

@@ -346,9 +346,13 @@ Replies syndicate too, as of #139: a reply on one of your boards reaches every
 subscriber, and a reply arriving from a peer is relayed onward to the rest of
 them — your instance is that board's hub, so it's what propagates the thread.
 
-> **Still missing**, so you know where the edges are: a mirrored board shows
-> replies flat rather than threaded under their parent, and replying *into* a
-> followed remote board isn't wired up yet. Both are tracked on #139.
+Mirrored boards show replies threaded under their parent, both in the BBS and in
+`bbsctl ap-board-posts`. A reply whose parent you never received — normal, since
+a mirror only holds what was announced while you were subscribed — is shown as a
+top-level post rather than hidden.
+
+> **Still missing**, so you know where the edges are: replying *into* a followed
+> remote board isn't wired up yet (tracked on #139).
 
 ---
 

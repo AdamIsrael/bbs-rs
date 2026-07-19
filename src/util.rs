@@ -43,3 +43,17 @@ pub fn fmt_time(ts: i64) -> String {
         Err(_) => ts.to_string(),
     }
 }
+
+/// The subject for a reply: the parent's, prefixed with `Re: ` unless it
+/// already starts with one.
+///
+/// Shared because two callers need the identical rule: the BBS compose screen,
+/// and federation ingestion, which falls back to it when a remote reply `Note`
+/// arrives with no `name` of its own (#139). A second copy would drift.
+pub fn reply_subject(subject: &str) -> String {
+    if subject.to_ascii_lowercase().starts_with("re:") {
+        subject.to_string()
+    } else {
+        format!("Re: {subject}")
+    }
+}

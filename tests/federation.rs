@@ -2909,6 +2909,7 @@ async fn subscribe_and_mirror(
         "original body",
         None,
         1_782_907_200,
+        None,
     )
     .await
     .unwrap();
@@ -3342,6 +3343,7 @@ async fn our_announced_delete_is_one_we_would_honor() {
         "temporary",
         None,
         1_782_907_200,
+        None,
     )
     .await
     .unwrap();
@@ -3401,6 +3403,7 @@ async fn subscribed_remote_boards_are_listed_with_stats() {
             "body",
             None,
             ts,
+            None,
         )
         .await
         .unwrap();
@@ -3477,6 +3480,7 @@ async fn a_board_predating_actor_kind_is_still_listed() {
         "body",
         None,
         1_782_907_200,
+        None,
     )
     .await
     .unwrap();
@@ -3706,6 +3710,7 @@ async fn a_submission_is_pending_until_the_board_announces_it_back() {
         "body",
         None,
         1_782_907_200,
+        None,
     )
     .await
     .unwrap();
@@ -4189,4 +4194,229 @@ async fn the_group_outbox_matches_what_the_board_announces() {
             .any(|a| a.contains("bbs.example.com/u/bob@")),
         "must not mint a local URI for a remote author: {attributions:?}"
     );
+}
+
+// ---- #139b: mirroring announced replies -------------------------------------
+
+/// Build an `Announce{Create{Note}}` — a reply as a peer syndicates it.
+fn board_reply_announce(
+    group_uri: &str,
+    note_id: &str,
+    author_uri: &str,
+    name: Option<&str>,
+    content: &str,
+    in_reply_to: &str,
+) -> bbs_rs::web::ap_object::Announce {
+    let mut object = serde_json::json!({
+        "type": "Note",
+        "id": note_id,
+        "attributedTo": author_uri,
+        "content": content,
+        "inReplyTo": in_reply_to,
+        "published": "2026-07-02T12:00:00Z",
+    });
+    if let Some(n) = name {
+        object["name"] = serde_json::json!(n);
+    }
+    serde_json::from_value(serde_json::json!({
+        "type": "Announce",
+        "id": format!("{group_uri}/announce/r"),
+        "actor": group_uri,
+        "object": { "type": "Create", "object": object }
+    }))
+    .unwrap()
+}
+
+/// An announced reply is mirrored and nests under its parent.
+#[tokio::test]
+async fn an_announced_reply_is_threaded_under_its_parent() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let bob = "https://remote.social/users/bob";
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        bob,
+        "https://remote.social/p/1",
+    )
+    .await;
+
+    let data = fed_data(&pool).await;
+    board_reply_announce(
+        &group,
+        "https://remote.social/p/2",
+        bob,
+        Some("Re: Original subject"),
+        "<p>the reply</p>",
+        "https://remote.social/p/1",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    let thread = mirror::thread(&pool, &group, 50).await.unwrap();
+    assert_eq!(thread.len(), 2);
+    assert_eq!(thread[0].depth, 0, "root first");
+    assert_eq!(thread[0].post.ap_id, "https://remote.social/p/1");
+    assert_eq!(thread[1].depth, 1, "reply nested under it");
+    assert_eq!(thread[1].post.ap_id, "https://remote.social/p/2");
+    assert_eq!(thread[1].post.content, "the reply", "HTML degraded");
+    assert_eq!(
+        thread[1].post.in_reply_to.as_deref(),
+        Some("https://remote.social/p/1")
+    );
+}
+
+/// A reply arriving *before* its parent still nests once the parent shows up.
+/// Mirrors are filled by delivery order, which is not thread order.
+#[tokio::test]
+async fn a_reply_that_arrives_before_its_parent_still_threads() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    let data = fed_data(&pool).await;
+    let bob = "https://remote.social/users/bob";
+
+    // Reply first.
+    board_reply_announce(
+        &group,
+        "https://remote.social/p/2",
+        bob,
+        Some("Re: Later"),
+        "<p>reply</p>",
+        "https://remote.social/p/1",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    // With no parent yet it stands alone rather than vanishing.
+    let orphan = mirror::thread(&pool, &group, 50).await.unwrap();
+    assert_eq!(orphan.len(), 1);
+    assert_eq!(
+        orphan[0].depth, 0,
+        "an orphan is shown as a root, not hidden"
+    );
+
+    // Now the parent arrives.
+    board_announce_from(
+        &group,
+        "https://remote.social/p/1",
+        bob,
+        "Later",
+        "<p>root</p>",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    let thread = mirror::thread(&pool, &group, 50).await.unwrap();
+    assert_eq!(thread.len(), 2);
+    assert_eq!(thread[0].post.ap_id, "https://remote.social/p/1");
+    assert_eq!(thread[1].depth, 1, "it nests once the parent is known");
+}
+
+/// A reply `Note` with no `name` — what a non-bbs-rs peer sends — gets
+/// `Re: <parent>` rather than a useless placeholder.
+#[tokio::test]
+async fn a_nameless_remote_reply_takes_its_subject_from_the_parent() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let bob = "https://remote.social/users/bob";
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        bob,
+        "https://remote.social/p/1",
+    )
+    .await;
+
+    let data = fed_data(&pool).await;
+    board_reply_announce(
+        &group,
+        "https://remote.social/p/2",
+        bob,
+        None, // Mastodon-style: a Note with no name
+        "<p>no subject on this one</p>",
+        "https://remote.social/p/1",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    let thread = mirror::thread(&pool, &group, 50).await.unwrap();
+    assert_eq!(
+        thread[1].post.subject, "Re: Original subject",
+        "derived from the parent we already hold"
+    );
+}
+
+/// `Re:` doesn't stack when the parent already carries one.
+#[tokio::test]
+async fn a_nameless_reply_to_a_reply_does_not_double_the_re_prefix() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::services::federation::mirror;
+
+    let pool = setup().await;
+    let bob = "https://remote.social/users/bob";
+    let group = subscribe_and_mirror(
+        &pool,
+        "rustaceans@remote.social",
+        "remote.social",
+        bob,
+        "https://remote.social/p/1",
+    )
+    .await;
+    let data = fed_data(&pool).await;
+
+    board_reply_announce(
+        &group,
+        "https://remote.social/p/2",
+        bob,
+        Some("Re: Original subject"),
+        "<p>first</p>",
+        "https://remote.social/p/1",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+    board_reply_announce(
+        &group,
+        "https://remote.social/p/3",
+        bob,
+        None,
+        "<p>second</p>",
+        "https://remote.social/p/2",
+    )
+    .receive(&data)
+    .await
+    .unwrap();
+
+    let thread = mirror::thread(&pool, &group, 50).await.unwrap();
+    let deepest = thread
+        .iter()
+        .find(|t| t.post.ap_id.ends_with("/p/3"))
+        .unwrap();
+    assert_eq!(
+        deepest.post.subject, "Re: Original subject",
+        "not 'Re: Re: …'"
+    );
+    assert_eq!(deepest.depth, 2, "nested two levels down");
 }
