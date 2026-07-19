@@ -2063,9 +2063,37 @@ impl App {
     }
 }
 
+/// Every screen that can carry `[art.screens]` art: the canonical config key
+/// and a human label.
+///
+/// The authoritative list, kept immediately above the matcher that consumes it
+/// so the two can't quietly drift. `bbscfg` renders this rather than keeping its
+/// own copy (#146) — a second list would eventually offer keys the server
+/// ignores, which fails silently: the screen simply renders without art.
+///
+/// The matcher below also accepts shorter aliases (`boards`, `mail`, `who`,
+/// `files`, `messages`) for configs written by hand; those are deliberately not
+/// offered here, since a UI should suggest one spelling rather than several.
+pub const ART_SCREEN_KEYS: &[(&str, &str)] = &[
+    ("main_menu", "Main menu"),
+    ("bulletins", "Bulletins"),
+    ("board_list", "Board list"),
+    ("message_list", "Message list"),
+    ("mailbox", "Mailbox"),
+    ("who_online", "Who's online"),
+    ("profile", "Profile"),
+    ("stats", "Stats"),
+    ("search", "Search results"),
+    ("file_areas", "File areas"),
+    ("file_list", "File list"),
+    ("keys", "SSH keys"),
+    ("help", "Help"),
+    ("admin", "Admin"),
+];
+
 /// Map an `[art.screens]` config key to the screen it heads. Unknown keys
 /// return `None` (skipped with a warning).
-fn screen_from_art_key(key: &str) -> Option<Screen> {
+pub fn screen_from_art_key(key: &str) -> Option<Screen> {
     Some(match key.trim().to_ascii_lowercase().as_str() {
         "main_menu" => Screen::MainMenu,
         "bulletins" => Screen::Bulletins,

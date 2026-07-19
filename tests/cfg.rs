@@ -30,6 +30,14 @@ fn uncommented_doors(text: &str) -> usize {
         .count()
 }
 
+/// Real `[art.screens]` headers, ignoring the commented-out example the shipped
+/// config carries — same trap as [`uncommented_doors`].
+fn uncommented_art_screens(text: &str) -> usize {
+    text.lines()
+        .filter(|l| l.trim_start().starts_with("[art.screens]"))
+        .count()
+}
+
 fn comment_lines(text: &str) -> usize {
     text.lines()
         .filter(|l| l.trim_start().starts_with('#'))
@@ -994,5 +1002,194 @@ mod doors {
                 "door field {key:?} is missing from DOOR_FIELDS"
             );
         }
+    }
+}
+
+// ---- #146: per-screen art (a nested table) ----------------------------------
+
+mod art_screens {
+    use super::*;
+    use bbs_rs::cfg::editor::{Editor, Screen};
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    fn ed(scratch: &Scratch) -> Editor {
+        Editor::new(ConfigDoc::load(scratch.path()).unwrap())
+    }
+    fn press(e: &mut Editor, code: KeyCode) {
+        e.on_key(KeyEvent::from(code));
+    }
+    fn typed(e: &mut Editor, text: &str) {
+        for c in text.chars() {
+            press(e, KeyCode::Char(c));
+        }
+    }
+    fn open_art(e: &mut Editor) {
+        e.screen = Screen::Sections;
+        e.section_sel = 0;
+        while e.section().name != "art.screens" {
+            press(e, KeyCode::Down);
+        }
+        press(e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::ArtScreens);
+    }
+    fn select(e: &mut Editor, key: &str) {
+        e.art_sel = 0;
+        let keys = bbs_rs::app::ART_SCREEN_KEYS;
+        while keys[e.art_sel].0 != key {
+            press(e, KeyCode::Down);
+        }
+    }
+
+    /// Setting a screen's art writes `[art.screens]` as a nested table under
+    /// `[art]`, and it reparses into the Art config.
+    #[test]
+    fn setting_art_writes_a_nested_table() {
+        let scratch = Scratch::new("art-set");
+        let mut e = ed(&scratch);
+        open_art(&mut e);
+        select(&mut e, "board_list");
+
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::Edit);
+        typed(&mut e, "boards.ans");
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(
+            e.screen,
+            Screen::ArtScreens,
+            "back to the art list, not a section"
+        );
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+
+        let text = scratch.text();
+        assert_eq!(
+            uncommented_art_screens(&text),
+            1,
+            "wrote a real [art.screens] header (not the commented-out example)"
+        );
+        assert!(text.contains("board_list = \"boards.ans\""));
+        let parsed: bbs_rs::config::Settings = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed.art.screens.get("board_list").map(String::as_str),
+            Some("boards.ans")
+        );
+    }
+
+    /// The rows offered are exactly the keys the server matches — a UII can't
+    /// offer one that gets silently ignored.
+    #[test]
+    fn the_rows_are_exactly_the_servers_keys() {
+        let scratch = Scratch::new("art-keys");
+        let e = ed(&scratch);
+        for (key, _, _) in e.art_rows() {
+            assert!(
+                bbs_rs::app::screen_from_art_key(key).is_some(),
+                "art row {key:?} is not a key the server understands"
+            );
+        }
+    }
+
+    /// Clearing with 'u' removes the entry, and removing the last one drops the
+    /// `[art.screens]` table rather than leaving an empty header.
+    #[test]
+    fn clearing_the_last_entry_drops_the_table() {
+        let scratch = Scratch::new("art-clear");
+        let mut e = ed(&scratch);
+        open_art(&mut e);
+        select(&mut e, "help");
+        press(&mut e, KeyCode::Enter);
+        typed(&mut e, "help.ans");
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.doc.art_screen_get("help").as_deref(), Some("help.ans"));
+
+        press(&mut e, KeyCode::Char('u'));
+        assert_eq!(e.doc.art_screen_get("help"), None, "cleared");
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+        let text = scratch.text();
+        assert_eq!(
+            uncommented_art_screens(&text),
+            0,
+            "no empty table header left behind"
+        );
+        // And it reparses with no per-screen art.
+        let parsed: bbs_rs::config::Settings = toml::from_str(&text).unwrap();
+        assert!(parsed.art.screens.is_empty());
+    }
+
+    /// A blank value clears rather than writing an empty filename the loader
+    /// would try to open.
+    #[test]
+    fn a_blank_value_clears_the_entry() {
+        let scratch = Scratch::new("art-blank");
+        let mut e = ed(&scratch);
+        e.doc.art_screen_set("stats", "stats.ans");
+        assert_eq!(e.doc.art_screen_get("stats").as_deref(), Some("stats.ans"));
+
+        e.doc.art_screen_set("stats", "   ");
+        assert_eq!(
+            e.doc.art_screen_get("stats"),
+            None,
+            "blank clears, not empty-string"
+        );
+    }
+
+    /// A referenced file that isn't on disk is reported as a warning when saving
+    /// — the failure a config UI is best placed to catch, since at runtime it's
+    /// silent.
+    #[test]
+    fn a_missing_art_file_is_flagged() {
+        let dir = std::env::temp_dir().join(format!("bbscfg-art-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("art")).unwrap();
+        let path = dir.join("bbs.toml");
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
+
+        let mut doc = ConfigDoc::load(&path).unwrap();
+        // One file that exists, one that doesn't.
+        std::fs::write(dir.join("art").join("real.ans"), b"art").unwrap();
+        doc.art_screen_set("main_menu", "real.ans");
+        doc.art_screen_set("help", "typo.ans");
+
+        let issues = doc.validate();
+        let art: Vec<_> = issues.iter().filter(|i| i.section == "art").collect();
+        assert_eq!(art.len(), 1, "only the missing one is flagged: {art:?}");
+        assert!(art[0].message.contains("typo.ans"));
+        assert!(!art[0].blocking, "missing art is a warning, not a refusal");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A hand-written [art.screens] with comments round-trips and survives an
+    /// edit to a *different* key.
+    #[test]
+    fn hand_written_art_survives_an_edit() {
+        let scratch = Scratch::new("art-handwritten");
+        let mut text = scratch.text();
+        text.push_str(
+            "\n[art.screens]\n# the good backdrop\nboard_list = \"boards.ans\"\nhelp = \"help.ans\"\n",
+        );
+        std::fs::write(scratch.path(), &text).unwrap();
+
+        let mut e = ed(&scratch);
+        open_art(&mut e);
+        assert_eq!(
+            e.doc.art_screen_get("board_list").as_deref(),
+            Some("boards.ans")
+        );
+
+        // Edit a third key; the first two must be untouched.
+        select(&mut e, "mailbox");
+        press(&mut e, KeyCode::Enter);
+        typed(&mut e, "mail.ans");
+        press(&mut e, KeyCode::Enter);
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+
+        let after = scratch.text();
+        assert!(after.contains("# the good backdrop"), "comment survives");
+        assert!(after.contains("board_list = \"boards.ans\""));
+        assert!(after.contains("mailbox = \"mail.ans\""));
     }
 }

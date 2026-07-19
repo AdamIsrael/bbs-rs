@@ -103,6 +103,7 @@ fn draw(f: &mut Frame, editor: &Editor) {
         Screen::Save => save(f, chunks[1], editor),
         Screen::ConfirmQuit => confirm_quit(f, chunks[1], editor),
         Screen::Doors => doors(f, chunks[1], editor),
+        Screen::ArtScreens => art_screens(f, chunks[1], editor),
         Screen::DoorFields => door_fields(f, chunks[1], editor),
         Screen::ConfirmRemoveDoor => confirm_remove_door(f, chunks[1], editor),
     }
@@ -323,6 +324,57 @@ fn save(f: &mut Frame, area: Rect, editor: &Editor) {
     );
 }
 
+fn art_screens(f: &mut Frame, area: Rect, editor: &Editor) {
+    let rows = editor.art_rows();
+    let width = rows
+        .iter()
+        .map(|(_, label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    // Which files are missing, so a typo is visible in the list rather than
+    // only at save time.
+    let missing = editor.doc.missing_art_files();
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (key, label, file))| {
+            let mut spans = vec![
+                Span::raw(format!(
+                    "{} {:<width$}",
+                    if i == editor.art_sel { ">" } else { " " },
+                    label
+                )),
+                Span::raw(if file.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    file.clone()
+                }),
+            ];
+            if missing.iter().any(|(k, _)| k == key) {
+                spans.push(Span::styled(
+                    "  not found",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+            let style = if i == editor.art_sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Line::from(spans).style(style)
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Per-screen art "),
+        ),
+        area,
+    );
+}
+
 fn doors(f: &mut Frame, area: Rect, editor: &Editor) {
     let names = editor.doc.door_names();
     if names.is_empty() {
@@ -470,7 +522,7 @@ fn confirm_quit(f: &mut Frame, area: Rect, _editor: &Editor) {
 fn help_pane(f: &mut Frame, area: Rect, editor: &Editor) {
     let text = match editor.screen {
         Screen::Sections => editor.section().help.to_string(),
-        Screen::Doors => editor.section().help.to_string(),
+        Screen::Doors | Screen::ArtScreens => editor.section().help.to_string(),
         Screen::DoorFields => editor
             .door_field()
             .map(|f| f.help.to_string())
@@ -506,6 +558,7 @@ fn status_bar(f: &mut Frame, area: Rect, editor: &Editor) {
         }
         Screen::DoorFields => " ↑/↓ move · Enter edit · s save · Esc back ",
         Screen::ConfirmRemoveDoor => " y remove · any key keep ",
+        Screen::ArtScreens => " ↑/↓ move · Enter set · u clear · s save · Esc back ",
     };
     let line = format!("{keys}  {}", editor.status);
     f.render_widget(

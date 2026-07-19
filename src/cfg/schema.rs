@@ -51,6 +51,9 @@ pub enum SectionKind {
     Fields,
     /// A list of entries, each edited with [`DOOR_FIELDS`].
     Doors,
+    /// The `[art.screens]` table: a fixed set of known keys, each holding a
+    /// filename (#146).
+    ArtScreens,
 }
 
 /// A `[section]` of the config.
@@ -524,6 +527,16 @@ pub static SECTIONS: &[Section] = &[
                 help: "A file name under the art directory. Blank means none.",
             },
         ],
+    },
+    Section {
+        name: "art.screens",
+        title: "Per-screen art",
+        help: "Optional art heading individual screens. Files live under the art directory set in ANSI art. A name that isn't there is flagged when you save — a missing file fails silently at runtime, the screen just renders plain.",
+        restart_only: false,
+        kind: SectionKind::ArtScreens,
+        // The rows come from app::ART_SCREEN_KEYS, the same list the server
+        // matches against, so this screen can't offer a key that gets ignored.
+        fields: &[],
     },
     Section {
         name: "web",

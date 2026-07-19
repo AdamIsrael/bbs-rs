@@ -12,7 +12,18 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::doc::{ConfigDoc, FieldValue, Issue};
-use super::schema::{self, DOOR_FIELDS, FieldKind, SECTIONS, Section, SectionKind};
+use crate::app::ART_SCREEN_KEYS;
+
+use super::schema::{self, DOOR_FIELDS, Field, FieldKind, SECTIONS, Section, SectionKind};
+
+/// The one field an art row holds. Static so the shared `Edit` screen has a
+/// `Field` to render like any other.
+static ART_FILE_FIELD: Field = Field {
+    key: "file",
+    label: "Art file",
+    kind: FieldKind::Str,
+    help: "A file name under the art directory, e.g. boards.ans. Blank removes the art for this screen.",
+};
 
 /// What the editor is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +36,8 @@ pub enum Screen {
     Edit,
     /// The list of configured door games (#145).
     Doors,
+    /// Per-screen art: one row per screen that can carry it (#146).
+    ArtScreens,
     /// The settings of one door.
     DoorFields,
     /// Confirming removal of a door.
@@ -33,6 +46,14 @@ pub enum Screen {
     Save,
     /// Confirming a quit that would discard changes.
     ConfirmQuit,
+}
+
+/// Which screen opened the shared text editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditFrom {
+    Section,
+    Door,
+    ArtScreen,
 }
 
 /// What the host loop should do after a keystroke.
@@ -56,13 +77,14 @@ pub struct Editor {
     /// Which door is selected in the list, and which of its fields.
     pub door_sel: usize,
     pub door_field_sel: usize,
-    /// Whether the text editor was opened from a door rather than a section.
+    /// Which screen's art is selected (#146).
+    pub art_sel: usize,
+    /// Where the shared text editor was opened from.
     ///
-    /// The `Edit` screen is shared, but the two write to different places — a
-    /// door's fields live in an array entry, and the doors *section* has no
-    /// fields of its own, so committing to the wrong one would silently write
-    /// nothing.
-    editing_door: bool,
+    /// `Edit` is reused by section fields, door fields and per-screen art, and
+    /// the three write to different places. Committing to the wrong one would
+    /// silently write nothing, so the origin is tracked rather than inferred.
+    edit_from: EditFrom,
 }
 
 impl Editor {
@@ -82,7 +104,8 @@ impl Editor {
             issues: Vec::new(),
             door_sel: 0,
             door_field_sel: 0,
-            editing_door: false,
+            art_sel: 0,
+            edit_from: EditFrom::Section,
         }
     }
 
@@ -118,6 +141,7 @@ impl Editor {
             Screen::Save => self.on_save(key),
             Screen::ConfirmQuit => self.on_confirm_quit(key),
             Screen::Doors => self.on_doors(key),
+            Screen::ArtScreens => self.on_art_screens(key),
             Screen::DoorFields => self.on_door_fields(key),
             Screen::ConfirmRemoveDoor => self.on_confirm_remove_door(key),
         }
@@ -141,6 +165,10 @@ impl Editor {
                 SectionKind::Doors => {
                     self.door_sel = 0;
                     self.screen = Screen::Doors;
+                }
+                SectionKind::ArtScreens => {
+                    self.art_sel = 0;
+                    self.screen = Screen::ArtScreens;
                 }
             },
             KeyCode::Char('s') => self.open_save(),
@@ -204,7 +232,7 @@ impl Editor {
                     .effective(section, field.key)
                     .map(|v| v.display())
                     .unwrap_or_default();
-                self.editing_door = false;
+                self.edit_from = EditFrom::Section;
                 self.screen = Screen::Edit;
                 self.status = field.help.to_string();
             }
@@ -245,30 +273,26 @@ impl Editor {
     /// The field the shared `Edit` screen is currently editing, whichever kind
     /// it came from — what a renderer needs to label the input and show help.
     pub fn edit_field(&self) -> Option<&'static schema::Field> {
-        if self.editing_door {
-            self.door_field()
-        } else {
-            self.field()
+        match self.edit_from {
+            EditFrom::Door => self.door_field(),
+            EditFrom::ArtScreen => Some(&ART_FILE_FIELD),
+            EditFrom::Section => self.field(),
         }
     }
 
     /// Where Esc and a successful commit return to.
     fn edit_origin(&self) -> Screen {
-        if self.editing_door {
-            Screen::DoorFields
-        } else {
-            Screen::Fields
+        match self.edit_from {
+            EditFrom::Door => Screen::DoorFields,
+            EditFrom::ArtScreen => Screen::ArtScreens,
+            EditFrom::Section => Screen::Fields,
         }
     }
 
     /// Apply the typed value, refusing anything the schema says is out of range
     /// rather than writing a config the server would reject at boot.
     fn commit_edit(&mut self) {
-        let Some(field) = (if self.editing_door {
-            self.door_field()
-        } else {
-            self.field()
-        }) else {
+        let Some(field) = self.edit_field() else {
             return;
         };
         let section = self.section().name;
@@ -295,13 +319,67 @@ impl Editor {
             _ => FieldValue::Str(raw),
         };
 
-        if self.editing_door {
-            self.doc.door_set(self.door_sel, field.key, value);
-        } else {
-            self.doc.set(section, field.key, value);
+        match self.edit_from {
+            EditFrom::Door => self.doc.door_set(self.door_sel, field.key, value),
+            EditFrom::ArtScreen => {
+                let (key, _) = ART_SCREEN_KEYS[self.art_sel];
+                self.doc.art_screen_set(key, &value.display());
+            }
+            EditFrom::Section => self.doc.set(section, field.key, value),
         }
         self.screen = self.edit_origin();
         self.status = format!("{} updated", field.key);
+    }
+
+    // ---- Per-screen art (#146) -------------------------------------------
+
+    /// The art rows: every screen that can carry art, with its label and the
+    /// file currently set.
+    pub fn art_rows(&self) -> Vec<(&'static str, &'static str, String)> {
+        ART_SCREEN_KEYS
+            .iter()
+            .map(|(key, label)| {
+                (
+                    *key,
+                    *label,
+                    self.doc.art_screen_get(key).unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    fn on_art_screens(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.art_sel = self.art_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.art_sel + 1 < ART_SCREEN_KEYS.len() {
+                    self.art_sel += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let (k, _) = ART_SCREEN_KEYS[self.art_sel];
+                self.input = self.doc.art_screen_get(k).unwrap_or_default();
+                self.edit_from = EditFrom::ArtScreen;
+                self.screen = Screen::Edit;
+                self.status = ART_FILE_FIELD.help.to_string();
+            }
+            // Clearing is common enough to deserve its own key rather than
+            // making the operator open the editor and delete the text.
+            KeyCode::Char('u') => {
+                let (k, label) = ART_SCREEN_KEYS[self.art_sel];
+                self.status = if self.doc.art_screen_unset(k) {
+                    format!("{label}: art removed")
+                } else {
+                    format!("{label} has no art set")
+                };
+            }
+            KeyCode::Char('s') => self.open_save(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::Sections,
+            _ => {}
+        }
+        Action::None
     }
 
     // ---- Door games (#145) ----------------------------------------------
@@ -409,7 +487,7 @@ impl Editor {
                     .door_get(self.door_sel, field.key)
                     .map(|v| v.display())
                     .unwrap_or_default();
-                self.editing_door = true;
+                self.edit_from = EditFrom::Door;
                 self.screen = Screen::Edit;
                 self.status = field.help.to_string();
             }

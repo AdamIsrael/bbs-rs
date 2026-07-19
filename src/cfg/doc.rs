@@ -151,6 +151,104 @@ impl ConfigDoc {
         }
     }
 
+    // ---- Per-screen art: a nested table (#146) --------------------------
+    //
+    // `[art.screens]` is a table *inside* `[art]`, so it can't go through the
+    // section/key accessors above. The valid keys are known and fixed
+    // (`app::ART_SCREEN_KEYS`), which is what makes this a field screen rather
+    // than free-form key/value editing.
+
+    /// The art file set for a screen, if any.
+    pub fn art_screen_get(&self, key: &str) -> Option<String> {
+        self.doc
+            .get("art")?
+            .get("screens")?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Set (or, given a blank value, clear) a screen's art file.
+    ///
+    /// Blank clears rather than writing `""`: an empty filename would be a path
+    /// the loader tries and fails to open, and "no art here" is exactly what an
+    /// absent key already means.
+    pub fn art_screen_set(&mut self, key: &str, file: &str) {
+        if file.trim().is_empty() {
+            self.art_screen_unset(key);
+            return;
+        }
+        if self.doc.get("art").is_none() {
+            self.doc["art"] = Item::Table(toml_edit::Table::new());
+        }
+        if self.doc["art"].get("screens").is_none() {
+            let mut t = toml_edit::Table::new();
+            // Implicit would render as a bare `screens = {}` inline; we want the
+            // `[art.screens]` header the shipped config documents.
+            t.set_implicit(false);
+            self.doc["art"]["screens"] = Item::Table(t);
+        }
+        self.doc["art"]["screens"][key] = toml_edit::value(file.trim());
+    }
+
+    /// Remove a screen's art. Returns whether it was set.
+    pub fn art_screen_unset(&mut self, key: &str) -> bool {
+        let Some(screens) = self
+            .doc
+            .get_mut("art")
+            .and_then(|a| a.get_mut("screens"))
+            .and_then(|s| s.as_table_like_mut())
+        else {
+            return false;
+        };
+        let had = screens.remove(key).is_some();
+        // Drop the table when the last entry goes, so the file doesn't keep an
+        // empty `[art.screens]` header the operator has to wonder about.
+        if screens.is_empty()
+            && let Some(art) = self.doc.get_mut("art").and_then(|a| a.as_table_like_mut())
+        {
+            art.remove("screens");
+        }
+        had
+    }
+
+    /// Art files referenced by `[art.screens]` that aren't in `[art] dir`.
+    ///
+    /// A typo here fails **silently** at runtime — the screen just renders
+    /// without art and a warning goes to a log nobody is watching — so catching
+    /// it while editing is most of the value of having a UI for this at all.
+    pub fn missing_art_files(&self) -> Vec<(String, String)> {
+        let dir = self
+            .doc
+            .get("art")
+            .and_then(|a| a.get("dir"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("art");
+        // Relative to the config's own directory, which is where the server's
+        // working directory will be in the normal case.
+        let base = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(dir);
+        let Some(screens) = self
+            .doc
+            .get("art")
+            .and_then(|a| a.get("screens"))
+            .and_then(|s| s.as_table_like())
+        else {
+            return Vec::new();
+        };
+        screens
+            .iter()
+            .filter_map(|(key, item)| {
+                let file = item.as_str()?;
+                (!file.is_empty() && !base.join(file).exists())
+                    .then(|| (key.to_string(), file.to_string()))
+            })
+            .collect()
+    }
+
     // ---- Door games: an array of tables (#145) -------------------------
     //
     // `[[doors]]` is a list of entries rather than a set of settings, so it gets
@@ -403,6 +501,19 @@ impl ConfigDoc {
                 blocking: false,
             });
         }
+        // Art that doesn't exist is a warning, not a refusal: the board runs
+        // fine without it, and the file may simply not be copied in yet.
+        for (key, file) in self.missing_art_files() {
+            issues.push(Issue {
+                section: "art".into(),
+                message: format!(
+                    "{key}: {file:?} is not in the art directory — the screen will \
+                     render without art"
+                ),
+                blocking: false,
+            });
+        }
+
         if !settings.features.registration && !settings.features.guest {
             issues.push(Issue {
                 section: "features".into(),
