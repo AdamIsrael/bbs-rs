@@ -100,6 +100,11 @@ origin  = "https://bbs.example.com"
 
 A complete example (Option A, direct ACME):
 
+> You can set all of this through **`bbscfg`** rather than by hand — it knows
+> which settings need a restart, and it refuses to save a federation config that
+> wouldn't start (an unusable origin, or federation on with the web frontend
+> off). The file below is what it writes.
+
 ```toml
 [web]
 enabled = true

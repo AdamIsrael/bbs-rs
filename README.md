@@ -35,6 +35,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Bans** — ban/unban by username or IP; a ban rejects new logins *and* kicks any live session.
 - **Login audit** — every attempt (success or failure) is recorded with username, IP, and time.
 - **`bbsctl`** — an operator CLI for user management that works even when the server is down.
+- **`bbscfg`** — a TUI that walks you through `bbs.toml`: every section a screen, with the help text
+  the config's own comments carry. Edits the file **in place**, so comments and anything it doesn't
+  model survive, and it refuses to write a config that wouldn't start.
 - **Browser frontend** — an optional WebSocket + xterm.js web terminal (`[web] enabled = true`) that
   reuses the whole TUI: same screens, same auth, same who's-online. xterm.js is vendored (self-contained).
 - **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles,
@@ -45,7 +48,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 ## Run it
 
 ```sh
-cargo run --bin bbs-rs        # or: just run   (the crate builds two binaries: bbs-rs + bbsctl)
+cargo run --bin bbs-rs        # or: just run   (binaries: bbs-rs, bbsctl, bbscfg)
 # then, from another terminal:
 ssh guest@localhost -p 2222   # password: guest
 ```

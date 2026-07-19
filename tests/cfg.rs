@@ -357,3 +357,316 @@ fn the_schema_covers_the_shipped_config() {
         }
     }
 }
+
+// ---- #141 Slice B: the editor state machine ---------------------------------
+
+mod editor {
+    use super::*;
+    use bbs_rs::cfg::editor::{Action, Editor, Screen};
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    fn ed(scratch: &Scratch) -> Editor {
+        Editor::new(ConfigDoc::load(scratch.path()).unwrap())
+    }
+
+    fn press(e: &mut Editor, code: KeyCode) -> Action {
+        e.on_key(KeyEvent::from(code))
+    }
+
+    fn typed(e: &mut Editor, text: &str) {
+        for c in text.chars() {
+            press(e, KeyCode::Char(c));
+        }
+    }
+
+    /// Navigate to a section by name, from the section list.
+    fn goto(e: &mut Editor, section: &str) {
+        e.screen = Screen::Sections;
+        e.section_sel = 0;
+        while e.section().name != section {
+            press(e, KeyCode::Down);
+        }
+        press(e, KeyCode::Enter);
+    }
+
+    fn goto_field(e: &mut Editor, section: &str, key: &str) {
+        goto(e, section);
+        while e.field().is_some_and(|f| f.key != key) {
+            press(e, KeyCode::Down);
+        }
+    }
+
+    /// Typing a value into a text field writes it to the document.
+    #[test]
+    fn editing_a_string_field_updates_the_document() {
+        let scratch = Scratch::new("ed-str");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "bbs", "name");
+
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::Edit);
+        for _ in 0..40 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "Adam's Board");
+        press(&mut e, KeyCode::Enter);
+
+        assert_eq!(e.screen, Screen::Fields, "back to the field list");
+        assert_eq!(
+            e.doc.get("bbs", "name"),
+            Some(FieldValue::Str("Adam's Board".into()))
+        );
+    }
+
+    /// Escape leaves the value alone.
+    #[test]
+    fn cancelling_an_edit_changes_nothing() {
+        let scratch = Scratch::new("ed-cancel");
+        let mut e = ed(&scratch);
+        let before = e.doc.get("bbs", "name");
+        goto_field(&mut e, "bbs", "name");
+
+        press(&mut e, KeyCode::Enter);
+        typed(&mut e, "discarded");
+        press(&mut e, KeyCode::Esc);
+
+        assert_eq!(e.doc.get("bbs", "name"), before);
+        assert!(!e.doc.is_dirty());
+    }
+
+    /// Booleans toggle in place rather than opening an editor to type "true".
+    #[test]
+    fn a_boolean_toggles_without_an_edit_screen() {
+        let scratch = Scratch::new("ed-bool");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "features", "guest");
+
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::Fields, "no edit screen for a toggle");
+        assert_eq!(
+            e.doc.get("features", "guest"),
+            Some(FieldValue::Bool(false))
+        );
+
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.doc.get("features", "guest"), Some(FieldValue::Bool(true)));
+    }
+
+    /// Enums cycle through their valid values, so an invalid one can't be typed.
+    #[test]
+    fn an_enum_cycles_through_its_options() {
+        let scratch = Scratch::new("ed-enum");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "theme", "preset");
+
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(
+            e.doc.get("theme", "preset"),
+            Some(FieldValue::Str("mono".into()))
+        );
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(
+            e.doc.get("theme", "preset"),
+            Some(FieldValue::Str("amber".into()))
+        );
+    }
+
+    /// A number outside the schema's range is refused with an explanation,
+    /// rather than written for the server to reject at boot.
+    #[test]
+    fn an_out_of_range_number_is_refused() {
+        let scratch = Scratch::new("ed-range");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "network", "port");
+
+        press(&mut e, KeyCode::Enter);
+        for _ in 0..10 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "99999");
+        press(&mut e, KeyCode::Enter);
+
+        assert_eq!(e.screen, Screen::Edit, "still editing — not accepted");
+        assert!(e.status.contains("65535"), "says the range: {}", e.status);
+        assert_eq!(
+            e.doc.get("network", "port"),
+            Some(FieldValue::Int(2222)),
+            "the document is untouched"
+        );
+    }
+
+    /// Text that isn't a number at all is refused the same way.
+    #[test]
+    fn a_non_numeric_entry_is_refused() {
+        let scratch = Scratch::new("ed-nan");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "limits", "max_posts");
+
+        press(&mut e, KeyCode::Enter);
+        for _ in 0..6 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "lots");
+        press(&mut e, KeyCode::Enter);
+
+        assert_eq!(e.screen, Screen::Edit);
+        assert!(e.status.contains("not a number"), "{}", e.status);
+    }
+
+    /// A list is entered comma-separated and stored as an array.
+    #[test]
+    fn a_list_is_entered_comma_separated() {
+        let scratch = Scratch::new("ed-list");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "accounts", "reserved_usernames");
+
+        press(&mut e, KeyCode::Enter);
+        for _ in 0..40 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "root, admin , sysop");
+        press(&mut e, KeyCode::Enter);
+
+        assert_eq!(
+            e.doc.get("accounts", "reserved_usernames"),
+            Some(FieldValue::List(vec![
+                "root".into(),
+                "admin".into(),
+                "sysop".into()
+            ])),
+            "whitespace trimmed, empties dropped"
+        );
+    }
+
+    /// `u` removes the setting so the built-in default applies again — which is
+    /// a different thing from setting it to an empty value.
+    #[test]
+    fn u_resets_a_field_to_its_default() {
+        let scratch = Scratch::new("ed-unset");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "limits", "max_posts");
+
+        press(&mut e, KeyCode::Enter);
+        for _ in 0..6 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "99");
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.doc.get("limits", "max_posts"), Some(FieldValue::Int(99)));
+
+        press(&mut e, KeyCode::Char('u'));
+        assert_eq!(e.doc.get("limits", "max_posts"), None, "no longer set");
+        let (shown, explicit) = e.shown_value("max_posts");
+        assert_eq!(shown, "5", "the default shows through");
+        assert!(!explicit, "and is marked as a default, not a choice");
+    }
+
+    /// The save screen names what changed and what needs a restart.
+    #[test]
+    fn the_save_screen_reports_restart_only_changes() {
+        let scratch = Scratch::new("ed-save");
+        let mut e = ed(&scratch);
+
+        goto_field(&mut e, "network", "port");
+        press(&mut e, KeyCode::Enter);
+        for _ in 0..10 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "2323");
+        press(&mut e, KeyCode::Enter);
+
+        press(&mut e, KeyCode::Char('s'));
+        assert_eq!(e.screen, Screen::Save);
+        let (changed, restart) = e.pending();
+        assert_eq!(changed, vec!["network"]);
+        assert_eq!(restart, vec!["network"], "listeners are bound at startup");
+
+        press(&mut e, KeyCode::Char('y'));
+        assert_eq!(e.screen, Screen::Sections);
+        assert!(e.status.starts_with("Saved"), "{}", e.status);
+        assert!(scratch.text().contains("port = 2323"));
+        assert!(!e.doc.is_dirty(), "saving clears the dirty flag");
+    }
+
+    /// A config that wouldn't start is not written. Catching the mistake and
+    /// then saving it anyway would be worse than not checking at all.
+    #[test]
+    fn a_blocking_problem_refuses_the_save() {
+        let scratch = Scratch::new("ed-block");
+        let before = scratch.text();
+        let mut e = ed(&scratch);
+
+        // Federation on with no origin — rejected fail-closed at startup.
+        goto_field(&mut e, "federation", "enabled");
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(
+            e.doc.get("federation", "enabled"),
+            Some(FieldValue::Bool(true))
+        );
+
+        press(&mut e, KeyCode::Char('s'));
+        assert!(!e.blocking_issues().is_empty(), "the problem is found");
+
+        press(&mut e, KeyCode::Char('y'));
+        assert_eq!(e.screen, Screen::Save, "still on the save screen");
+        assert!(e.status.contains("would not start"), "{}", e.status);
+        assert_eq!(scratch.text(), before, "and nothing was written");
+    }
+
+    /// Quitting with unsaved work asks first.
+    #[test]
+    fn quitting_dirty_asks_before_discarding() {
+        let scratch = Scratch::new("ed-quit");
+        let mut e = ed(&scratch);
+
+        assert_eq!(
+            press(&mut e, KeyCode::Char('q')),
+            Action::Quit,
+            "clean quits"
+        );
+
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "features", "guest");
+        press(&mut e, KeyCode::Enter); // toggle -> dirty
+        e.screen = Screen::Sections;
+
+        assert_eq!(press(&mut e, KeyCode::Char('q')), Action::None);
+        assert_eq!(e.screen, Screen::ConfirmQuit);
+
+        // Any other key goes back to editing.
+        assert_eq!(press(&mut e, KeyCode::Char('x')), Action::None);
+        assert_eq!(e.screen, Screen::Sections);
+
+        press(&mut e, KeyCode::Char('q'));
+        assert_eq!(
+            press(&mut e, KeyCode::Char('y')),
+            Action::Quit,
+            "y discards"
+        );
+    }
+
+    /// Editing through the UI preserves comments, exactly as the core does —
+    /// the property is worth asserting at this level too, since it's the whole
+    /// point and a UI is where it would be quietly lost.
+    #[test]
+    fn a_full_edit_session_preserves_the_comments() {
+        let scratch = Scratch::new("ed-comments");
+        let mut e = ed(&scratch);
+
+        goto_field(&mut e, "bbs", "sysop");
+        press(&mut e, KeyCode::Enter);
+        typed(&mut e, "Adam");
+        press(&mut e, KeyCode::Enter);
+
+        goto_field(&mut e, "features", "oneliners");
+        press(&mut e, KeyCode::Enter);
+
+        press(&mut e, KeyCode::Char('s'));
+        press(&mut e, KeyCode::Char('y'));
+
+        let after = scratch.text();
+        assert_eq!(comment_lines(&after), COMMENT_LINES);
+        assert!(after.contains("sysop = \"Adam\""));
+        assert!(after.contains("oneliners = false"));
+    }
+}

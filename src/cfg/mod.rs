@@ -21,7 +21,9 @@
 //!    destructive.
 
 pub mod doc;
+pub mod editor;
 pub mod schema;
 
 pub use doc::{ConfigDoc, FieldValue, Issue};
+pub use editor::{Action, Editor, Screen};
 pub use schema::{Field, FieldKind, SECTIONS, Section};
