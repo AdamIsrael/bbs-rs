@@ -102,6 +102,8 @@ pub struct App {
     pub messages: Vec<ThreadItem>,
     pub msg_sel: usize,
     pub current_message: Option<Message>,
+    /// The post being edited (#92), if in edit mode; `None` for a new post.
+    edit_target: Option<i64>,
     /// The current board's seen-watermark captured on open: a message newer
     /// than this (and not the viewer's own) is highlighted as new. `i64::MAX`
     /// suppresses highlighting (guests, or before a board is opened).
@@ -267,6 +269,7 @@ impl App {
             messages: Vec::new(),
             msg_sel: 0,
             current_message: None,
+            edit_target: None,
             msg_seen_threshold: i64::MAX,
             current_msg_signature: String::new(),
             reply_parent: None,
@@ -1128,8 +1131,21 @@ impl App {
             }
             KeyCode::Char('n') => self.begin_compose_post(None),
             KeyCode::Char('r') => self.begin_reply(),
-            // Admin moderation on the selected post.
-            KeyCode::Char('d') if self.user.is_admin() => self.delete_selected_message().await,
+            // Edit / delete your own post (#92); admins can delete any, and pin.
+            KeyCode::Char('e') => {
+                if let Some(m) = self.messages.get(self.msg_sel).map(|i| i.message.clone())
+                    && self.can_edit(&m)
+                {
+                    self.begin_edit_post(&m);
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(m) = self.messages.get(self.msg_sel).map(|i| i.message.clone())
+                    && self.can_delete(&m)
+                {
+                    self.delete_post(m.id, &m.subject, false).await;
+                }
+            }
             KeyCode::Char('p') if self.user.is_admin() => self.toggle_pin_selected().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
                 // Recompute unread so this board's count clears (and any posts
@@ -1141,15 +1157,26 @@ impl App {
         }
     }
 
-    /// The read-a-message screen: reply, delete (admin), or go back.
+    /// The read-a-message screen: reply, edit or delete your own post (#92),
+    /// moderate as an admin, or go back.
     async fn on_read_message(&mut self, key: KeyEvent) {
+        let Some(m) = self.current_message.clone() else {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter
+            ) {
+                self.screen = Screen::MessageList;
+            }
+            return;
+        };
         match key.code {
             KeyCode::Char('r') => {
-                if let Some(m) = self.current_message.clone() {
-                    self.begin_compose_post(Some((m.id, reply_subject(&m.subject))));
-                }
+                self.begin_compose_post(Some((m.id, reply_subject(&m.subject))));
             }
-            KeyCode::Char('d') if self.user.is_admin() => self.delete_current_message().await,
+            KeyCode::Char('e') if self.can_edit(&m) => self.begin_edit_post(&m),
+            KeyCode::Char('d') if self.can_delete(&m) => {
+                self.delete_post(m.id, &m.subject, true).await;
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter => {
                 self.screen = Screen::MessageList
             }
@@ -1157,19 +1184,65 @@ impl App {
         }
     }
 
-    async fn delete_current_message(&mut self) {
-        let Some(m) = self.current_message.clone() else {
-            return;
+    /// Whether the composer is editing an existing post rather than creating one
+    /// (#92), for the UI to title the screen.
+    pub fn is_editing_post(&self) -> bool {
+        self.edit_target.is_some()
+    }
+
+    /// Whether the current user may edit this post: its author, on an unlocked
+    /// board. (Admins moderate via delete/pin, not by editing others' text.)
+    fn can_edit(&self, m: &Message) -> bool {
+        m.author_id == self.user.id && !self.current_board.as_ref().is_some_and(|b| b.locked)
+    }
+
+    /// Whether the current user may delete this post: an admin (any post), or
+    /// the author on an unlocked board.
+    fn can_delete(&self, m: &Message) -> bool {
+        self.user.is_admin()
+            || (m.author_id == self.user.id
+                && !self.current_board.as_ref().is_some_and(|b| b.locked))
+    }
+
+    /// Open the composer to edit an existing post, prefilled with its text.
+    fn begin_edit_post(&mut self, m: &Message) {
+        let mut subject = Field::new("Subject", false);
+        subject.value = m.subject.clone();
+        self.form = Form::new(vec![subject]);
+        self.body = crate::app::textarea::TextArea::from_text(&m.body);
+        self.body_focused = false;
+        self.reply_parent = None;
+        self.edit_target = Some(m.id);
+        self.screen = Screen::ComposePost;
+    }
+
+    /// Delete a post: the admin path is unscoped; a non-admin can only delete
+    /// their own, on an unlocked board (`delete_own_message` enforces both). The
+    /// federation withdrawal is built before the delete and dispatched after, so
+    /// subscribers are told to drop it only once it's actually gone (#133).
+    async fn delete_post(&mut self, id: i64, subject: &str, from_reader: bool) {
+        let pending = self.prepare_board_delete(id).await;
+        let removed = if self.user.is_admin() {
+            boards::delete_message(&self.pool, id).await
+        } else {
+            boards::delete_own_message(&self.pool, id, &self.user).await
         };
-        let pending = self.prepare_board_delete(m.id).await;
-        match boards::delete_message(&self.pool, m.id).await {
+        match removed {
             Ok(true) => {
-                self.dispatch_board_delete(pending, m.id).await;
+                self.dispatch_board_delete(pending, id).await;
                 self.reload_messages().await;
-                self.screen = Screen::MessageList;
-                self.status = format!("Deleted post '{}'.", truncate_status(&m.subject));
+                if from_reader {
+                    self.screen = Screen::MessageList;
+                }
+                self.status = format!("Deleted post '{}'.", truncate_status(subject));
             }
-            Ok(false) => self.status = "Post already gone.".into(),
+            Ok(false) => {
+                self.status = if self.current_board.as_ref().is_some_and(|b| b.locked) {
+                    "This board is locked.".into()
+                } else {
+                    "Post already gone.".into()
+                };
+            }
             Err(e) => self.status = format!("Could not delete: {e}"),
         }
     }
@@ -1214,23 +1287,6 @@ impl App {
         self.body = crate::app::textarea::TextArea::new();
         self.body_focused = false;
         self.screen = Screen::ComposePost;
-    }
-
-    async fn delete_selected_message(&mut self) {
-        let Some(item) = self.messages.get(self.msg_sel).cloned() else {
-            return;
-        };
-        let msg = item.message;
-        let pending = self.prepare_board_delete(msg.id).await;
-        match boards::delete_message(&self.pool, msg.id).await {
-            Ok(true) => {
-                self.dispatch_board_delete(pending, msg.id).await;
-                self.reload_messages().await;
-                self.status = format!("Deleted post '{}'.", truncate_status(&msg.subject));
-            }
-            Ok(false) => self.status = "Post already gone.".into(),
-            Err(e) => self.status = format!("Could not delete: {e}"),
-        }
     }
 
     async fn toggle_pin_selected(&mut self) {
@@ -1311,6 +1367,7 @@ impl App {
 
     async fn on_compose_post(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
+            self.edit_target = None; // cancel an in-progress edit too
             self.screen = Screen::MessageList;
             return;
         }
@@ -1324,6 +1381,12 @@ impl App {
         let body = self.body.text().trim().to_string();
         if subject.is_empty() {
             self.status = "Subject cannot be empty.".into();
+            return;
+        }
+        // An edit reuses this screen but goes through the author-scoped update
+        // instead of creating a new post (#92).
+        if let Some(id) = self.edit_target {
+            self.submit_edit(id, &subject, &body).await;
             return;
         }
         let Some(board_id) = self.current_board.as_ref().map(|b| b.id) else {
@@ -1362,6 +1425,46 @@ impl App {
                 self.status = "You're posting too quickly — please slow down.".into()
             }
             Err(e) => self.status = format!("Could not post: {e}"),
+        }
+    }
+
+    /// Apply an author's edit (#92). Returns to the board on success; a `false`
+    /// result means the post is no longer the user's to edit (locked board, or
+    /// deleted underneath them), which the message explains.
+    async fn submit_edit(&mut self, id: i64, subject: &str, body: &str) {
+        match boards::edit_own_message(
+            &self.pool,
+            id,
+            &self.user,
+            subject,
+            body,
+            &self.config.limits,
+        )
+        .await
+        {
+            Ok(true) => {
+                self.edit_target = None;
+                self.reload_messages().await;
+                // Keep the reader in sync if it's still showing this post.
+                if let Ok(fresh) = boards::get_message(&self.pool, id).await {
+                    self.current_message = Some(fresh);
+                }
+                self.screen = Screen::MessageList;
+                self.status = "Post edited.".into();
+            }
+            Ok(false) => {
+                self.edit_target = None;
+                self.status = if self.current_board.as_ref().is_some_and(|b| b.locked) {
+                    "This board is locked.".into()
+                } else {
+                    "That post can no longer be edited.".into()
+                };
+                self.screen = Screen::MessageList;
+            }
+            Err(AppError::FieldTooLong(field, max)) => {
+                self.status = format!("{field} is too long (max {max}) — shorten it.")
+            }
+            Err(e) => self.status = format!("Could not edit: {e}"),
         }
     }
 
