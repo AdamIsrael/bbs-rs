@@ -80,6 +80,8 @@ pub struct App {
     pub remote_boards: Vec<crate::services::federation::mirror::Board>,
     pub remote_board_sel: usize,
     pub mirror_posts: Vec<crate::services::federation::mirror::Post>,
+    /// Posts we submitted to this board that it hasn't announced back yet (#131).
+    pub mirror_pending: Vec<crate::services::federation::remote_posting::Pending>,
     pub mirror_sel: usize,
     pub current_remote_board: Option<crate::services::federation::mirror::Board>,
 
@@ -247,6 +249,7 @@ impl App {
             remote_boards: Vec::new(),
             remote_board_sel: 0,
             mirror_posts: Vec::new(),
+            mirror_pending: Vec::new(),
             mirror_sel: 0,
             current_remote_board: None,
             boards: Vec::new(),
@@ -315,6 +318,7 @@ impl App {
             Screen::Timeline => self.on_timeline(key).await,
             Screen::RemoteBoards => self.on_remote_boards(key).await,
             Screen::RemoteBoardPosts => self.on_remote_board_posts(key).await,
+            Screen::ComposeRemotePost => self.on_compose_remote_post(key).await,
             Screen::FollowRemote => self.on_follow_remote(key).await,
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
@@ -682,6 +686,12 @@ impl App {
         };
         match crate::services::federation::mirror::recent(&self.pool, &board.group_uri, 100).await {
             Ok(posts) => {
+                self.mirror_pending = crate::services::federation::remote_posting::pending(
+                    &self.pool,
+                    &board.group_uri,
+                )
+                .await
+                .unwrap_or_default();
                 self.mirror_posts = posts;
                 self.mirror_sel = 0;
                 self.current_remote_board = Some(board);
@@ -691,16 +701,96 @@ impl App {
         }
     }
 
+    /// Start a submission to the open remote board (#131). The guards that would
+    /// fail at submit are checked here instead, so the user learns why up front
+    /// rather than after typing a post.
+    fn begin_compose_remote_post(&mut self) {
+        if self.user.is_guest() {
+            self.status = "Guests cannot post — register an account first.".into();
+            return;
+        }
+        let Some(board) = self.current_remote_board.as_ref() else {
+            return;
+        };
+        if board.state != "accepted" {
+            self.status = format!(
+                "{} hasn't accepted the subscription yet — nothing can be posted there.",
+                board.handle
+            );
+            return;
+        }
+        self.form = Form::new(vec![
+            Field::new("Subject", false),
+            Field::new("Body", false),
+        ]);
+        self.screen = Screen::ComposeRemotePost;
+    }
+
+    async fn on_compose_remote_post(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::RemoteBoardPosts,
+            KeyCode::Enter if self.form.on_last() => self.submit_remote_post().await,
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.form.next_field(),
+            KeyCode::BackTab | KeyCode::Up => self.form.prev_field(),
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_remote_post(&mut self) {
+        let Some(board) = self.current_remote_board.clone() else {
+            return;
+        };
+        let subject = self.form.value(0).to_string();
+        let body = self.form.value(1).to_string();
+        if subject.is_empty() || body.is_empty() {
+            self.status = "Subject and body are both required.".into();
+            return;
+        }
+        let origin = match crate::services::federation::Origin::from_config(&self.config.federation)
+        {
+            Ok(o) => o,
+            Err(e) => {
+                self.status = format!("Federation origin invalid: {e}");
+                return;
+            }
+        };
+        match crate::services::federation::remote_posting::submit(
+            &self.pool,
+            &origin,
+            &self.user,
+            &board.group_uri,
+            &subject,
+            &body,
+            &self.config.limits,
+        )
+        .await
+        {
+            Ok(_) => {
+                self.status = format!(
+                    "Sent to {} — it appears here once the board publishes it.",
+                    board.handle
+                );
+                self.open_remote_board().await;
+            }
+            Err(e) => self.status = format!("Could not post: {e}"),
+        }
+    }
+
     async fn on_remote_board_posts(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.mirror_sel = self.mirror_sel.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.mirror_sel + 1 < self.mirror_posts.len() {
+                // The list is pending submissions followed by mirrored posts, so
+                // the selection runs over both.
+                if self.mirror_sel + 1 < self.mirror_pending.len() + self.mirror_posts.len() {
                     self.mirror_sel += 1;
                 }
             }
+            KeyCode::Char('p') => self.begin_compose_remote_post(),
             KeyCode::Char('r') => self.open_remote_board().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
                 self.current_remote_board = None;

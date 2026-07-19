@@ -13,6 +13,7 @@ pub enum Screen {
     FollowRemote,
     RemoteBoards,
     RemoteBoardPosts,
+    ComposeRemotePost,
     BoardList,
     MessageList,
     ReadMessage,

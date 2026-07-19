@@ -60,6 +60,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FollowRemote => render_form(f, body, " Follow Remote Account ", app),
         Screen::RemoteBoards => render_remote_boards(f, body, app),
         Screen::RemoteBoardPosts => render_remote_board_posts(f, body, app),
+        Screen::ComposeRemotePost => render_form(f, body, " Post to Remote Board ", app),
         Screen::ComposeOneliner => render_form(f, body, " New Oneliner ", app),
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
@@ -400,7 +401,7 @@ fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
         Some(b) => format!(" {} · mirrored copy ", truncate(&b.handle, 40)),
         None => " Remote Board ".to_string(),
     };
-    if app.mirror_posts.is_empty() {
+    if app.mirror_posts.is_empty() && app.mirror_pending.is_empty() {
         let pending = app
             .current_remote_board
             .as_ref()
@@ -421,6 +422,33 @@ fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
     let width = inner.max(1);
     let mut lines: Vec<Line> = Vec::new();
     let mut header_rows: Vec<usize> = Vec::new();
+    // Our own submissions the board hasn't published yet (#131), first because
+    // they're the newest thing the user did — and marked, because we are not the
+    // ones who decide they're published.
+    for p in &app.mirror_pending {
+        header_rows.push(lines.len());
+        lines.push(Line::from(vec![
+            Span::styled(p.subject.clone(), Style::default().fg(app.theme.accent)),
+            Span::styled(
+                format!("  · @{} · {}", p.author_handle, fmt_time(p.created_at)),
+                Style::default().fg(app.theme.dim),
+            ),
+            Span::styled(
+                "  [sent — awaiting the board]",
+                Style::default().fg(app.theme.warning_fg),
+            ),
+        ]));
+        for para in p.body.lines() {
+            if para.is_empty() {
+                lines.push(Line::from(""));
+            } else {
+                for row in wrap_text(para, width) {
+                    lines.push(Line::from(row));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
     for p in &app.mirror_posts {
         header_rows.push(lines.len());
         lines.push(Line::from(vec![
@@ -1082,6 +1110,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Timeline => "Timeline",
         Screen::RemoteBoards => "Remote Boards",
         Screen::RemoteBoardPosts => "Remote Board",
+        Screen::ComposeRemotePost => "Post",
         Screen::FollowRemote => "Follow",
         Screen::BoardList => "Boards",
         Screen::MessageList => "Messages",
@@ -1120,7 +1149,8 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
         Screen::Timeline => " ↑/↓ scroll · f follow · r refresh · Esc back ",
         Screen::RemoteBoards => " ↑/↓ select · Enter open · r refresh · Esc back ",
-        Screen::RemoteBoardPosts => " ↑/↓ scroll · r refresh · Esc back ",
+        Screen::RemoteBoardPosts => " ↑/↓ scroll · p post · r refresh · Esc back ",
+        Screen::ComposeRemotePost => " Tab/Enter next field · Enter on Body sends · Esc cancel ",
         Screen::FollowRemote => " type user@host · Enter follow · Esc cancel ",
         Screen::BoardList => {
             if is_admin {
