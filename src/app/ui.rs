@@ -58,6 +58,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Oneliners => render_oneliners(f, body, app),
         Screen::Timeline => render_timeline(f, body, app),
         Screen::FollowRemote => render_form(f, body, " Follow Remote Account ", app),
+        Screen::RemoteBoards => render_remote_boards(f, body, app),
+        Screen::RemoteBoardPosts => render_remote_board_posts(f, body, app),
         Screen::ComposeOneliner => render_form(f, body, " New Oneliner ", app),
         Screen::BoardList => render_boards(f, body, app),
         Screen::MessageList => render_messages(f, body, app),
@@ -336,6 +338,114 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         .copied()
         .unwrap_or(usize::MAX);
     render_selectable(f, area, " Timeline ", lines, selected);
+}
+
+/// Remote boards we subscribe to. These are *someone else's* boards, cached —
+/// the title and the per-row marker say so, because nothing else on this screen
+/// distinguishes them from local boards at a glance.
+fn render_remote_boards(f: &mut Frame, area: Rect, app: &App) {
+    if app.remote_boards.is_empty() {
+        return placeholder(
+            f,
+            area,
+            " Remote Boards ",
+            "Not subscribed to any remote boards. An operator can subscribe with \
+             `bbsctl ap-follow <board@host>`.",
+        );
+    }
+    let lines: Vec<Line> = app
+        .remote_boards
+        .iter()
+        .map(|b| {
+            let mut spans = vec![Span::raw(format!("{:<32}", truncate(&b.handle, 32)))];
+            // A board followed but not yet accepted is legitimately empty.
+            // Saying so keeps that from reading as a bug.
+            if b.state != "accepted" {
+                spans.push(Span::styled(
+                    format!("  [{} — no posts until accepted]", b.state),
+                    Style::default().fg(app.theme.warning_fg),
+                ));
+            } else if b.posts == 0 {
+                spans.push(Span::styled(
+                    "  (nothing mirrored yet)",
+                    Style::default().fg(app.theme.dim),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(
+                        "  {} post{}  · latest {}",
+                        b.posts,
+                        if b.posts == 1 { "" } else { "s" },
+                        b.latest.map(fmt_time).unwrap_or_default()
+                    ),
+                    Style::default().fg(app.theme.dim),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    render_selectable(
+        f,
+        area,
+        " Remote Boards (mirrored) ",
+        lines,
+        app.remote_board_sel,
+    );
+}
+
+/// Mirrored posts of one remote board. Same header-plus-body shape as the
+/// timeline, since both render already-degraded remote text.
+fn render_remote_board_posts(f: &mut Frame, area: Rect, app: &App) {
+    let title = match app.current_remote_board.as_ref() {
+        Some(b) => format!(" {} · mirrored copy ", truncate(&b.handle, 40)),
+        None => " Remote Board ".to_string(),
+    };
+    if app.mirror_posts.is_empty() {
+        let pending = app
+            .current_remote_board
+            .as_ref()
+            .is_some_and(|b| b.state != "accepted");
+        return placeholder(
+            f,
+            area,
+            &title,
+            if pending {
+                "This subscription hasn't been accepted by the remote server yet. \
+                 Posts appear once it is."
+            } else {
+                "Nothing mirrored from this board yet. Posts arrive as the board announces them."
+            },
+        );
+    }
+    let inner = area.width.saturating_sub(2) as usize;
+    let width = inner.max(1);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut header_rows: Vec<usize> = Vec::new();
+    for p in &app.mirror_posts {
+        header_rows.push(lines.len());
+        lines.push(Line::from(vec![
+            Span::styled(p.subject.clone(), Style::default().fg(app.theme.accent)),
+            Span::styled(
+                format!("  · @{} · {}", p.author_handle, fmt_time(p.published)),
+                Style::default().fg(app.theme.dim),
+            ),
+        ]));
+        for para in p.content.lines() {
+            if para.is_empty() {
+                lines.push(Line::from(""));
+            } else {
+                for row in wrap_text(para, width) {
+                    lines.push(Line::from(row));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    let selected = header_rows
+        .get(app.mirror_sel)
+        .copied()
+        .unwrap_or(usize::MAX);
+    render_selectable(f, area, &title, lines, selected);
 }
 
 fn render_boards(f: &mut Frame, area: Rect, app: &App) {
@@ -970,6 +1080,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Oneliners => "Oneliners",
         Screen::ComposeOneliner => "New Oneliner",
         Screen::Timeline => "Timeline",
+        Screen::RemoteBoards => "Remote Boards",
+        Screen::RemoteBoardPosts => "Remote Board",
         Screen::FollowRemote => "Follow",
         Screen::BoardList => "Boards",
         Screen::MessageList => "Messages",
@@ -1007,6 +1119,8 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::Oneliners => " n new · Esc back ",
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
         Screen::Timeline => " ↑/↓ scroll · f follow · r refresh · Esc back ",
+        Screen::RemoteBoards => " ↑/↓ select · Enter open · r refresh · Esc back ",
+        Screen::RemoteBoardPosts => " ↑/↓ scroll · r refresh · Esc back ",
         Screen::FollowRemote => " type user@host · Enter follow · Esc cancel ",
         Screen::BoardList => {
             if is_admin {

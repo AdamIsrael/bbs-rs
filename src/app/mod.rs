@@ -74,6 +74,14 @@ pub struct App {
     // Federated timeline: cached statuses from followed remote accounts.
     pub timeline: Vec<crate::services::federation::timeline::Entry>,
     pub timeline_sel: usize,
+    // Subscribed remote boards and the mirrored posts of the open one (#132).
+    // Deliberately separate from `boards`/`messages`: these are cached copies of
+    // someone else's board, not content we're the authority for.
+    pub remote_boards: Vec<crate::services::federation::mirror::Board>,
+    pub remote_board_sel: usize,
+    pub mirror_posts: Vec<crate::services::federation::mirror::Post>,
+    pub mirror_sel: usize,
+    pub current_remote_board: Option<crate::services::federation::mirror::Board>,
 
     // Boards
     pub boards: Vec<Board>,
@@ -181,6 +189,7 @@ impl App {
         // federation is on — otherwise there's nothing to show.
         if config.federation.enabled {
             menu.push(MenuItem::Timeline);
+            menu.push(MenuItem::RemoteBoards);
         }
         if f.private_mail {
             menu.push(MenuItem::Mail);
@@ -235,6 +244,11 @@ impl App {
             oneliners: Vec::new(),
             timeline: Vec::new(),
             timeline_sel: 0,
+            remote_boards: Vec::new(),
+            remote_board_sel: 0,
+            mirror_posts: Vec::new(),
+            mirror_sel: 0,
+            current_remote_board: None,
             boards: Vec::new(),
             board_sel: 0,
             current_board: None,
@@ -299,6 +313,8 @@ impl App {
             Screen::Oneliners => self.on_oneliners(key).await,
             Screen::ComposeOneliner => self.on_compose_oneliner(key).await,
             Screen::Timeline => self.on_timeline(key).await,
+            Screen::RemoteBoards => self.on_remote_boards(key).await,
+            Screen::RemoteBoardPosts => self.on_remote_board_posts(key).await,
             Screen::FollowRemote => self.on_follow_remote(key).await,
             Screen::BoardList => self.on_board_list(key).await,
             Screen::MessageList => self.on_message_list(key).await,
@@ -349,6 +365,7 @@ impl App {
             MenuItem::Boards => self.open_boards().await,
             MenuItem::Oneliners => self.open_oneliners().await,
             MenuItem::Timeline => self.open_timeline().await,
+            MenuItem::RemoteBoards => self.open_remote_boards().await,
             MenuItem::Mail => {
                 if self.user.is_guest() {
                     self.status =
@@ -621,6 +638,74 @@ impl App {
             }
             KeyCode::Char('r') => self.open_timeline().await,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    // ---- Remote boards (#132) --------------------------------------------
+    //
+    // A sibling of the local board screens, not a reuse of them. Mirrored posts
+    // live outside `messages` on purpose — they're foreign objects we cache, and
+    // sharing the board UI wholesale would blur a line worth keeping visible.
+
+    async fn open_remote_boards(&mut self) {
+        match crate::services::federation::mirror::boards(&self.pool).await {
+            Ok(list) => {
+                self.remote_boards = list;
+                self.remote_board_sel = 0;
+                self.screen = Screen::RemoteBoards;
+            }
+            Err(e) => self.status = format!("Error loading remote boards: {e}"),
+        }
+    }
+
+    async fn on_remote_boards(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.remote_board_sel = self.remote_board_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.remote_board_sel + 1 < self.remote_boards.len() {
+                    self.remote_board_sel += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Right => self.open_remote_board().await,
+            KeyCode::Char('r') => self.open_remote_boards().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    async fn open_remote_board(&mut self) {
+        let Some(board) = self.remote_boards.get(self.remote_board_sel).cloned() else {
+            return;
+        };
+        match crate::services::federation::mirror::recent(&self.pool, &board.group_uri, 100).await {
+            Ok(posts) => {
+                self.mirror_posts = posts;
+                self.mirror_sel = 0;
+                self.current_remote_board = Some(board);
+                self.screen = Screen::RemoteBoardPosts;
+            }
+            Err(e) => self.status = format!("Error loading posts: {e}"),
+        }
+    }
+
+    async fn on_remote_board_posts(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mirror_sel = self.mirror_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.mirror_sel + 1 < self.mirror_posts.len() {
+                    self.mirror_sel += 1;
+                }
+            }
+            KeyCode::Char('r') => self.open_remote_board().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
+                self.current_remote_board = None;
+                self.screen = Screen::RemoteBoards;
+            }
             _ => {}
         }
     }

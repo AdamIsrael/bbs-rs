@@ -1667,6 +1667,54 @@ pub mod mirror {
         Ok(rows)
     }
 
+    /// A remote board we subscribe to, as the in-BBS screen lists it (#132).
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct Board {
+        /// `slug@host` — the handle a user would type.
+        pub handle: String,
+        pub group_uri: String,
+        /// `pending` until the remote side answers our `Follow` with an
+        /// `Accept`. A pending board is legitimately empty, which is why the
+        /// screen shows this rather than letting it read as a bug.
+        pub state: String,
+        pub posts: i64,
+        /// When the newest mirrored post was published; `None` while empty.
+        pub latest: Option<i64>,
+    }
+
+    /// Remote boards any local user subscribes to, with mirror stats.
+    ///
+    /// A followed actor counts as a board when we recorded its type as `Group`
+    /// (migration 0019) — or, for follows predating that column, when it has
+    /// actually announced something. The second clause is what keeps boards
+    /// followed before the upgrade from vanishing off their own screen.
+    pub async fn boards(pool: &SqlitePool) -> Result<Vec<Board>> {
+        // `MIN(f.state)`: several local users may follow the same board with
+        // different states. Mirroring is instance-wide, so if any edge is
+        // accepted the board is live for everyone — and 'accepted' sorts before
+        // 'pending', so MIN picks it. Without an aggregate here SQLite would
+        // take an arbitrary row's state, which is a coin flip in exactly the
+        // case the screen is trying to explain.
+        let rows = sqlx::query_as::<_, Board>(
+            "SELECT u.username AS handle, \
+                    f.object_uri AS group_uri, \
+                    MIN(f.state) AS state, \
+                    (SELECT COUNT(*) FROM ap_board_posts p WHERE p.group_uri = f.object_uri) \
+                      AS posts, \
+                    (SELECT MAX(published) FROM ap_board_posts p WHERE p.group_uri = f.object_uri) \
+                      AS latest \
+               FROM ap_follows f \
+               JOIN users u ON u.actor_uri = f.object_uri AND u.is_remote = 1 \
+              WHERE u.actor_kind = 'Group' \
+                 OR EXISTS (SELECT 1 FROM ap_board_posts p WHERE p.group_uri = f.object_uri) \
+              GROUP BY f.object_uri \
+              ORDER BY latest IS NULL, latest DESC, handle",
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// How many mirrored posts a board has (operator visibility / tests).
     pub async fn count(pool: &SqlitePool, group_uri: &str) -> Result<i64> {
         Ok(

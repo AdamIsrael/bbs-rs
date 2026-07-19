@@ -203,6 +203,36 @@ Phase 6 (#112) is sliced:
   effect of a policy change. Operator surface: `ap-reports`, `ap-resolve`, `ap-block --severity`,
   `ap-purge`.
 
+### #132 — in-BBS screen for mirrored remote boards (post-epic follow-up)
+
+Mirrored posts were reachable only through `bbsctl ap-board-posts`, so board syndication was invisible
+to the users it's for. **Remote Boards** on the main menu lists subscribed boards and their mirrored
+posts.
+
+**A sibling screen, not a reuse of the board screens.** Mirrored posts live in `ap_board_posts`, outside
+`messages`, because they're foreign objects we cache rather than content we're the authority for.
+Rendering them through the local board UI would blur exactly the line that design decision draws — so the
+screen is separate, its titles say "mirrored", and it offers no post or moderate action.
+
+**What the work actually turned on: nothing recorded that an actor was a `Group`.** Remote `Person`s and
+`Group`s are both `users` rows, which was fine while both were only ever reached *by* their actor URI —
+but "which of my follows are boards?" had no answer. Migration 0019 adds `users.actor_kind`, filled from
+the fetched actor document (which is why `Person::kind` is a lenient `String`).
+
+Two deliberate choices there:
+
+- **Nullable, not defaulted to `'Person'`.** A default would be a guess about rows we never recorded a
+  type for, and a wrong guess silently hides a board from its own screen. NULL honestly means "unknown".
+- **Backfill on evidence, not assumption.** The migration marks as `Group` only those actors that have
+  actually announced a board post to us. For anything it can't prove, `mirror::boards` falls back to the
+  same evidence at query time, so a board followed before the upgrade doesn't vanish.
+
+Follow state is surfaced (`pending` vs `accepted`) because a board awaiting the remote server's `Accept`
+is legitimately empty, and an unexplained empty screen reads as a bug. Where several local users follow
+the same board in different states, the query takes `MIN(state)` — mirroring is instance-wide, so if any
+edge is accepted the board is live for everyone; without an aggregate SQLite would return an arbitrary
+row's state, which is a coin flip in precisely the case the screen is trying to explain.
+
 ### #133 — `Announce`-wrapped lifecycle (post-epic follow-up)
 
 A board relays its members' `Delete`/`Update` so a post withdrawn upstream doesn't linger in every

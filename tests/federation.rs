@@ -3345,3 +3345,223 @@ async fn our_announced_delete_is_one_we_would_honor() {
         "the post we announced as deleted left the mirror"
     );
 }
+
+// ---- #132: in-BBS screen for mirrored remote boards -------------------------
+
+/// A subscribed board is listed with its post count and newest-post time.
+#[tokio::test]
+async fn subscribed_remote_boards_are_listed_with_stats() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "rustaceans@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    for (i, ts) in [(1, 1_782_907_200_i64), (2, 1_782_993_600)] {
+        mirror::insert(
+            &pool,
+            &format!("https://remote.social/p/{i}"),
+            &group,
+            "rustaceans@remote.social",
+            "bob@remote.social",
+            "https://remote.social/users/bob",
+            "Subject",
+            "body",
+            None,
+            ts,
+        )
+        .await
+        .unwrap();
+    }
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0].handle, "rustaceans@remote.social");
+    assert_eq!(boards[0].state, "accepted");
+    assert_eq!(boards[0].posts, 2);
+    assert_eq!(boards[0].latest, Some(1_782_993_600));
+}
+
+/// A followed *person* is not a board — the screen must not list them.
+#[tokio::test]
+async fn followed_people_are_not_listed_as_boards() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let person = insert_follower(&pool, "bob@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Person' WHERE actor_uri = ?")
+        .bind(&person)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &person,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        mirror::boards(&pool).await.unwrap().is_empty(),
+        "following a Person is not subscribing to a board"
+    );
+}
+
+/// A board subscribed *before* migration 0019 recorded actor types has a NULL
+/// kind. It must still appear, on the evidence of what it has announced —
+/// otherwise upgrading would silently empty this screen.
+#[tokio::test]
+async fn a_board_predating_actor_kind_is_still_listed() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "legacy@remote.social", "remote.social", None).await;
+    // Explicitly NULL: the state an upgraded install is actually in.
+    sqlx::query("UPDATE users SET actor_kind = NULL WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    mirror::insert(
+        &pool,
+        "https://remote.social/p/1",
+        &group,
+        "legacy@remote.social",
+        "bob@remote.social",
+        "https://remote.social/users/bob",
+        "Subject",
+        "body",
+        None,
+        1_782_907_200,
+    )
+    .await
+    .unwrap();
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1, "proven a board by what it announced");
+    assert_eq!(boards[0].posts, 1);
+}
+
+/// A pending subscription is listed with its state, so an empty board reads as
+/// "not accepted yet" rather than as a bug.
+#[tokio::test]
+async fn a_pending_board_subscription_is_listed_as_pending() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    let group = insert_follower(&pool, "slow@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::request(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0].state, "pending");
+    assert_eq!(boards[0].posts, 0);
+    assert_eq!(boards[0].latest, None);
+}
+
+/// When two local users follow the same board in different states, the board is
+/// live for the instance — so it must not be a coin flip which state shows.
+#[tokio::test]
+async fn a_board_followed_twice_reports_the_accepted_state() {
+    use bbs_rs::services::federation::{follows, mirror};
+
+    let pool = setup().await;
+    mint_local(&pool, "alice").await;
+    mint_local(&pool, "bob").await;
+    let group = insert_follower(&pool, "busy@remote.social", "remote.social", None).await;
+    sqlx::query("UPDATE users SET actor_kind = 'Group' WHERE actor_uri = ?")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    follows::request(
+        &pool,
+        "https://bbs.example.com/u/bob",
+        &group,
+        "https://bbs.example.com/f/2",
+    )
+    .await
+    .unwrap();
+    follows::accept(
+        &pool,
+        "https://bbs.example.com/u/alice",
+        &group,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+
+    let boards = mirror::boards(&pool).await.unwrap();
+    assert_eq!(boards.len(), 1, "one board, not one row per follower");
+    assert_eq!(boards[0].state, "accepted");
+}
+
+/// Fetching a remote actor records what kind it is (migration 0019), which is
+/// what lets a board be listed before it has announced anything.
+#[tokio::test]
+async fn fetching_a_group_actor_records_its_kind() {
+    use activitypub_federation::traits::Object;
+
+    let pool = setup().await;
+    let data = fed_data(&pool).await;
+    let doc: bbs_rs::web::ap_object::Person = serde_json::from_value(serde_json::json!({
+        "type": "Group",
+        "id": "https://remote.social/c/rustaceans",
+        "preferredUsername": "rustaceans",
+        "inbox": "https://remote.social/c/rustaceans/inbox",
+        "publicKey": {
+            "id": "https://remote.social/c/rustaceans#main-key",
+            "owner": "https://remote.social/c/rustaceans",
+            "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----\n",
+        },
+    }))
+    .unwrap();
+    bbs_rs::web::ap_object::FedActor::from_json(doc, &data)
+        .await
+        .unwrap();
+
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT actor_kind FROM users WHERE actor_uri = ?")
+            .bind("https://remote.social/c/rustaceans")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kind.as_deref(), Some("Group"));
+}
