@@ -545,6 +545,49 @@ impl App {
         }
     }
 
+    /// Build the `Announce{Delete}` for a board post that is *about* to be
+    /// deleted (#133), so subscribers can drop it from their mirrors.
+    ///
+    /// Split from the dispatch half because the activity has to be built while
+    /// the row still exists; the caller queues it only once the delete actually
+    /// succeeded. `None` when there's nothing to announce.
+    async fn prepare_board_delete(
+        &self,
+        message_id: i64,
+    ) -> Option<crate::services::federation::outbound::Prepared> {
+        let fed = &self.config.federation;
+        if !fed.enabled {
+            return None;
+        }
+        let origin = crate::services::federation::Origin::from_config(fed).ok()?;
+        match crate::services::federation::outbound::prepare_board_delete(
+            &self.pool, &origin, message_id,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("could not build Delete announcement for {message_id}: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// Queue a prepared withdrawal now that the post is gone locally.
+    async fn dispatch_board_delete(
+        &self,
+        prepared: Option<crate::services::federation::outbound::Prepared>,
+        message_id: i64,
+    ) {
+        let Some(p) = prepared else { return };
+        match crate::services::federation::outbound::dispatch(&self.pool, &p).await {
+            Ok(n) => {
+                tracing::info!("announced deletion of {message_id} to {n} subscriber inbox(es)")
+            }
+            Err(e) => tracing::warn!("could not announce deletion of {message_id}: {e:#}"),
+        }
+    }
+
     // ---- Timeline --------------------------------------------------------
 
     async fn open_timeline(&mut self) {
@@ -913,8 +956,10 @@ impl App {
         let Some(m) = self.current_message.clone() else {
             return;
         };
+        let pending = self.prepare_board_delete(m.id).await;
         match boards::delete_message(&self.pool, m.id).await {
             Ok(true) => {
+                self.dispatch_board_delete(pending, m.id).await;
                 self.reload_messages().await;
                 self.screen = Screen::MessageList;
                 self.status = format!("Deleted post '{}'.", truncate_status(&m.subject));
@@ -969,8 +1014,10 @@ impl App {
             return;
         };
         let msg = item.message;
+        let pending = self.prepare_board_delete(msg.id).await;
         match boards::delete_message(&self.pool, msg.id).await {
             Ok(true) => {
+                self.dispatch_board_delete(pending, msg.id).await;
                 self.reload_messages().await;
                 self.status = format!("Deleted post '{}'.", truncate_status(&msg.subject));
             }

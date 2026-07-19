@@ -631,6 +631,71 @@ pub mod objects {
         }
     }
 
+    /// A `Delete` as a board relays it: the **author** is the actor (they're the
+    /// one withdrawing), and the object is the post's permanent URI.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct DeletePage {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub actor: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub object: String,
+    }
+
+    /// The Group's `Announce{Delete}` (#133).
+    #[derive(Debug, Clone, Serialize)]
+    pub struct AnnounceDelete {
+        #[serde(rename = "@context")]
+        pub context: &'static str,
+        #[serde(rename = "type")]
+        pub kind: &'static str,
+        pub id: String,
+        pub actor: String,
+        pub to: Vec<String>,
+        pub cc: Vec<String>,
+        pub object: DeletePage,
+    }
+
+    /// Build the Group's `Announce{Delete}` for a withdrawn board post, so
+    /// subscribers drop it from their mirrors (#133).
+    ///
+    /// The inner `Delete`'s actor is the **author**, not the Group — that's what
+    /// lets a receiver authorize the withdrawal against the post's attribution
+    /// rather than taking the relaying board's word for it.
+    pub fn board_delete(
+        origin: &Origin,
+        slug: &str,
+        author_uri: &str,
+        post_ap_id: &str,
+    ) -> AnnounceDelete {
+        let group_uri = origin.group(slug);
+        let followers = origin.group_followers(slug);
+        let to = vec![PUBLIC.to_string()];
+        let cc = vec![followers];
+        let delete = DeletePage {
+            context: AS_CONTEXT,
+            kind: "Delete",
+            id: format!("{post_ap_id}/delete"),
+            actor: author_uri.to_string(),
+            to: to.clone(),
+            cc: cc.clone(),
+            object: post_ap_id.to_string(),
+        };
+        AnnounceDelete {
+            context: AS_CONTEXT,
+            kind: "Announce",
+            id: format!("{post_ap_id}/delete/announce"),
+            actor: group_uri,
+            to,
+            cc,
+            object: delete,
+        }
+    }
+
     /// Wrap a board `Page` in the Group's `Announce{Create{Page}}` — the object a
     /// subscriber receives (and the outbox item). The Group signs and owns the
     /// Announce; the inner Create keeps the author's attribution intact.
@@ -1210,6 +1275,78 @@ pub mod outbound {
         }
         Ok(queued)
     }
+
+    /// A built, addressed activity waiting to be queued.
+    ///
+    /// Exists because announcing a *deletion* has an ordering problem the other
+    /// fan-outs don't: everything the activity needs (the post's `ap_id`, its
+    /// board, its author) lives in the row that's about to disappear. So the
+    /// activity is built first and queued after the delete succeeds — never the
+    /// reverse, which would tell subscribers to drop a post we then failed to
+    /// remove ourselves.
+    pub struct Prepared {
+        actor_uri: String,
+        activity: String,
+        activity_id: String,
+        inboxes: Vec<String>,
+    }
+
+    /// Build the Group's `Announce{Delete}` for a board post *before* it is
+    /// deleted (#133). `None` when there's nothing to announce: a post that
+    /// never federated (no `ap_id`), a reply (replies don't syndicate yet), or a
+    /// board with no remote subscribers.
+    pub async fn prepare_board_delete(
+        pool: &SqlitePool,
+        origin: &Origin,
+        message_id: i64,
+    ) -> Result<Option<Prepared>> {
+        let msg = crate::services::boards::get_message(pool, message_id).await?;
+        if msg.parent_id.is_some() {
+            return Ok(None);
+        }
+        // Deliberately *not* `ensure_message_ap_id`: a post that never had a URI
+        // was never syndicated, so there is nothing for anyone to withdraw.
+        let Some(ap_id): Option<String> =
+            sqlx::query_scalar("SELECT ap_id FROM messages WHERE id = ?")
+                .bind(message_id)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+        else {
+            return Ok(None);
+        };
+
+        let keys = ensure_group_keys(pool, origin, msg.board_id).await?;
+        let inboxes = follows::follower_inboxes(pool, &keys.actor_uri).await?;
+        if inboxes.is_empty() {
+            return Ok(None);
+        }
+
+        let author_uri: String =
+            sqlx::query_scalar("SELECT actor_uri FROM users WHERE id = ? AND is_remote = 1")
+                .bind(msg.author_id)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+                .unwrap_or_else(|| origin.person(&msg.author_name));
+        let announce = objects::board_delete(origin, &keys.slug, &author_uri, &ap_id);
+        let activity = serde_json::to_string(&announce)
+            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce{{Delete}}: {e}")))?;
+        Ok(Some(Prepared {
+            actor_uri: keys.actor_uri,
+            activity,
+            activity_id: announce.id,
+            inboxes,
+        }))
+    }
+
+    /// Queue a [`Prepared`] activity to every addressed inbox.
+    pub async fn dispatch(pool: &SqlitePool, p: &Prepared) -> Result<usize> {
+        for inbox in &p.inboxes {
+            queue::enqueue(pool, &p.actor_uri, inbox, &p.activity, Some(&p.activity_id)).await?;
+        }
+        Ok(p.inboxes.len())
+    }
 }
 
 /// Content degradation: fediverse content is HTML, a terminal is not.
@@ -1690,6 +1827,89 @@ pub mod lifecycle {
             return Ok(Some(Target::Mail));
         }
         Ok(None)
+    }
+
+    /// Delete a mirrored post on a board's relayed instruction — the
+    /// `Announce{Delete}` path (#133).
+    ///
+    /// Deliberately much narrower than [`delete`]. A relayed activity is signed
+    /// by the *Group*, not by the author, so the Group's signature alone would
+    /// let any board we follow withdraw anything it names. Two conditions are
+    /// required instead:
+    ///
+    /// 1. the row was announced by **this** Group (`group_uri`), so a board can
+    ///    only act on content it actually hosts; and
+    /// 2. the inner activity's actor is either the post's author or the Group
+    ///    itself — a board may moderate its own content, but it can't forge a
+    ///    withdrawal on behalf of a third party.
+    ///
+    /// Only `ap_board_posts` is reachable. Statuses, DMs and our own boards'
+    /// `messages` are not a board's to withdraw, so they are never touched here
+    /// — see [`announced_hits_local_content`].
+    pub async fn delete_announced(
+        pool: &SqlitePool,
+        group_uri: &str,
+        actor_uri: &str,
+        object_id: &str,
+    ) -> Result<bool> {
+        let n = sqlx::query(
+            "DELETE FROM ap_board_posts WHERE ap_id = ? AND group_uri = ? \
+             AND (author_uri = ? OR group_uri = ?)",
+        )
+        .bind(object_id)
+        .bind(group_uri)
+        .bind(actor_uri)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Apply a board's relayed edit to a mirrored post. Same authorization rules
+    /// as [`delete_announced`].
+    pub async fn update_announced(
+        pool: &SqlitePool,
+        group_uri: &str,
+        actor_uri: &str,
+        object_id: &str,
+        subject: &str,
+        content: &str,
+    ) -> Result<bool> {
+        let n = sqlx::query(
+            "UPDATE ap_board_posts SET subject = ?, content = ? WHERE ap_id = ? AND group_uri = ? \
+             AND (author_uri = ? OR group_uri = ?)",
+        )
+        .bind(subject)
+        .bind(content)
+        .bind(object_id)
+        .bind(group_uri)
+        .bind(actor_uri)
+        .bind(actor_uri)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Whether a relayed activity named content we're the authority for: a post
+    /// on one of our own boards, or a status/DM sent directly to us.
+    ///
+    /// A remote board has no standing over any of these, so the caller refuses
+    /// the activity — but a refusal worth logging is worth distinguishing from
+    /// "we've never heard of this object", which is the far more common case.
+    pub async fn announced_hits_local_content(pool: &SqlitePool, object_id: &str) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM messages   WHERE ap_id = ?) \
+                  + (SELECT COUNT(*) FROM ap_timeline WHERE ap_id = ?) \
+                  + (SELECT COUNT(*) FROM mail        WHERE ap_id = ?)",
+        )
+        .bind(object_id)
+        .bind(object_id)
+        .bind(object_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(n > 0)
     }
 }
 

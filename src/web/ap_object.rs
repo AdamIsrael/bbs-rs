@@ -454,9 +454,27 @@ pub struct AnnouncedCreate {
     object: AnnouncedPage,
 }
 
-/// A remote board Group's `Announce{Create{Page}}` — how a followed board
-/// syndicates a post to us (FEP-1b12, #111). The Group's signature is the
-/// authority; the inner author rides along attributed.
+/// What a board Group relays to its subscribers. A new post is the common case,
+/// but a board also propagates its members' withdrawals and edits so a post
+/// deleted upstream doesn't linger in every subscriber's mirror (#133).
+///
+/// `untagged` is safe here for the same reason it is on [`InboundActivity`]:
+/// each variant's `type` is a strict unit type, so exactly one can match. An
+/// `Announce` wrapping anything else falls to `Other` and is logged, not
+/// silently dropped.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AnnouncedObject {
+    Create(AnnouncedCreate),
+    Delete(Delete),
+    Update(Update),
+    Other(serde_json::Value),
+}
+
+/// A remote board Group's `Announce{…}` — how a followed board syndicates
+/// activity to us (FEP-1b12, #111). The Group's signature is the authority for
+/// *relaying*; what that authority extends to depends on the inner activity —
+/// see [`lifecycle::delete_announced`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Announce {
@@ -464,7 +482,7 @@ pub struct Announce {
     kind: AnnounceType,
     id: Url,
     actor: ObjectId<FedActor>,
-    object: AnnouncedCreate,
+    object: AnnouncedObject,
 }
 
 /// An object reference: either a bare URI or an embedded object with an `id`.
@@ -1025,9 +1043,11 @@ impl Activity for Announce {
         Ok(())
     }
 
-    /// Mirror a post from a followed remote board. The **Group's** signature is
-    /// the authority (it's the signer, `self.actor`), so we gate on following
-    /// that Group — not on the inner author, whom the Group vouches for.
+    /// Handle what a followed remote board relays. The **Group's** signature is
+    /// the authority for the relay itself (it's the signer, `self.actor`), so
+    /// subscription to that Group gates everything below — but what the Group is
+    /// allowed to *do* differs per inner activity, so each arm authorizes on its
+    /// own terms.
     async fn receive(self, data: &Data<Self::DataType>) -> Result<(), Self::Error> {
         let group_uri = self.actor.inner().as_str();
         if !follows::is_followed_locally(&data.pool, group_uri).await? {
@@ -1038,7 +1058,18 @@ impl Activity for Announce {
             tracing::info!("dropping Announce from silenced board {group_uri}");
             return Ok(());
         }
-        let page = self.object.object;
+
+        let create = match self.object {
+            AnnouncedObject::Create(c) => c,
+            AnnouncedObject::Delete(d) => return d.receive_announced(data, group_uri).await,
+            AnnouncedObject::Update(u) => return u.receive_announced(data, group_uri).await,
+            AnnouncedObject::Other(v) => {
+                let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                tracing::info!("Announce{{{kind}}} from {group_uri} has no handler; ignoring");
+                return Ok(());
+            }
+        };
+        let page = create.object;
         let group_handle = author_handle(&data.pool, group_uri).await;
         let author_handle = author_handle(&data.pool, page.attributed_to.trim()).await;
         let content = content::html_to_text(&page.content);
@@ -1106,6 +1137,30 @@ impl Activity for Delete {
     }
 }
 
+impl Delete {
+    /// The `Announce{Delete}` path (#133): a board propagating one of its
+    /// members' withdrawals to subscribers.
+    ///
+    /// Scoped to posts this Group announced, and refused outright for content
+    /// we're the authority for — a remote board doesn't get to delete a post on
+    /// one of *our* boards just because it can name its URI.
+    async fn receive_announced(self, data: &Data<AppData>, group_uri: &str) -> Result<(), ApError> {
+        let actor = self.actor.inner().as_str();
+        let object_id = self.object.id();
+        if lifecycle::delete_announced(&data.pool, group_uri, actor, object_id).await? {
+            tracing::info!("honored relayed Delete of {object_id} announced by {group_uri}");
+        } else if lifecycle::announced_hits_local_content(&data.pool, object_id).await? {
+            tracing::warn!(
+                "refused relayed Delete of {object_id} from board {group_uri}: \
+                 that object is ours, not the board's to withdraw"
+            );
+        } else {
+            tracing::debug!("relayed Delete of {object_id} from {group_uri} matched nothing");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl Activity for Update {
     type DataType = AppData;
@@ -1140,6 +1195,35 @@ impl Activity for Update {
         match lifecycle::update(&data.pool, actor, id, &subject, &body).await? {
             Some(target) => tracing::info!("honored Update of {id} from {actor} ({target:?})"),
             None => tracing::debug!("Update of {id} from {actor} matched nothing we hold"),
+        }
+        Ok(())
+    }
+}
+
+impl Update {
+    /// The `Announce{Update}` path (#133) — a board propagating a member's edit.
+    /// Same authorization rules as [`Delete::receive_announced`].
+    async fn receive_announced(self, data: &Data<AppData>, group_uri: &str) -> Result<(), ApError> {
+        let actor = self.actor.inner().as_str();
+        let ObjectRef::Embedded { id, name, content } = &self.object else {
+            tracing::debug!("relayed Update from {group_uri} carried no object body; ignoring");
+            return Ok(());
+        };
+        let body = content::html_to_text(content);
+        let subject = name
+            .as_deref()
+            .map(content::html_to_text)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(no subject)".to_string());
+        if lifecycle::update_announced(&data.pool, group_uri, actor, id, &subject, &body).await? {
+            tracing::info!("honored relayed Update of {id} announced by {group_uri}");
+        } else if lifecycle::announced_hits_local_content(&data.pool, id).await? {
+            tracing::warn!(
+                "refused relayed Update of {id} from board {group_uri}: \
+                 that object is ours, not the board's to edit"
+            );
+        } else {
+            tracing::debug!("relayed Update of {id} from {group_uri} matched nothing");
         }
         Ok(())
     }

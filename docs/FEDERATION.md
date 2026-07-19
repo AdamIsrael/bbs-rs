@@ -192,7 +192,7 @@ Phase 6 (#112) is sliced:
   migration 0017 adds `ap_board_posts.author_uri` — a display handle isn't an identity to authorize
   against. Deleting a board post also drops it from the FTS index, since the 0012 triggers fire.
   `Undo` was already handled for `Follow`, the only `Undo` we act on; `Announce`-wrapped lifecycle
-  (a Group relaying a member's `Delete`) is **not** handled yet.
+  (a Group relaying a member's `Delete`) came later, in #133.
 - **112c — moderation surface** (this slice): inbound `Flag` (remote reports) recorded for operators —
   **never acted on automatically**, since auto-acting would hand any peer a remote moderation lever over
   this board. Domain blocks gain **severity**: `suspend` is the hard block we already had (refused at the
@@ -202,6 +202,34 @@ Phase 6 (#112) is sliced:
   content that already arrived; it's deliberately separate so deleting content is never a silent side
   effect of a policy change. Operator surface: `ap-reports`, `ap-resolve`, `ap-block --severity`,
   `ap-purge`.
+
+### #133 — `Announce`-wrapped lifecycle (post-epic follow-up)
+
+A board relays its members' `Delete`/`Update` so a post withdrawn upstream doesn't linger in every
+subscriber's mirror. Both halves: we send `Announce{Delete}` when a syndicated board post is deleted
+here, and we honor one arriving from a board we subscribe to.
+
+**The design question is authorization, not parsing.** A relayed activity is signed by the *Group*, so
+the signature alone proves only that the board sent it — not that the board had any standing to. Taking
+the Group's word for it would let any board we follow withdraw anything it could name. So a relayed
+lifecycle op is deliberately much narrower than a direct one:
+
+- it can only reach `ap_board_posts` — never `messages`, `ap_timeline`, or `mail`. Content on **our**
+  boards is ours; a remote board doesn't get to moderate it, and an attempt is logged at `warn` rather
+  than passing silently;
+- the row must have been announced by **that** Group (`group_uri` matches), so a board can only act on
+  what it actually hosts; and
+- the inner activity's actor must be the post's author or the Group itself — a board vouches for its
+  members, not for anyone who asks.
+
+The outbound half has an ordering constraint worth naming: everything the `Announce{Delete}` needs (the
+post's `ap_id`, its board, its author) lives in the row about to be deleted, so the activity is *built*
+first and *queued* only after the local delete succeeds. The reverse order would tell subscribers to drop
+a post we then failed to remove ourselves. Hence `outbound::prepare_board_delete` + `dispatch` rather
+than one call.
+
+Both authorization guards are covered by mutation-checked tests: removing either the host-scope or the
+inner-actor condition makes a specific test fail.
 
 Phase 5 (#111) is sliced:
 

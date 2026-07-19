@@ -295,10 +295,22 @@ one instance can't delete another's content by asking. A mirrored board post can
 additionally be withdrawn by the board that announced it, which is the board
 acting as the authority for its own content.
 
+Boards also **relay** their members' withdrawals: when a post is deleted on a
+board you subscribe to, that board sends an `Announce{Delete}` and the post
+leaves your mirror. The same happens in reverse — deleting a syndicated post on
+one of your boards tells your subscribers to drop it.
+
+A relayed withdrawal is checked more narrowly than a direct one, because the
+signature on it belongs to the *board*, not the author. Two things must hold: the
+board must actually have announced the post, and the inner activity's actor must
+be either the post's author or the board itself. A board can moderate its own
+content and carry its members' decisions — it cannot withdraw a third party's
+post, another board's post, or anything on **your** boards. Attempts to reach
+your own content are refused and logged at `warn`.
+
 > **Still missing**, so you know where the edges are: posting from *here* into a
-> followed remote board; a browsable in-BBS screen for mirrored boards (they're
-> an operator-visible cache via `bbsctl` today); and `Announce`-wrapped lifecycle
-> (a board relaying one of its members' deletions).
+> followed remote board, and a browsable in-BBS screen for mirrored boards
+> (they're an operator-visible cache via `bbsctl` today).
 
 ---
 
