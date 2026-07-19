@@ -553,11 +553,23 @@ pub mod objects {
 
     // ---- Boards as Group actors (FEP-1b12, #111) --------------------------
 
-    /// A board root post as a `Page` (`name` = subject). A reply would be a
-    /// `Note` with `inReplyTo` — added with threaded delivery in a later slice.
+    /// One item on a board: a root post or a reply.
+    ///
+    /// The two differ only in `kind` and `inReplyTo` — a root is a `Page`, a
+    /// reply is a `Note` carrying the parent's URI (#139). They share a struct
+    /// because they share all their addressing, and the alternative (a `Page`
+    /// type that sometimes emits `"type": "Note"`) is exactly the sort of thing
+    /// that misleads whoever reads it next.
+    ///
+    /// **`name` is kept on replies too**, which is unusual: AP `Note`s
+    /// conventionally have no name, but a BBS reply has a real subject and
+    /// dropping it would lose information on every bbs-rs ↔ bbs-rs hop. It's
+    /// valid AS2, Mastodon ignores it, and a peer that understands it keeps full
+    /// fidelity. Receivers must not *depend* on it — ours falls back to
+    /// `Re: <parent>`.
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct Page {
+    pub struct BoardItem {
         #[serde(rename = "@context")]
         pub context: &'static str,
         #[serde(rename = "type")]
@@ -571,6 +583,9 @@ pub mod objects {
         pub cc: Vec<String>,
         /// The board this belongs to — FEP-1b12 uses `audience` for the Group.
         pub audience: String,
+        /// Set only on replies: the parent's permanent URI.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub in_reply_to: Option<String>,
     }
 
     /// A `Create` wrapping a board `Page`, authored by the poster.
@@ -586,7 +601,7 @@ pub mod objects {
         pub to: Vec<String>,
         pub cc: Vec<String>,
         pub audience: String,
-        pub object: Page,
+        pub object: BoardItem,
     }
 
     /// The Group's `Announce` of a post to its followers — the FEP-1b12 fan-out.
@@ -605,6 +620,37 @@ pub mod objects {
         pub object: CreatePage,
     }
 
+    /// Build the `Note` for a board **reply** (#139).
+    ///
+    /// Identical to [`board_page`] but for `kind` and `inReplyTo`, which points
+    /// at the parent's permanent URI. That parent URI may be ours or a remote
+    /// peer's — a thread on a board we host can contain posts from several
+    /// instances, and a reply always points at whatever the parent's real id is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn board_reply(
+        origin: &Origin,
+        slug: &str,
+        ap_id: &str,
+        author_uri: &str,
+        subject: &str,
+        body: &str,
+        published_unix: i64,
+        in_reply_to: &str,
+    ) -> BoardItem {
+        let mut item = board_page(
+            origin,
+            slug,
+            ap_id,
+            author_uri,
+            subject,
+            body,
+            published_unix,
+        );
+        item.kind = "Note";
+        item.in_reply_to = Some(in_reply_to.to_string());
+        item
+    }
+
     /// Build the `Page` for a board root post. `ap_id` is its permanent URI
     /// (minted by the caller); `author_uri` is the poster's `Person`.
     #[allow(clippy::too_many_arguments)]
@@ -616,8 +662,8 @@ pub mod objects {
         subject: &str,
         body: &str,
         published_unix: i64,
-    ) -> Page {
-        Page {
+    ) -> BoardItem {
+        BoardItem {
             context: AS_CONTEXT,
             kind: "Page",
             id: ap_id.to_string(),
@@ -628,6 +674,7 @@ pub mod objects {
             to: vec![PUBLIC.to_string()],
             cc: vec![origin.group_followers(slug)],
             audience: origin.group(slug),
+            in_reply_to: None,
         }
     }
 
@@ -646,8 +693,8 @@ pub mod objects {
         subject: &str,
         body: &str,
         published_unix: i64,
-    ) -> Page {
-        Page {
+    ) -> BoardItem {
+        BoardItem {
             context: AS_CONTEXT,
             kind: "Page",
             id: ap_id.to_string(),
@@ -658,13 +705,14 @@ pub mod objects {
             to: vec![group_uri.to_string()],
             cc: vec![PUBLIC.to_string()],
             audience: group_uri.to_string(),
+            in_reply_to: None,
         }
     }
 
     /// Wrap a submission in the author's `Create`. Unlike [`board_announce`],
     /// the **author** signs and owns this — we're a contributor to that board,
     /// not its hub.
-    pub fn remote_board_create(page: Page) -> CreatePage {
+    pub fn remote_board_create(page: BoardItem) -> CreatePage {
         CreatePage {
             context: AS_CONTEXT,
             kind: "Create",
@@ -763,7 +811,7 @@ pub mod objects {
         slug: &str,
         author_uri: &str,
         local_id: i64,
-        page: Page,
+        page: BoardItem,
     ) -> Announce {
         let group_uri = origin.group(slug);
         let followers = origin.group_followers(slug);
@@ -787,6 +835,67 @@ pub mod objects {
             object: create,
         }
     }
+}
+
+/// Build the AP object for a board message — the single place that decides what
+/// a board post looks like on the wire (#139).
+///
+/// Extracted because there were two hand-written copies of this (the fan-out and
+/// the Group outbox) and they had already drifted apart in two ways: the outbox
+/// never learned about replies, and it minted `attributedTo` from our own origin
+/// for *every* author, so a post by `bob@remote.social` was published as
+/// `https://ours/u/bob@remote.social` — claiming someone else's content as ours.
+/// One builder, one answer.
+///
+/// Returns the item plus its `ap_id`, which is minted here if the message
+/// doesn't have one yet.
+pub async fn board_item_for(
+    pool: &SqlitePool,
+    origin: &Origin,
+    slug: &str,
+    msg: &crate::db::models::Message,
+) -> Result<(objects::BoardItem, String)> {
+    let ap_id = ensure_message_ap_id(pool, origin, msg.id).await?;
+    // A remote author keeps their own actor URI; a local author's is minted from
+    // our origin. Getting this backwards is how you accidentally claim to have
+    // authored a peer's post.
+    let author_uri: String =
+        sqlx::query_scalar("SELECT actor_uri FROM users WHERE id = ? AND is_remote = 1")
+            .bind(msg.author_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten()
+            .unwrap_or_else(|| origin.person(&msg.author_name));
+
+    let item = match msg.parent_id {
+        None => objects::board_page(
+            origin,
+            slug,
+            &ap_id,
+            &author_uri,
+            &msg.subject,
+            &msg.body,
+            msg.created_at,
+        ),
+        Some(parent_id) => {
+            // The parent's URI, whoever owns it. `ensure_message_ap_id` returns
+            // a stored one unchanged, so a parent that arrived from a peer keeps
+            // *its* id and the thread stays joined up across instances rather
+            // than forking at our boundary.
+            let parent_uri = ensure_message_ap_id(pool, origin, parent_id).await?;
+            objects::board_reply(
+                origin,
+                slug,
+                &ap_id,
+                &author_uri,
+                &msg.subject,
+                &msg.body,
+                msg.created_at,
+                &parent_uri,
+            )
+        }
+    };
+    Ok((item, author_uri))
 }
 
 /// Record a status's permanent `ap_id`, if it doesn't have one yet.
@@ -1287,49 +1396,33 @@ pub mod outbound {
         Ok(queued)
     }
 
-    /// Fan a board root post out to the board's Group followers as the Group's
-    /// `Announce{Create{Page}}` (FEP-1b12, #111).
+    /// Fan a board post out to the board's Group followers as the Group's
+    /// `Announce{Create{…}}` (FEP-1b12, #111) — a `Page` for a root, a `Note`
+    /// with `inReplyTo` for a reply (#139).
     ///
-    /// Only top-level posts syndicate for now (a reply is a `Note` with
-    /// `inReplyTo`, added later). Signed by the **Group**, not the author, when
-    /// the drain picks it up. Returns the number of deliveries queued — `0` when
-    /// the board has no remote subscribers (the common case), or the message is
-    /// a reply, or federation can't build the Group.
+    /// Signed by the **Group**, not the author, when the drain picks it up.
+    /// Returns the number of deliveries queued — `0` when the board has no
+    /// remote subscribers (the common case) or federation can't build the Group.
+    ///
+    /// This is also the function the *inbound* path calls to re-Announce a post
+    /// that arrived at one of our boards, which is why replies being skipped
+    /// here was a correctness bug and not just a missing feature: we are that
+    /// board's hub, so a reply we accepted but never relayed left every other
+    /// subscriber with a permanently divergent thread.
     pub async fn deliver_board_post(
         pool: &SqlitePool,
         origin: &Origin,
         message_id: i64,
     ) -> Result<usize> {
         let msg = crate::services::boards::get_message(pool, message_id).await?;
-        if msg.parent_id.is_some() {
-            return Ok(0); // replies don't syndicate yet
-        }
         let keys = ensure_group_keys(pool, origin, msg.board_id).await?;
         let inboxes = follows::follower_inboxes(pool, &keys.actor_uri).await?;
         if inboxes.is_empty() {
             return Ok(0);
         }
 
-        let ap_id = ensure_message_ap_id(pool, origin, msg.id).await?;
-        // A remote author (an inbound post we re-Announce, #112) keeps its own
-        // actor URI; a local author's is minted from our origin.
-        let author_uri: String =
-            sqlx::query_scalar("SELECT actor_uri FROM users WHERE id = ? AND is_remote = 1")
-                .bind(msg.author_id)
-                .fetch_optional(pool)
-                .await?
-                .flatten()
-                .unwrap_or_else(|| origin.person(&msg.author_name));
-        let page = objects::board_page(
-            origin,
-            &keys.slug,
-            &ap_id,
-            &author_uri,
-            &msg.subject,
-            &msg.body,
-            msg.created_at,
-        );
-        let announce = objects::board_announce(origin, &keys.slug, &author_uri, msg.id, page);
+        let (item, author_uri) = board_item_for(pool, origin, &keys.slug, &msg).await?;
+        let announce = objects::board_announce(origin, &keys.slug, &author_uri, msg.id, item);
         let activity = serde_json::to_string(&announce)
             .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce: {e}")))?;
 
@@ -1358,17 +1451,18 @@ pub mod outbound {
 
     /// Build the Group's `Announce{Delete}` for a board post *before* it is
     /// deleted (#133). `None` when there's nothing to announce: a post that
-    /// never federated (no `ap_id`), a reply (replies don't syndicate yet), or a
-    /// board with no remote subscribers.
+    /// never federated (no `ap_id`), or a board with no remote subscribers.
+    ///
+    /// Replies are included since #139 — they syndicate now, so a withdrawn one
+    /// has to be withdrawn everywhere. The `ap_id` check below is what makes
+    /// that safe either way: a reply from before replies syndicated never got a
+    /// URI, so there's nothing to withdraw and this still returns `None`.
     pub async fn prepare_board_delete(
         pool: &SqlitePool,
         origin: &Origin,
         message_id: i64,
     ) -> Result<Option<Prepared>> {
         let msg = crate::services::boards::get_message(pool, message_id).await?;
-        if msg.parent_id.is_some() {
-            return Ok(None);
-        }
         // Deliberately *not* `ensure_message_ap_id`: a post that never had a URI
         // was never syndicated, so there is nothing for anyone to withdraw.
         let Some(ap_id): Option<String> =

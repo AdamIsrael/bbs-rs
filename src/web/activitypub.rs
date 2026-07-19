@@ -462,39 +462,33 @@ pub async fn group_outbox(State(state): State<WebState>, Path(slug): Path<String
     let Ok(Some(board_id)) = federation::find_board_by_slug(&state.pool, &slug).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let (roots, total) =
-        match crate::services::boards::root_posts(&state.pool, board_id, OUTBOX_LIMIT).await {
+    // Every post the board announces, replies included (#139) — the outbox has
+    // to match the fan-out or a peer backfilling from it gets a partial board.
+    let (posts, total) =
+        match crate::services::boards::board_posts(&state.pool, board_id, OUTBOX_LIMIT).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("group outbox for {slug:?}: {e}");
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
-    let mut items = Vec::with_capacity(roots.len());
-    for m in &roots {
-        let ap_id = match federation::ensure_message_ap_id(&state.pool, &origin, m.id).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("minting post ap_id {}: {e}", m.id);
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
-        let author_uri = origin.person(&m.author_name);
-        let page = federation::objects::board_page(
-            &origin,
-            &slug,
-            &ap_id,
-            &author_uri,
-            &m.subject,
-            &m.body,
-            m.created_at,
-        );
+    let mut items = Vec::with_capacity(posts.len());
+    for m in &posts {
+        // Same builder the fan-out uses, so the two can't drift again.
+        let (item, author_uri) =
+            match federation::board_item_for(&state.pool, &origin, &slug, m).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("building outbox item for post {}: {e}", m.id);
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
         items.push(federation::objects::board_announce(
             &origin,
             &slug,
             &author_uri,
             m.id,
-            page,
+            item,
         ));
     }
     let collection = GroupOutbox {

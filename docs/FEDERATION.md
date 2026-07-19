@@ -203,6 +203,42 @@ Phase 6 (#112) is sliced:
   effect of a policy change. Operator surface: `ap-reports`, `ap-resolve`, `ap-block --severity`,
   `ap-purge`.
 
+### #139 Slice A — outbound reply syndication (post-epic follow-up)
+
+Replies now syndicate as `Announce{Create{Note}}` with `inReplyTo` set to the parent's URI. Roots stay
+`Page`s; the two share one struct (`BoardItem`) differing only in `kind` and `inReplyTo`, because a
+`Page` type that sometimes emits `"type": "Note"` is exactly what misleads the next reader.
+
+**This was a correctness bug, not just a missing feature.** `deliver_board_post` returned early for
+anything with a `parent_id` — and that same function is what the *inbound* path calls to re-`Announce` a
+post arriving at one of our boards. So a reply delivered to a board we host was accepted, threaded
+correctly, and then never relayed. **We are that board's hub**, so every subscriber except the sender was
+left with a permanently divergent thread. Nothing logged it: the `Ok(0)` arm is indistinguishable from
+"this board has no subscribers".
+
+Three things fall out of fixing it:
+
+- **The parent's URI is whatever it really is.** `ensure_message_ap_id` returns a stored id unchanged, so
+  a parent that arrived from a peer keeps *its* id and the thread stays joined up across instances
+  instead of forking at our boundary.
+- **Deletion follows.** `prepare_board_delete` skipped replies too; now that they syndicate, a withdrawn
+  reply has to be withdrawn everywhere. Its `ap_id IS NULL` check is what keeps that safe for replies
+  made before this shipped — they never federated, so there's nothing to withdraw.
+- **`name` is kept on reply `Note`s.** Unusual (AP Notes conventionally have none), but a BBS reply has a
+  real subject and dropping it loses information on every bbs-rs ↔ bbs-rs hop. Valid AS2, ignored by
+  Mastodon, full fidelity between peers. Receivers must not *depend* on it.
+
+#### A second bug, found by fixing the first
+
+The Group outbox hand-built its own copy of the announce item, and had drifted from the fan-out in **two**
+ways: it never learned about replies, and it minted `attributedTo` from our own origin for *every* author
+— so a post by `bob@remote.social` was published as `https://ours/u/bob@remote.social`, claiming a peer's
+content as ours. Both are now impossible: `board_item_for` is the single place that decides what a board
+post looks like on the wire, and both callers use it.
+
+The general lesson, which cost two bugs to learn: **two hand-written copies of a wire format will drift,
+and the drift is silent** — nothing fails loudly when an outbox and a fan-out disagree.
+
 ### #131 — posting into a followed remote board (post-epic follow-up)
 
 The receiving half has worked since #112a; this is the sending half. The asymmetry with our own boards is

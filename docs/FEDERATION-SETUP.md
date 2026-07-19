@@ -342,8 +342,13 @@ content and carry its members' decisions — it cannot withdraw a third party's
 post, another board's post, or anything on **your** boards. Attempts to reach
 your own content are refused and logged at `warn`.
 
-> **Still missing**, so you know where the edges are: replies. Only top-level
-> posts syndicate, in either direction.
+Replies syndicate too, as of #139: a reply on one of your boards reaches every
+subscriber, and a reply arriving from a peer is relayed onward to the rest of
+them — your instance is that board's hub, so it's what propagates the thread.
+
+> **Still missing**, so you know where the edges are: a mirrored board shows
+> replies flat rather than threaded under their parent, and replying *into* a
+> followed remote board isn't wired up yet. Both are tracked on #139.
 
 ---
 
