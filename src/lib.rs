@@ -8,6 +8,7 @@
 //!   WebSocket + xterm.js frontend the same way, reusing everything else.
 
 pub mod app;
+pub mod cfg;
 pub mod config;
 pub mod db;
 pub mod error;
