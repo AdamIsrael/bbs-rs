@@ -3,6 +3,9 @@
 Design doc for making bbs-rs a fediverse server. This is a **plan of record**, not shipped behavior —
 see the epic and its phase issues for status.
 
+> **Operators:** to turn federation on, see the [operator guide](FEDERATION-SETUP.md) — hard requirements,
+> config, and the steps to connect with Mastodon. This document is the design rationale behind it.
+
 ## Goals
 
 1. **Syndicate boards across bbs-rs instances.** bbs-rs ↔ bbs-rs. A board on one board appears and
