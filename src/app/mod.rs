@@ -39,7 +39,7 @@ use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
 use crate::util::{now_unix, reply_subject};
 
-use state::{Field, Form, MenuItem, MirrorRow, Screen};
+use state::{Field, Form, MenuEntry, MenuItem, MirrorRow, Screen};
 
 /// All per-session state.
 pub struct App {
@@ -63,7 +63,7 @@ pub struct App {
     pub status: String,
 
     // Main menu
-    pub menu: Vec<MenuItem>,
+    pub menu: Vec<MenuEntry>,
     pub menu_sel: usize,
 
     // Bulletins
@@ -202,6 +202,89 @@ pub struct App {
     pub body_focused: bool,
 }
 
+/// Whether a menu target is available to `user` under the current config (#84).
+/// The gate a configured `[[menu]]` entry passes through — same rules that used
+/// to be inline `if` blocks — so an entry for a disabled feature or a role the
+/// user lacks is simply dropped.
+fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
+    let f = &config.features;
+    match item {
+        MenuItem::Bulletins
+        | MenuItem::Boards
+        | MenuItem::Stats
+        | MenuItem::Search
+        | MenuItem::Help
+        | MenuItem::Quit => true,
+        MenuItem::Oneliners => f.oneliners,
+        MenuItem::Timeline | MenuItem::RemoteBoards => config.federation.enabled,
+        MenuItem::Mail => f.private_mail,
+        MenuItem::Who => f.who_online,
+        MenuItem::Profile => !user.is_guest(),
+        MenuItem::Doors => !config.doors.is_empty(),
+        MenuItem::Files => f.file_areas,
+        MenuItem::Keys => f.pubkey_auth && !user.is_guest(),
+        MenuItem::Register => user.is_guest() && f.registration,
+        MenuItem::Admin => user.is_admin(),
+    }
+}
+
+/// The built-in menu order, used when no `[[menu]]` is configured. Matches the
+/// classic layout before the menu became config-driven.
+fn default_menu_order() -> [MenuItem; 17] {
+    use MenuItem::*;
+    [
+        Bulletins,
+        Boards,
+        Oneliners,
+        Timeline,
+        RemoteBoards,
+        Mail,
+        Who,
+        Profile,
+        Stats,
+        Search,
+        Doors,
+        Files,
+        Keys,
+        Register,
+        Admin,
+        Help,
+        Quit,
+    ]
+}
+
+/// Build the resolved main menu for a session (#84): the configured `[[menu]]`
+/// when the operator set one (array order, each entry's label/key falling back
+/// to the target's default), otherwise the built-in default set. Both are
+/// filtered by [`menu_item_available`].
+fn build_menu(config: &Settings, user: &User) -> Vec<MenuEntry> {
+    let resolve = |item: MenuItem, label: &str, key: &str| MenuEntry {
+        item,
+        label: if label.trim().is_empty() {
+            item.label().to_string()
+        } else {
+            label.trim().to_string()
+        },
+        key: key.chars().next().or(Some(item.default_key())),
+    };
+    if config.menu.is_empty() {
+        default_menu_order()
+            .into_iter()
+            .filter(|&i| menu_item_available(i, config, user))
+            .map(|i| resolve(i, "", ""))
+            .collect()
+    } else {
+        config
+            .menu
+            .iter()
+            .filter_map(|e| {
+                let item = MenuItem::from_action(&e.action)?;
+                menu_item_available(item, config, user).then(|| resolve(item, &e.label, &e.key))
+            })
+            .collect()
+    }
+}
+
 impl App {
     pub fn new(
         pool: SqlitePool,
@@ -211,50 +294,10 @@ impl App {
         session_id: usize,
         transport: Transport,
     ) -> Self {
-        // Menu honors the feature toggles. Registration is the newcomer
-        // bootstrap path, so it's only offered to the guest account.
-        let f = &config.features;
-        let mut menu = vec![MenuItem::Bulletins, MenuItem::Boards];
-        if f.oneliners {
-            menu.push(MenuItem::Oneliners);
-        }
-        // The federated timeline of followed remote accounts. Only when
-        // federation is on — otherwise there's nothing to show.
-        if config.federation.enabled {
-            menu.push(MenuItem::Timeline);
-            menu.push(MenuItem::RemoteBoards);
-        }
-        if f.private_mail {
-            menu.push(MenuItem::Mail);
-        }
-        if f.who_online {
-            menu.push(MenuItem::Who);
-        }
-        // Profiles are for real accounts; the shared guest account has none.
-        if !user.is_guest() {
-            menu.push(MenuItem::Profile);
-        }
-        menu.push(MenuItem::Stats);
-        menu.push(MenuItem::Search);
-        // Doors appear only when the operator has configured at least one.
-        if !config.doors.is_empty() {
-            menu.push(MenuItem::Doors);
-        }
-        if f.file_areas {
-            menu.push(MenuItem::Files);
-        }
-        // Key management is for real accounts (guests can't own keys).
-        if f.pubkey_auth && !user.is_guest() {
-            menu.push(MenuItem::Keys);
-        }
-        if user.is_guest() && f.registration {
-            menu.push(MenuItem::Register);
-        }
-        if user.is_admin() {
-            menu.push(MenuItem::Admin);
-        }
-        menu.push(MenuItem::Help);
-        menu.push(MenuItem::Quit);
+        // The main menu is built from config when the operator defined one, else
+        // the built-in default; either way it's filtered by the feature toggles
+        // and role gates (#84).
+        let menu = build_menu(&config, &user);
         let theme = Theme::resolve(&config.theme);
         let art = load_art(&config.art);
         Self {
@@ -414,13 +457,22 @@ impl App {
                 self.menu_sel = (self.menu_sel + 1).min(self.menu.len().saturating_sub(1))
             }
             KeyCode::Enter => self.activate_menu().await,
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            // Classic command-menu hotkeys (#84): a letter jumps to and runs the
+            // matching entry. Esc always quits; `q` does too via the Quit entry's
+            // default key, unless the operator rebound it.
+            KeyCode::Char(c) => {
+                if let Some(idx) = self.menu.iter().position(|e| e.key == Some(c)) {
+                    self.menu_sel = idx;
+                    self.activate_menu().await;
+                }
+            }
+            KeyCode::Esc => self.should_quit = true,
             _ => {}
         }
     }
 
     async fn activate_menu(&mut self) {
-        match self.menu[self.menu_sel] {
+        match self.menu[self.menu_sel].item {
             MenuItem::Bulletins => self.open_bulletins().await,
             MenuItem::Boards => self.open_boards().await,
             MenuItem::Oneliners => self.open_oneliners().await,
