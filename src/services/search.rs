@@ -71,3 +71,35 @@ pub async fn search_messages(
     .await?;
     Ok(hits)
 }
+
+/// Full-text search over a user's **own** mailbox (#93), backed by `mail_fts`.
+/// Scoped to mail addressed to `user_id` (`to_id`) in the SQL itself, so one
+/// user can never search another's inbox. Newest-relevant first; an empty or
+/// blank query yields no hits. Returns full [`Mail`] rows so a hit lists and
+/// opens exactly like a mailbox entry.
+pub async fn search_mail(
+    pool: &SqlitePool,
+    user_id: i64,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<crate::db::models::Mail>> {
+    let Some(fts) = fts_query(query) else {
+        return Ok(Vec::new());
+    };
+    let hits = sqlx::query_as::<_, crate::db::models::Mail>(
+        "SELECT m.id, m.from_id, m.to_id, u.username AS from_name, \
+         m.subject, m.body, m.created_at, m.read_at \
+         FROM mail_fts f \
+         JOIN mail m ON m.id = f.rowid \
+         JOIN users u ON u.id = m.from_id \
+         WHERE f.mail_fts MATCH ? AND m.to_id = ? \
+         ORDER BY f.rank \
+         LIMIT ?",
+    )
+    .bind(fts)
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(hits)
+}

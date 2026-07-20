@@ -2227,3 +2227,119 @@ async fn a_blocked_sender_cannot_mail_the_blocker_but_an_admin_still_can() {
     .unwrap();
     assert_eq!(mail::inbox(&pool, alice.id).await.unwrap().len(), 1);
 }
+
+// ---- #93: mail full-text search ---------------------------------------------
+
+#[tokio::test]
+async fn mail_search_finds_own_mail_by_subject_or_body_and_stays_scoped() {
+    use bbs_rs::services::{auth, mail, search};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    let carol = auth::register_user(&pool, "carol", "pw", &Default::default())
+        .await
+        .unwrap();
+
+    // bob -> alice, and carol -> bob (bob's, not alice's).
+    mail::send_mail(
+        &pool,
+        &bob,
+        "alice",
+        "Project Falcon",
+        "let's ship it monday",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    mail::send_mail(
+        &pool,
+        &carol,
+        "bob",
+        "Falcon secret",
+        "not for alice",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // Match on subject.
+    let by_subject = search::search_mail(&pool, alice.id, "Falcon", 50)
+        .await
+        .unwrap();
+    assert_eq!(by_subject.len(), 1, "only alice's own mail");
+    assert_eq!(by_subject[0].subject, "Project Falcon");
+    assert_eq!(by_subject[0].from_name, "bob");
+
+    // Match on body.
+    let by_body = search::search_mail(&pool, alice.id, "monday", 50)
+        .await
+        .unwrap();
+    assert_eq!(by_body.len(), 1);
+
+    // Scoping: alice can't find carol->bob mail even though it says "Falcon".
+    assert!(
+        !by_subject.iter().any(|m| m.subject == "Falcon secret"),
+        "search never crosses into another user's mailbox"
+    );
+    // And bob finds his own copy.
+    let bobs = search::search_mail(&pool, bob.id, "Falcon", 50)
+        .await
+        .unwrap();
+    assert_eq!(bobs.len(), 1);
+    assert_eq!(bobs[0].subject, "Falcon secret");
+    let _ = carol;
+}
+
+#[tokio::test]
+async fn deleting_mail_drops_it_from_the_search_index() {
+    use bbs_rs::services::{auth, mail, search};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    mail::send_mail(
+        &pool,
+        &bob,
+        "alice",
+        "Deleteme",
+        "ephemeral note",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    let hit = search::search_mail(&pool, alice.id, "ephemeral", 50)
+        .await
+        .unwrap();
+    assert_eq!(hit.len(), 1);
+
+    mail::delete_mail(&pool, hit[0].id, alice.id).await.unwrap();
+    assert!(
+        search::search_mail(&pool, alice.id, "ephemeral", 50)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the FTS delete trigger keeps the index in step"
+    );
+}
+
+#[tokio::test]
+async fn a_blank_mail_query_returns_nothing() {
+    use bbs_rs::services::{auth, search};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    assert!(
+        search::search_mail(&pool, alice.id, "   ", 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
