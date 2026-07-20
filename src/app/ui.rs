@@ -83,6 +83,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             render_form(f, body, &title, app)
         }
         Screen::Profile => render_profile(f, body, app),
+        Screen::IgnoreList => render_ignore_list(f, body, app),
         Screen::EditProfile => render_form(f, body, " Edit Profile ", app),
         Screen::Stats => render_stats(f, body, app),
         Screen::SearchInput => render_form(f, body, " Search Messages ", app),
@@ -152,6 +153,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 app.user.is_admin(),
                 app.can_edit_current_file(),
                 app.can_edit_current_profile(),
+                app.can_block_current_profile(),
             ),
             Style::default().fg(app.theme.dim),
         )
@@ -731,11 +733,36 @@ fn render_profile(f: &mut Frame, area: Rect, app: &App) {
         )));
         lines.push(Line::from(format!("-- {}", p.signature)));
     }
+    // Blocked marker (#97): the reader has this user on their ignore list.
+    if app.current_profile_blocked {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "\u{1F6AB} You have blocked this user (press b to unblock).",
+            Style::default().fg(app.theme.warning_fg),
+        )));
+    }
     let title = format!(" Profile · {} ", truncate(&p.username, 24));
     let para = Paragraph::new(Text::from(lines))
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false });
     f.render_widget(para, area);
+}
+
+fn render_ignore_list(f: &mut Frame, area: Rect, app: &App) {
+    if app.ignored.is_empty() {
+        return placeholder(
+            f,
+            area,
+            " Ignored Users ",
+            "You haven't blocked anyone. Block from a user's profile (b).",
+        );
+    }
+    let lines: Vec<Line> = app
+        .ignored
+        .iter()
+        .map(|(_, name)| Line::from(name.clone()))
+        .collect();
+    render_selectable(f, area, " Ignored Users ", lines, app.ignored_sel);
 }
 
 /// A `label: value` line with a dim label, for the profile/stats views.
@@ -1263,6 +1290,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::WhoOnline => "Who's Online",
         Screen::ComposePage => "Page User",
         Screen::Profile => "Profile",
+        Screen::IgnoreList => "Ignored Users",
         Screen::EditProfile => "Edit Profile",
         Screen::Stats => "Stats",
         Screen::SearchInput => "Search",
@@ -1285,7 +1313,13 @@ fn screen_name(screen: Screen) -> &'static str {
     }
 }
 
-fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: bool) -> String {
+fn hints(
+    screen: Screen,
+    is_admin: bool,
+    can_edit_file: bool,
+    can_edit_profile: bool,
+    can_block: bool,
+) -> String {
     let base = match screen {
         Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
@@ -1329,11 +1363,14 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::ComposePage => " type your message · Enter send · Esc cancel ",
         Screen::Profile => {
             if can_edit_profile {
-                " e edit · Esc back "
+                " e edit · i ignored list · Esc back "
+            } else if can_block {
+                " b block/unblock · Esc back "
             } else {
                 " Esc back "
             }
         }
+        Screen::IgnoreList => " ↑/↓ move · u/Enter unblock · Esc back ",
         Screen::EditProfile => " type · Tab/↑/↓ fields · Enter next/save · Esc cancel ",
         Screen::Stats => " r refresh · Esc back ",
         Screen::SearchInput => " type a query · Enter search · Esc cancel ",

@@ -25,6 +25,7 @@ pub enum Screen {
     WhoOnline,
     ComposePage,
     Profile,
+    IgnoreList,
     EditProfile,
     Stats,
     SearchInput,
