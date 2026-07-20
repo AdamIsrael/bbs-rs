@@ -613,6 +613,32 @@ impl App {
         }
     }
 
+    /// Fan an author's edit out to a federated board's subscribers as an
+    /// `Announce{Update}` (#156), so their mirror refreshes. No-op when
+    /// federation is off or the board has no remote followers.
+    async fn fanout_board_update(&self, message_id: i64) {
+        let fed = &self.config.federation;
+        if !fed.enabled {
+            return;
+        }
+        let origin = match crate::services::federation::Origin::from_config(fed) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("federation enabled but origin invalid, not delivering edit: {e:#}");
+                return;
+            }
+        };
+        match crate::services::federation::outbound::deliver_board_update(
+            &self.pool, &origin, message_id,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("announced edit of {message_id} to {n} subscriber inbox(es)"),
+            Err(e) => tracing::warn!("could not announce edit of {message_id}: {e:#}"),
+        }
+    }
+
     /// Build the `Announce{Delete}` for a board post that is *about* to be
     /// deleted (#133), so subscribers can drop it from their mirrors.
     ///
@@ -1738,6 +1764,9 @@ impl App {
         {
             Ok(true) => {
                 self.edit_target = None;
+                // Propagate the edit to a federated board's subscribers (#156),
+                // the Update counterpart to `submit_post`'s Create fan-out.
+                self.fanout_board_update(id).await;
                 self.reload_messages().await;
                 // Keep the reader in sync if it's still showing this post.
                 if let Ok(fresh) = boards::get_message(&self.pool, id).await {

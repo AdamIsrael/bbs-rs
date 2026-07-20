@@ -2095,6 +2095,208 @@ async fn a_board_post_announces_to_subscribers() {
     assert!(page.get("inReplyTo").is_none(), "root has no inReplyTo");
 }
 
+/// Editing a syndicated board post fans an `Announce{Update{Page}}` out to the
+/// board's subscribers (#156), carrying the new content and — critically — an
+/// activity id minted from *our* origin, so re-announcing even a remote author's
+/// edited post stays our activity (the #131 rule, applied to Update).
+#[tokio::test]
+async fn editing_a_board_post_announces_an_update_to_subscribers() {
+    use bbs_rs::config::Limits;
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{Origin, follows, outbound, queue};
+    let pool = setup().await;
+    let origin = Origin::new("https://bbs.example.com");
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let general = boards::list_boards(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let keys = mint_general_group(&pool).await;
+    let peer = insert_follower(&pool, "peer@remote.social", "remote.social", None).await;
+    follows::accept(&pool, &peer, &keys.actor_uri, "f1")
+        .await
+        .unwrap();
+
+    let mid = boards::post_message(
+        &pool,
+        general.id,
+        &alice,
+        "Subj",
+        "before",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    // Announce the create, then edit and announce the update.
+    outbound::deliver_board_post(&pool, &origin, mid)
+        .await
+        .unwrap();
+    assert!(
+        boards::edit_own_message(
+            &pool,
+            mid,
+            &alice,
+            "Subj",
+            "after & edited",
+            &Limits::default()
+        )
+        .await
+        .unwrap()
+    );
+    let n = outbound::deliver_board_update(&pool, &origin, mid)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the edit reaches the one subscriber");
+
+    let due = queue::due(&pool, 10).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&due.last().unwrap().activity).unwrap();
+    assert_eq!(v["type"], "Announce");
+    assert_eq!(v["actor"], keys.actor_uri, "the Group signs it");
+    assert_eq!(v["object"]["type"], "Update", "inner activity is an Update");
+    // The load-bearing invariant: the Announce id is on our origin, not the
+    // post's URI — an Update of a remote-authored post must stay our activity.
+    let announce_id = v["id"].as_str().unwrap();
+    assert!(
+        announce_id.starts_with(&keys.actor_uri),
+        "Announce id minted from our Group, got {announce_id}"
+    );
+    assert!(announce_id.contains("/announce/update/"));
+    let page = &v["object"]["object"];
+    assert_eq!(page["type"], "Page");
+    assert_eq!(
+        page["content"], "<p>after &amp; edited</p>",
+        "new content rides along"
+    );
+    assert_eq!(page["attributedTo"], "https://bbs.example.com/u/alice");
+}
+
+/// End-to-end across two instances in one process: instance A edits a post on a
+/// board that instance B follows, and B's mirror refreshes (#156). Proves the
+/// outbound `Announce{Update}` A produces is exactly what B's inbound handler
+/// consumes — the two halves can't drift.
+#[tokio::test]
+async fn an_edit_on_one_instance_updates_a_followers_mirror() {
+    use activitypub_federation::traits::Activity;
+    use bbs_rs::config::Limits;
+    use bbs_rs::services::boards;
+    use bbs_rs::services::federation::{Origin, follows, mirror, outbound, queue};
+    use bbs_rs::web::ap_object::Announce;
+
+    // --- Instance A: origin a.example.com, hosts "General" ---
+    let pool_a = setup().await;
+    let origin_a = Origin::new("https://a.example.com");
+    let alice = auth::register_user(&pool_a, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let general = boards::list_boards(&pool_a)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == "General")
+        .unwrap();
+    let keys_a = bbs_rs::services::federation::ensure_group_keys(&pool_a, &origin_a, general.id)
+        .await
+        .unwrap();
+    // A subscriber so A's fan-out has somewhere to go.
+    let sub = insert_follower(&pool_a, "b@b.example.com", "b.example.com", None).await;
+    follows::accept(
+        &pool_a,
+        &sub,
+        &keys_a.actor_uri,
+        "https://a.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    let mid = boards::post_message(
+        &pool_a,
+        general.id,
+        &alice,
+        "Subj",
+        "before",
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    outbound::deliver_board_post(&pool_a, &origin_a, mid)
+        .await
+        .unwrap();
+    boards::edit_own_message(
+        &pool_a,
+        mid,
+        &alice,
+        "Subj",
+        "after the edit",
+        &Limits::default(),
+    )
+    .await
+    .unwrap();
+    outbound::deliver_board_update(&pool_a, &origin_a, mid)
+        .await
+        .unwrap();
+
+    // The Update activity A put on the wire, and the post's permanent URI.
+    let update_json = queue::due(&pool_a, 10)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+        .activity;
+    let post_ap_id: String = sqlx::query_scalar("SELECT ap_id FROM messages WHERE id = ?")
+        .bind(mid)
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+    let author_uri = origin_a.person("alice");
+
+    // --- Instance B: default origin, follows A's board and mirrored the post ---
+    let pool_b = setup().await;
+    let carol = mint_local(&pool_b, "carol").await;
+    let carol_uri = format!("https://bbs.example.com/u/{}", carol.username);
+    follows::accept(
+        &pool_b,
+        &carol_uri,
+        &keys_a.actor_uri,
+        "https://bbs.example.com/f/1",
+    )
+    .await
+    .unwrap();
+    mirror::insert(
+        &pool_b,
+        &post_ap_id,
+        &keys_a.actor_uri,
+        "general@a.example.com",
+        "alice@a.example.com",
+        &author_uri,
+        "Subj",
+        "before",
+        None,
+        1_782_907_200,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // B receives A's Announce{Update} — the exact bytes A queued.
+    let announce: Announce = serde_json::from_str(&update_json)
+        .expect("A's Announce{Update} deserializes with B's inbound type");
+    announce.receive(&fed_data(&pool_b).await).await.unwrap();
+
+    let mirrored = mirror::recent(&pool_b, &keys_a.actor_uri, 10)
+        .await
+        .unwrap();
+    assert_eq!(mirrored.len(), 1);
+    assert_eq!(
+        mirrored[0].content, "after the edit",
+        "B's mirror refreshed from A's edit"
+    );
+}
+
 // ---- #111c: mirror a followed remote board ---------------------------------
 
 /// Build an inbound `Announce{Create{Page}}` from a remote board Group.
