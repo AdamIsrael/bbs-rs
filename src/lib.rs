@@ -131,6 +131,21 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
         ));
     }
 
+    // The read-only finger service (#77). Bound eagerly like the web port so a
+    // conflict fails startup loudly rather than in a lost background task.
+    if boot.finger.enabled {
+        let addr = format!("{}:{}", boot.finger.host, boot.finger.port);
+        let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| {
+            format!("binding finger service to {addr} — is the port in use, or does it need privilege (79)?")
+        })?;
+        tracing::info!("finger service listening on {addr}");
+        let fpool = pool.clone();
+        let fpresence = presence.clone();
+        tokio::spawn(async move {
+            services::finger::serve(listener, fpool, fpresence).await;
+        });
+    }
+
     tracing::info!(
         "{} listening on {}:{}",
         boot.bbs.name,

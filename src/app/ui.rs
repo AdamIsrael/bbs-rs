@@ -767,6 +767,19 @@ fn render_profile(f: &mut Frame, area: Rect, app: &App) {
         )));
         lines.push(Line::from(format!("-- {}", p.signature)));
     }
+    // On your own profile, show (and let you toggle) finger visibility (#77).
+    if p.user_id == app.user.id {
+        lines.push(Line::from(""));
+        lines.push(field_line(
+            "Finger",
+            if p.finger_optout {
+                "hidden (press f to list)"
+            } else {
+                "listed (press f to hide)"
+            },
+            dim,
+        ));
+    }
     // Blocked marker (#97): the reader has this user on their ignore list.
     if app.current_profile_blocked {
         lines.push(Line::from(""));
@@ -1439,7 +1452,7 @@ fn hints(
         Screen::ComposePage => " type your message · Enter send · Esc cancel ",
         Screen::Profile => {
             if can_edit_profile {
-                " e edit · i ignored list · Esc back "
+                " e edit · i ignored · f finger · Esc back "
             } else if can_block {
                 " b block/unblock · Esc back "
             } else {

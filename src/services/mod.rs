@@ -10,6 +10,7 @@ pub mod boards;
 pub mod bulletins;
 pub mod federation;
 pub mod files;
+pub mod finger;
 pub mod keys;
 pub mod mail;
 pub mod oneliners;

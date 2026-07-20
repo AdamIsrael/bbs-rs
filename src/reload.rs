@@ -120,6 +120,9 @@ fn warn_restart_only(old: &Settings, new: &Settings) {
     if old.web != new.web {
         changed.push("[web]");
     }
+    if old.finger != new.finger {
+        changed.push("[finger]");
+    }
     if old.federation != new.federation {
         changed.push("[federation]");
     }
