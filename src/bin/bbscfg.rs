@@ -19,10 +19,13 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::{Frame, Terminal};
 
 use bbs_rs::cfg::ConfigDoc;
@@ -128,6 +131,46 @@ fn title_bar(f: &mut Frame, area: Rect, editor: &Editor) {
     );
 }
 
+/// Render a selectable list that scrolls to keep `selected` visible and shows a
+/// scrollbar when the content is taller than the viewport (#160). Each `Line` is
+/// one row; per-line styling (including the reversed selection row) is preserved
+/// — no highlight style is set, so it isn't double-applied. `selected` must be
+/// the index of the highlighted line within `lines`.
+fn scroll_list(
+    f: &mut Frame,
+    area: Rect,
+    block: Block,
+    lines: Vec<Line<'static>>,
+    selected: usize,
+) {
+    let len = lines.len();
+    let items: Vec<ListItem> = lines.into_iter().map(ListItem::new).collect();
+    let mut state = ListState::default();
+    if selected < len {
+        state.select(Some(selected));
+    }
+    // `List` recomputes its scroll offset from the selected index each frame, so
+    // this stays correct without persisting offset between renders.
+    f.render_stateful_widget(List::new(items).block(block), area, &mut state);
+
+    // Overlay a scrollbar on the right border when it can't all fit (two rows of
+    // border eat into the height).
+    let view_h = area.height.saturating_sub(2) as usize;
+    if len > view_h && view_h > 0 {
+        let mut sb = ScrollbarState::new(len).position(selected);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut sb,
+        );
+    }
+}
+
 fn sections(f: &mut Frame, area: Rect, editor: &Editor) {
     let (changed, _) = editor.pending();
     let title_width = SECTIONS
@@ -169,9 +212,12 @@ fn sections(f: &mut Frame, area: Rect, editor: &Editor) {
             Line::from(spans).style(style)
         })
         .collect();
-    f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Sections ")),
+    scroll_list(
+        f,
         area,
+        Block::default().borders(Borders::ALL).title(" Sections "),
+        lines,
+        editor.section_sel,
     );
 }
 
@@ -232,9 +278,12 @@ fn fields(f: &mut Frame, area: Rect, editor: &Editor) {
             ""
         }
     );
-    f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
+    scroll_list(
+        f,
         area,
+        Block::default().borders(Borders::ALL).title(title),
+        lines,
+        editor.field_sel,
     );
 }
 
@@ -329,27 +378,41 @@ fn save(f: &mut Frame, area: Rect, editor: &Editor) {
 }
 
 fn seed_boards(f: &mut Frame, area: Rect, editor: &Editor) {
-    let mut lines = Vec::new();
-
-    // The whole point of the section: say whether any of this will take effect.
-    match &editor.seed_status {
-        SeedStatus::WillSeed => lines.push(Line::from(Span::styled(
+    // The status header (which can wrap) stays pinned at the top; the selectable
+    // rows below scroll on their own (#160), so a long board list can't push the
+    // "will this even take effect?" note off-screen.
+    let status = match &editor.seed_status {
+        SeedStatus::WillSeed => Line::from(Span::styled(
             "This database has no boards yet, so these settings apply on the next start.",
             Style::default().add_modifier(Modifier::DIM),
-        ))),
-        SeedStatus::AlreadySeeded { boards } => lines.push(Line::from(Span::styled(
+        )),
+        SeedStatus::AlreadySeeded { boards } => Line::from(Span::styled(
             format!(
-                "The database already has {boards} board(s), so seeding is skipped — edits                  here change the file but nothing else until the database is recreated."
+                "The database already has {boards} board(s), so seeding is skipped — edits here change the file but nothing else until the database is recreated."
             ),
             Style::default().add_modifier(Modifier::BOLD),
-        ))),
-        SeedStatus::Unknown { reason } => lines.push(Line::from(Span::styled(
+        )),
+        SeedStatus::Unknown { reason } => Line::from(Span::styled(
             format!("Can't tell whether seeding will run ({reason})."),
             Style::default().add_modifier(Modifier::DIM),
-        ))),
-    }
-    lines.push(Line::from(""));
+        )),
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(1)])
+        .split(area);
+    f.render_widget(
+        Paragraph::new(status)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" First-run seeding "),
+            )
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
 
+    let mut lines = Vec::new();
     // Row 0: the guest password (or a note that the default applies).
     let pw_shown = editor
         .doc
@@ -387,15 +450,13 @@ fn seed_boards(f: &mut Frame, area: Rect, editor: &Editor) {
         }
     }
 
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" First-run seeding "),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
+    // The selected line index is `seed_sel` (row 0 = password, i+1 = board i).
+    scroll_list(
+        f,
+        chunks[1],
+        Block::default().borders(Borders::ALL).title(" Boards "),
+        lines,
+        editor.seed_sel,
     );
 }
 
@@ -460,13 +521,14 @@ fn seed_board_fields(f: &mut Frame, area: Rect, editor: &Editor) {
         .get(idx)
         .cloned()
         .unwrap_or_default();
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Seed board: {name} ")),
-        ),
+    scroll_list(
+        f,
         area,
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Seed board: {name} ")),
+        lines,
+        editor.seed_field_sel,
     );
 }
 
@@ -535,13 +597,14 @@ fn art_screens(f: &mut Frame, area: Rect, editor: &Editor) {
             Line::from(spans).style(style)
         })
         .collect();
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Per-screen art "),
-        ),
+    scroll_list(
+        f,
         area,
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Per-screen art "),
+        lines,
+        editor.art_sel,
     );
 }
 
@@ -585,13 +648,14 @@ fn doors(f: &mut Frame, area: Rect, editor: &Editor) {
             .style(style)
         })
         .collect();
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Door games ({}) ", names.len())),
-        ),
+    scroll_list(
+        f,
         area,
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Door games ({}) ", names.len())),
+        lines,
+        editor.door_sel,
     );
 }
 
@@ -638,13 +702,14 @@ fn door_fields(f: &mut Frame, area: Rect, editor: &Editor) {
         .get(editor.door_sel)
         .cloned()
         .unwrap_or_default();
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Door: {name} ")),
-        ),
+    scroll_list(
+        f,
         area,
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Door: {name} ")),
+        lines,
+        editor.door_field_sel,
     );
 }
 
@@ -745,4 +810,62 @@ fn status_bar(f: &mut Frame, area: Rect, editor: &Editor) {
         Paragraph::new(line).style(Style::default().add_modifier(Modifier::DIM)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Flatten a rendered TestBackend buffer into one string of its glyphs.
+    fn dump(t: &Terminal<TestBackend>) -> String {
+        let buf = t.backend().buffer();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn render_scroll(lines: Vec<Line<'static>>, selected: usize, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            let block = Block::default().borders(Borders::ALL).title(" T ");
+            scroll_list(f, f.area(), block, lines, selected);
+        })
+        .unwrap();
+        dump(&term)
+    }
+
+    fn numbered(n: usize) -> Vec<Line<'static>> {
+        (0..n).map(|i| Line::from(format!("item-{i:02}"))).collect()
+    }
+
+    #[test]
+    fn a_selection_below_the_fold_is_scrolled_into_view() {
+        // 30 items into an 8-row box (6 visible after borders). Selecting #25
+        // must scroll it into view, and #00 must fall off the top.
+        let out = render_scroll(numbered(30), 25, 20, 8);
+        assert!(out.contains("item-25"), "selected row is visible");
+        assert!(!out.contains("item-00"), "top row scrolled away");
+    }
+
+    #[test]
+    fn a_scrollbar_appears_only_when_content_overflows() {
+        // Overflowing: a vertical scrollbar track/thumb glyph should be drawn.
+        let overflow = render_scroll(numbered(30), 0, 20, 8);
+        assert!(
+            overflow.contains('█') || overflow.contains('│') || overflow.contains('↑'),
+            "a scrollbar is drawn when the list overflows"
+        );
+        // Fits entirely: no scrollbar glyphs.
+        let fits = render_scroll(numbered(3), 0, 20, 8);
+        assert!(
+            !fits.contains('█') && !fits.contains('↑') && !fits.contains('↓'),
+            "no scrollbar when everything fits"
+        );
+    }
+
+    #[test]
+    fn the_top_of_a_short_list_renders_from_the_first_row() {
+        let out = render_scroll(numbered(4), 0, 20, 8);
+        assert!(out.contains("item-00") && out.contains("item-03"));
+    }
 }
