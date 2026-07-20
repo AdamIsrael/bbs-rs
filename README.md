@@ -262,6 +262,7 @@ bbsctl keys <user>               # list a user's SSH public keys
 bbsctl add-key <user> "<ssh-… key line>" [--label L]   # register a key (or --file <path>)
 bbsctl rm-key <id>               # remove a registered key
 bbsctl logins [--user U] [--failures] [--limit N]   # login audit trail
+bbsctl audit [--limit N]         # moderation/audit log (who did what)
 bbsctl bulletins                 # list sysop bulletins
 bbsctl post-bulletin <title> --body <text>          # post a bulletin
 bbsctl rm-bulletin <id>          # remove a bulletin
@@ -294,8 +295,16 @@ normal account, then run `bbsctl role <that-user> admin`. Registration refuses r
 
 A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
-an in-BBS **Admin** menu to list users, ban/unban, **broadcast to all sessions** (`w`), and view recent
-logins. Every login attempt (success or failure) is recorded with username, IP, and timestamp.
+an in-BBS **Admin** menu to list users, ban/unban, **broadcast to all sessions** (`w`), view recent
+logins (`l`), and view the **moderation/audit log** (`a`). Every login attempt (success or failure) is
+recorded with username, IP, and timestamp.
+
+**Moderation / audit log.** Every moderator action — ban/unban (user and IP), role change, board
+lock/unlock, post pin/delete, and broadcast — is recorded with *who* did it, *what* was acted on, and
+*when*. The actor is the admin's username for in-BBS actions, `bbsctl` for CLI actions, or `system` for
+automated ones (auto-bans by the abuse sweeper). Only moderation is logged: an author deleting their own
+post is not. View it in-BBS (`a` on the Admin screen) or with `bbsctl audit [--limit N]`. The log is
+append-only.
 
 **Broadcasts** push a one-line notice — e.g. "going down for maintenance" — to every connected session
 as a toast, with a bell. An in-BBS admin's broadcast (`w` on the Admin screen) goes out immediately;

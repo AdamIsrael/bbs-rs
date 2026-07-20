@@ -42,6 +42,7 @@ pub enum Screen {
     Help,
     AdminUsers,
     AdminLogins,
+    AdminAudit,
     ComposeBroadcast,
 }
 

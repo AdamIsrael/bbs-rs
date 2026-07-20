@@ -101,6 +101,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::AdminUsers => render_admin_users(f, body, app),
         Screen::ComposeBroadcast => render_form(f, body, " Broadcast to all sessions ", app),
         Screen::AdminLogins => render_admin_logins(f, body, app),
+        Screen::AdminAudit => render_admin_audit(f, body, app),
     }
 
     render_status(f, chunks[2], app);
@@ -1160,6 +1161,32 @@ fn render_admin_logins(f: &mut Frame, area: Rect, app: &App) {
     render_selectable(f, area, " Admin · Logins ", lines, app.admin_login_sel);
 }
 
+fn render_admin_audit(f: &mut Frame, area: Rect, app: &App) {
+    if app.admin_audit.is_empty() {
+        return placeholder(f, area, " Admin · Audit ", "No moderator actions recorded.");
+    }
+    let lines: Vec<Line> = app
+        .admin_audit
+        .iter()
+        .map(|e| {
+            let detail = e
+                .detail
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            Line::from(format!(
+                "{:<17} {:<12} {:<12} {}{}",
+                fmt_time(e.created_at),
+                truncate(&e.actor, 12),
+                truncate(&e.action, 12),
+                truncate(&e.target, 24),
+                truncate(&detail, 40)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Admin · Audit ", lines, app.admin_audit_sel);
+}
+
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let bbs = &app.config.bbs;
     let mut text = format!("{} — {}\n\n", bbs.name, bbs.tagline);
@@ -1252,6 +1279,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Register => "Register",
         Screen::Help => "Help",
         Screen::AdminUsers => "Admin · Users",
+        Screen::AdminAudit => "Admin · Audit",
         Screen::ComposeBroadcast => "Broadcast",
         Screen::AdminLogins => "Admin · Logins",
     }
@@ -1325,7 +1353,10 @@ fn hints(screen: Screen, is_admin: bool, can_edit_file: bool, can_edit_profile: 
         Screen::FileView => " ↑/↓ scroll · PgUp/PgDn · Home top · Esc back ",
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
-        Screen::AdminUsers => " ↑/↓ move · b ban · u unban · w broadcast · l logins · Esc back ",
+        Screen::AdminUsers => {
+            " ↑/↓ · b ban · u unban · w broadcast · l logins · a audit · Esc back "
+        }
+        Screen::AdminAudit => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
         Screen::ComposeBroadcast => " type your message · Enter send to all · Esc cancel ",
         Screen::AdminLogins => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
     };

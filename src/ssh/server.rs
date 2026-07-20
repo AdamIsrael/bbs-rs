@@ -23,7 +23,7 @@ use crate::config::Settings;
 use crate::db::models::User;
 use crate::input;
 use crate::services::presence::Presence;
-use crate::services::{admin, auth, keys};
+use crate::services::{admin, audit, auth, keys};
 use crate::ssh::pubkey;
 use crate::ssh::sftp::SftpSession;
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
@@ -432,11 +432,14 @@ async fn auto_ban(pool: &SqlitePool, abuse: &crate::config::Abuse) {
             abuse.max_failures, abuse.window_secs
         );
         match admin::ban_ip(pool, &ip, &reason, expires).await {
-            Ok(()) => tracing::warn!(
-                "auto-banned {ip} ({}+ failed logins in {}s)",
-                abuse.max_failures,
-                abuse.window_secs
-            ),
+            Ok(()) => {
+                tracing::warn!(
+                    "auto-banned {ip} ({}+ failed logins in {}s)",
+                    abuse.max_failures,
+                    abuse.window_secs
+                );
+                audit::log(pool, audit::SYSTEM, "ban_ip", &ip, Some(&reason)).await;
+            }
             Err(e) => tracing::warn!("auto-ban of {ip} failed: {e}"),
         }
     }
