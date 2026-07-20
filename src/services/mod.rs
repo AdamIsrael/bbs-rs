@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod archive;
+pub mod audit;
 pub mod auth;
 pub mod boards;
 pub mod bulletins;

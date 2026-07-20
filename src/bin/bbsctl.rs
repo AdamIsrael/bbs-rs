@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::{admin, auth, boards, bulletins, files, keys, oneliners};
+use bbs_rs::services::{admin, audit, auth, boards, bulletins, files, keys, oneliners};
 use bbs_rs::ssh::pubkey;
 use bbs_rs::util::fmt_time;
 
@@ -231,6 +231,12 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Show the moderation / audit log (who did what).
+    Audit {
+        /// Maximum rows to show.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
     /// Show recent login attempts.
     Logins {
         /// Filter to a single username.
@@ -322,19 +328,24 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Ban { username } => {
             admin::ban_user(&pool, &username).await?;
+            audit::log(&pool, audit::BBSCTL, "ban_user", &username, None).await;
             println!("banned user '{username}'");
         }
         Cmd::Unban { username } => {
             admin::unban_user(&pool, &username).await?;
+            audit::log(&pool, audit::BBSCTL, "unban_user", &username, None).await;
             println!("unbanned user '{username}'");
         }
         Cmd::BanIp { ip, reason } => {
             // Manual bans are permanent (no expiry).
             admin::ban_ip(&pool, &ip, &reason, None).await?;
+            let detail = (!reason.is_empty()).then_some(reason.as_str());
+            audit::log(&pool, audit::BBSCTL, "ban_ip", &ip, detail).await;
             println!("banned ip '{ip}'");
         }
         Cmd::UnbanIp { ip } => {
             admin::unban_ip(&pool, &ip).await?;
+            audit::log(&pool, audit::BBSCTL, "unban_ip", &ip, None).await;
             println!("unbanned ip '{ip}'");
         }
         Cmd::IpBans => {
@@ -357,6 +368,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("broadcast message is empty");
             }
             let id = admin::queue_broadcast(&pool, msg).await?;
+            audit::log(&pool, audit::BBSCTL, "broadcast", "all sessions", Some(msg)).await;
             println!(
                 "queued broadcast #{id}; the running server will deliver it to live sessions \
                  within one sweep interval"
@@ -364,6 +376,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Role { username, role } => {
             admin::set_role(&pool, &username, &role).await?;
+            audit::log(&pool, audit::BBSCTL, "set_role", &username, Some(&role)).await;
             println!("set role of '{username}' to '{role}'");
         }
         Cmd::Keys { username } => {
@@ -771,6 +784,23 @@ async fn main() -> anyhow::Result<()> {
                 "purged {domain}: {} board post(s), {} status(es), {} mirrored post(s), {} mail",
                 p.board_posts, p.statuses, p.mirrored_posts, p.mail
             );
+        }
+        Cmd::Audit { limit } => {
+            let entries = audit::recent(&pool, limit).await?;
+            println!(
+                "{:<20} {:<14} {:<14} {:<24} DETAIL",
+                "WHEN", "ACTOR", "ACTION", "TARGET"
+            );
+            for e in entries {
+                println!(
+                    "{:<20} {:<14} {:<14} {:<24} {}",
+                    fmt_time(e.created_at),
+                    e.actor,
+                    e.action,
+                    e.target,
+                    e.detail.as_deref().unwrap_or("-")
+                );
+            }
         }
         Cmd::Logins {
             user,

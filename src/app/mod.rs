@@ -32,7 +32,7 @@ use crate::services::presence::{OnlineUser, Presence};
 use crate::services::profiles::{self, Profile};
 use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
-use crate::services::{admin, auth, boards, bulletins, files, keys, mail, oneliners};
+use crate::services::{admin, audit, auth, boards, bulletins, files, keys, mail, oneliners};
 use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
 use crate::util::{now_unix, reply_subject};
@@ -173,6 +173,8 @@ pub struct App {
     pub admin_user_sel: usize,
     pub admin_logins: Vec<Login>,
     pub admin_login_sel: usize,
+    pub admin_audit: Vec<crate::db::models::AuditEntry>,
+    pub admin_audit_sel: usize,
 
     // Shared form for compose/register screens
     pub form: Form,
@@ -310,6 +312,8 @@ impl App {
             admin_user_sel: 0,
             admin_logins: Vec::new(),
             admin_login_sel: 0,
+            admin_audit: Vec::new(),
+            admin_audit_sel: 0,
             form: Form::new(Vec::new()),
             body: crate::app::textarea::TextArea::new(),
             body_focused: false,
@@ -364,6 +368,7 @@ impl App {
             Screen::Help => self.on_reader(key, Screen::MainMenu),
             Screen::AdminUsers => self.on_admin_users(key).await,
             Screen::AdminLogins => self.on_admin_logins(key).await,
+            Screen::AdminAudit => self.on_admin_audit(key).await,
             Screen::ComposeBroadcast => self.on_compose_broadcast(key).await,
         }
     }
@@ -897,6 +902,7 @@ impl App {
             KeyCode::Char('b') => self.admin_ban_selected().await,
             KeyCode::Char('u') => self.admin_unban_selected().await,
             KeyCode::Char('l') => self.open_admin_logins().await,
+            KeyCode::Char('a') => self.open_admin_audit().await,
             KeyCode::Char('w') => {
                 // Broadcast to everyone (#69) — "wall". Reuse the single-field
                 // compose form.
@@ -928,6 +934,14 @@ impl App {
             self.status = "Nothing to broadcast.".into();
             return;
         }
+        audit::log(
+            &self.pool,
+            &self.user.username,
+            "broadcast",
+            "all sessions",
+            Some(&text),
+        )
+        .await;
         let n = self.presence.broadcast(Event::Broadcast { text }).await;
         // `n` includes this admin's own session, which also sees the toast.
         self.status = format!("Broadcast reached {n} session(s).");
@@ -953,6 +967,14 @@ impl App {
                 // Kick the banned user's live sessions immediately.
                 let users = HashSet::from([target.username.clone()]);
                 self.presence.kick(&users, &HashSet::new()).await;
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    "ban_user",
+                    &target.username,
+                    None,
+                )
+                .await;
                 self.status = format!("Banned {}.", target.username);
                 self.reload_admin_users().await;
             }
@@ -966,6 +988,14 @@ impl App {
         };
         match admin::unban_user(&self.pool, &target.username).await {
             Ok(()) => {
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    "unban_user",
+                    &target.username,
+                    None,
+                )
+                .await;
                 self.status = format!("Unbanned {}.", target.username);
                 self.reload_admin_users().await;
             }
@@ -1003,6 +1033,32 @@ impl App {
             KeyCode::PageDown => self.admin_login_sel = (self.admin_login_sel + PAGE).min(last),
             KeyCode::Home => self.admin_login_sel = 0,
             KeyCode::End => self.admin_login_sel = last,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::AdminUsers,
+            _ => {}
+        }
+    }
+
+    async fn open_admin_audit(&mut self) {
+        match audit::recent(&self.pool, 200).await {
+            Ok(entries) => {
+                self.admin_audit = entries;
+                self.admin_audit_sel = 0;
+                self.screen = Screen::AdminAudit;
+            }
+            Err(e) => self.status = format!("Error loading audit log: {e}"),
+        }
+    }
+
+    async fn on_admin_audit(&mut self, key: KeyEvent) {
+        const PAGE: usize = 10;
+        let last = self.admin_audit.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => self.admin_audit_sel = self.admin_audit_sel.saturating_sub(1),
+            KeyCode::Down => self.admin_audit_sel = (self.admin_audit_sel + 1).min(last),
+            KeyCode::PageUp => self.admin_audit_sel = self.admin_audit_sel.saturating_sub(PAGE),
+            KeyCode::PageDown => self.admin_audit_sel = (self.admin_audit_sel + PAGE).min(last),
+            KeyCode::Home => self.admin_audit_sel = 0,
+            KeyCode::End => self.admin_audit_sel = last,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::AdminUsers,
             _ => {}
         }
@@ -1079,6 +1135,18 @@ impl App {
         let now_locked = !board.locked;
         match boards::set_locked(&self.pool, board.id, now_locked).await {
             Ok(()) => {
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    if now_locked {
+                        "lock_board"
+                    } else {
+                        "unlock_board"
+                    },
+                    &board.name,
+                    None,
+                )
+                .await;
                 self.reload_boards().await;
                 self.status = format!(
                     "{} {}.",
@@ -1264,13 +1332,26 @@ impl App {
     /// subscribers are told to drop it only once it's actually gone (#133).
     async fn delete_post(&mut self, id: i64, subject: &str, from_reader: bool) {
         let pending = self.prepare_board_delete(id).await;
-        let removed = if self.user.is_admin() {
+        let is_mod = self.user.is_admin();
+        let removed = if is_mod {
             boards::delete_message(&self.pool, id).await
         } else {
             boards::delete_own_message(&self.pool, id, &self.user).await
         };
         match removed {
             Ok(true) => {
+                // Audit only moderation deletes — an author removing their own
+                // post isn't an operator action.
+                if is_mod {
+                    audit::log(
+                        &self.pool,
+                        &self.user.username,
+                        "delete_post",
+                        subject,
+                        Some(&format!("post #{id}")),
+                    )
+                    .await;
+                }
                 self.dispatch_board_delete(pending, id).await;
                 self.reload_messages().await;
                 if from_reader {
@@ -1339,6 +1420,14 @@ impl App {
         let pin = !msg.pinned;
         match boards::set_pinned(&self.pool, msg.id, pin).await {
             Ok(()) => {
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    if pin { "pin_post" } else { "unpin_post" },
+                    &msg.subject,
+                    Some(&format!("post #{}", msg.id)),
+                )
+                .await;
                 self.reload_messages().await;
                 self.status = if pin { "Pinned." } else { "Unpinned." }.into();
             }

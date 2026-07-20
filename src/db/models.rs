@@ -138,6 +138,17 @@ pub struct Login {
     pub created_at: i64,
 }
 
+/// One moderation/audit-log entry: who did what to whom, and when (#74).
+#[derive(Debug, Clone, FromRow)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub created_at: i64,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct Board {
     pub id: i64,

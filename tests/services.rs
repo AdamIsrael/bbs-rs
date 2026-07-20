@@ -2078,3 +2078,40 @@ async fn queued_broadcasts_are_read_back_in_order_after_a_high_water_mark() {
             .is_empty()
     );
 }
+
+// ---- #74: moderation / audit log --------------------------------------------
+
+#[tokio::test]
+async fn audit_entries_come_back_newest_first_with_their_fields() {
+    use bbs_rs::services::audit;
+    let pool = setup().await;
+
+    audit::record(&pool, "sysop", "ban_user", "spammer", None)
+        .await
+        .unwrap();
+    audit::record(&pool, audit::BBSCTL, "set_role", "alice", Some("admin"))
+        .await
+        .unwrap();
+
+    let entries = audit::recent(&pool, 10).await.unwrap();
+    assert_eq!(entries.len(), 2);
+    // Newest first.
+    assert_eq!(entries[0].action, "set_role");
+    assert_eq!(entries[0].actor, "bbsctl");
+    assert_eq!(entries[0].target, "alice");
+    assert_eq!(entries[0].detail.as_deref(), Some("admin"));
+    assert_eq!(entries[1].action, "ban_user");
+    assert_eq!(entries[1].detail, None);
+}
+
+#[tokio::test]
+async fn audit_recent_respects_its_limit() {
+    use bbs_rs::services::audit;
+    let pool = setup().await;
+    for i in 0..5 {
+        audit::record(&pool, "sysop", "delete_post", &format!("post {i}"), None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(audit::recent(&pool, 3).await.unwrap().len(), 3);
+}
