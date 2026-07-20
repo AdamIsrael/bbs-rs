@@ -183,6 +183,12 @@ pub struct App {
     pub admin_login_sel: usize,
     pub admin_audit: Vec<crate::db::models::AuditEntry>,
     pub admin_audit_sel: usize,
+    // Federation domain policy (#159): (kind, domain, reason, severity) rows.
+    pub fed_policy: Vec<(String, String, String, String)>,
+    pub fed_sel: usize,
+    /// While the federation-domain composer is open, the (kind, severity) the
+    /// typed domain will be set to.
+    fed_pending: Option<(&'static str, &'static str)>,
 
     // Shared form for compose/register screens
     pub form: Form,
@@ -325,6 +331,9 @@ impl App {
             admin_login_sel: 0,
             admin_audit: Vec::new(),
             admin_audit_sel: 0,
+            fed_policy: Vec::new(),
+            fed_sel: 0,
+            fed_pending: None,
             form: Form::new(Vec::new()),
             body: crate::app::textarea::TextArea::new(),
             body_focused: false,
@@ -381,6 +390,8 @@ impl App {
             Screen::AdminUsers => self.on_admin_users(key).await,
             Screen::AdminLogins => self.on_admin_logins(key).await,
             Screen::AdminAudit => self.on_admin_audit(key).await,
+            Screen::AdminFederation => self.on_admin_federation(key).await,
+            Screen::ComposeFederation => self.on_compose_federation(key).await,
             Screen::ComposeBroadcast => self.on_compose_broadcast(key).await,
         }
     }
@@ -915,6 +926,7 @@ impl App {
             KeyCode::Char('u') => self.admin_unban_selected().await,
             KeyCode::Char('l') => self.open_admin_logins().await,
             KeyCode::Char('a') => self.open_admin_audit().await,
+            KeyCode::Char('f') => self.open_admin_federation().await,
             KeyCode::Char('w') => {
                 // Broadcast to everyone (#69) — "wall". Reuse the single-field
                 // compose form.
@@ -1073,6 +1085,124 @@ impl App {
             KeyCode::End => self.admin_audit_sel = last,
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::AdminUsers,
             _ => {}
+        }
+    }
+
+    // ---- Federation domain policy (#159) ---------------------------------
+
+    async fn open_admin_federation(&mut self) {
+        use crate::services::federation::policy;
+        let mut rows = Vec::new();
+        for kind in ["allow", "block"] {
+            match policy::list(&self.pool, kind).await {
+                Ok(entries) => {
+                    for (domain, reason, severity) in entries {
+                        rows.push((kind.to_string(), domain, reason, severity));
+                    }
+                }
+                Err(e) => {
+                    self.status = format!("Error loading federation policy: {e}");
+                    return;
+                }
+            }
+        }
+        self.fed_policy = rows;
+        self.fed_sel = 0;
+        self.screen = Screen::AdminFederation;
+    }
+
+    async fn reload_admin_federation(&mut self) {
+        let keep = self.fed_sel;
+        self.open_admin_federation().await;
+        self.fed_sel = keep.min(self.fed_policy.len().saturating_sub(1));
+    }
+
+    async fn on_admin_federation(&mut self, key: KeyEvent) {
+        let last = self.fed_policy.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => self.fed_sel = self.fed_sel.saturating_sub(1),
+            KeyCode::Down => self.fed_sel = (self.fed_sel + 1).min(last),
+            // Add an entry — compose the domain, then apply the chosen action.
+            KeyCode::Char('a') => self.begin_fed_entry("allow", "suspend"),
+            KeyCode::Char('b') => self.begin_fed_entry("block", "suspend"),
+            KeyCode::Char('s') => self.begin_fed_entry("block", "silence"),
+            KeyCode::Char('d') => self.remove_fed_entry().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::AdminUsers,
+            _ => {}
+        }
+    }
+
+    fn begin_fed_entry(&mut self, kind: &'static str, severity: &'static str) {
+        self.form = Form::new(vec![Field::new("Domain", false)]);
+        self.fed_pending = Some((kind, severity));
+        self.screen = Screen::ComposeFederation;
+    }
+
+    async fn on_compose_federation(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.fed_pending = None;
+                self.screen = Screen::AdminFederation;
+            }
+            KeyCode::Enter => self.submit_fed_entry().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_fed_entry(&mut self) {
+        use crate::services::federation::policy;
+        let Some((kind, severity)) = self.fed_pending.take() else {
+            self.screen = Screen::AdminFederation;
+            return;
+        };
+        let domain = self.form.value(0).trim().to_ascii_lowercase();
+        if domain.is_empty() {
+            self.status = "Enter a domain first.".into();
+            self.fed_pending = Some((kind, severity)); // keep composing
+            return;
+        }
+        match policy::set(&self.pool, &domain, kind, "", severity).await {
+            Ok(()) => {
+                let action = if kind == "allow" {
+                    "fed_allow"
+                } else {
+                    "fed_block"
+                };
+                let detail = (kind == "block").then_some(severity);
+                audit::log(&self.pool, &self.user.username, action, &domain, detail).await;
+                self.status = if kind == "allow" {
+                    format!("Allowing {domain}.")
+                } else {
+                    format!("Blocking {domain} ({severity}).")
+                };
+                self.reload_admin_federation().await;
+            }
+            Err(e) => self.status = format!("Could not update policy: {e}"),
+        }
+        self.screen = Screen::AdminFederation;
+    }
+
+    async fn remove_fed_entry(&mut self) {
+        use crate::services::federation::policy;
+        let Some((kind, domain, _, _)) = self.fed_policy.get(self.fed_sel).cloned() else {
+            return;
+        };
+        match policy::unset(&self.pool, &domain, &kind).await {
+            Ok(_) => {
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    "fed_remove",
+                    &domain,
+                    Some(&kind),
+                )
+                .await;
+                self.status = format!("Removed {kind} for {domain}.");
+                self.reload_admin_federation().await;
+            }
+            Err(e) => self.status = format!("Could not remove: {e}"),
         }
     }
 

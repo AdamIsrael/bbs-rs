@@ -103,6 +103,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ComposeBroadcast => render_form(f, body, " Broadcast to all sessions ", app),
         Screen::AdminLogins => render_admin_logins(f, body, app),
         Screen::AdminAudit => render_admin_audit(f, body, app),
+        Screen::AdminFederation => render_admin_federation(f, body, app),
+        Screen::ComposeFederation => render_form(f, body, " Add federation domain ", app),
     }
 
     render_status(f, chunks[2], app);
@@ -1214,6 +1216,42 @@ fn render_admin_audit(f: &mut Frame, area: Rect, app: &App) {
     render_selectable(f, area, " Admin · Audit ", lines, app.admin_audit_sel);
 }
 
+fn render_admin_federation(f: &mut Frame, area: Rect, app: &App) {
+    if app.fed_policy.is_empty() {
+        return placeholder(
+            f,
+            area,
+            " Admin · Federation ",
+            "No allow/block entries. a allow · b block · s silence a domain.",
+        );
+    }
+    let lines: Vec<Line> = app
+        .fed_policy
+        .iter()
+        .map(|(kind, domain, reason, severity)| {
+            // Show the block severity; an allow entry has no severity to show.
+            let tag = if kind == "block" {
+                format!("[{severity}] ")
+            } else {
+                String::new()
+            };
+            let reason = if reason.is_empty() {
+                String::new()
+            } else {
+                format!(" — {reason}")
+            };
+            Line::from(format!(
+                "{:<7} {:<32} {}{}",
+                kind,
+                truncate(domain, 32),
+                tag,
+                truncate(&reason, 30)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Admin · Federation ", lines, app.fed_sel);
+}
+
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let bbs = &app.config.bbs;
     let mut text = format!("{} — {}\n\n", bbs.name, bbs.tagline);
@@ -1308,6 +1346,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Help => "Help",
         Screen::AdminUsers => "Admin · Users",
         Screen::AdminAudit => "Admin · Audit",
+        Screen::AdminFederation => "Admin · Federation",
+        Screen::ComposeFederation => "Add Domain",
         Screen::ComposeBroadcast => "Broadcast",
         Screen::AdminLogins => "Admin · Logins",
     }
@@ -1391,9 +1431,11 @@ fn hints(
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => {
-            " ↑/↓ · b ban · u unban · w broadcast · l logins · a audit · Esc back "
+            " ↑/↓ · b ban · u unban · w broadcast · l logins · a audit · f federation · Esc back "
         }
         Screen::AdminAudit => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
+        Screen::AdminFederation => " ↑/↓ · a allow · b block · s silence · d remove · Esc back ",
+        Screen::ComposeFederation => " type a domain · Enter apply · Esc cancel ",
         Screen::ComposeBroadcast => " type your message · Enter send to all · Esc cancel ",
         Screen::AdminLogins => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
     };

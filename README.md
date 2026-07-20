@@ -299,8 +299,9 @@ normal account, then run `bbsctl role <that-user> admin`. Registration refuses r
 A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get
 an in-BBS **Admin** menu to list users, ban/unban, **broadcast to all sessions** (`w`), view recent
-logins (`l`), and view the **moderation/audit log** (`a`). Every login attempt (success or failure) is
-recorded with username, IP, and timestamp.
+logins (`l`), view the **moderation/audit log** (`a`), and manage **federation domain policy** (`f` —
+allow/block/silence/remove a domain, mirroring `bbsctl ap-allow`/`ap-block`). Every login attempt
+(success or failure) is recorded with username, IP, and timestamp.
 
 **Moderation / audit log.** Every moderator action — ban/unban (user and IP), role change, board
 lock/unlock, post pin/delete, and broadcast — is recorded with *who* did it, *what* was acted on, and
