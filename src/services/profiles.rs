@@ -29,6 +29,8 @@ pub struct Profile {
     pub last_login: Option<i64>,
     /// Number of board messages authored.
     pub post_count: i64,
+    /// Whether the user has opted out of the finger service (#77).
+    pub finger_optout: bool,
 }
 
 /// The editable columns pulled straight from `users`.
@@ -42,13 +44,14 @@ struct ProfileRow {
     location: String,
     tagline: String,
     signature: String,
+    finger_optout: bool,
 }
 
 /// Fetch a profile by user id.
 pub async fn get_profile(pool: &SqlitePool, user_id: i64) -> Result<Profile> {
     let row = sqlx::query_as::<_, ProfileRow>(
         "SELECT id AS user_id, username, role, created_at, \
-         real_name, location, tagline, signature FROM users WHERE id = ?",
+         real_name, location, tagline, signature, finger_optout FROM users WHERE id = ?",
     )
     .bind(user_id)
     .fetch_optional(pool)
@@ -61,7 +64,7 @@ pub async fn get_profile(pool: &SqlitePool, user_id: i64) -> Result<Profile> {
 pub async fn get_profile_by_name(pool: &SqlitePool, username: &str) -> Result<Profile> {
     let row = sqlx::query_as::<_, ProfileRow>(
         "SELECT id AS user_id, username, role, created_at, \
-         real_name, location, tagline, signature FROM users WHERE username = ?",
+         real_name, location, tagline, signature, finger_optout FROM users WHERE username = ?",
     )
     .bind(username)
     .fetch_optional(pool)
@@ -92,7 +95,19 @@ async fn hydrate(pool: &SqlitePool, row: ProfileRow) -> Result<Profile> {
         signature: row.signature,
         last_login,
         post_count,
+        finger_optout: row.finger_optout,
     })
+}
+
+/// Toggle a user's finger opt-out (#77), returning the new value. When set, the
+/// finger service treats the user as if they don't exist.
+pub async fn set_finger_optout(pool: &SqlitePool, user_id: i64, optout: bool) -> Result<()> {
+    sqlx::query("UPDATE users SET finger_optout = ? WHERE id = ?")
+        .bind(optout as i64)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Update a user's editable profile fields. Values are trimmed and length-capped

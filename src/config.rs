@@ -54,6 +54,7 @@ pub struct Settings {
     pub theme: ThemeConfig,
     pub art: Art,
     pub web: Web,
+    pub finger: Finger,
     pub federation: Federation,
     pub oneliners: Oneliners,
     pub seed: Seed,
@@ -225,6 +226,29 @@ impl Default for Web {
             acme_email: String::new(),
             acme_cache: "acme-cache".into(),
             acme_staging: false,
+        }
+    }
+}
+
+/// A read-only `finger` service (RFC 1288, #77). Off by default. When enabled
+/// it listens on TCP `port` (79 by convention, which needs privilege to bind —
+/// operators typically use a higher port behind a redirect, or grant the
+/// capability). `finger @host` lists who's online; `finger user@host` shows a
+/// user's public profile. No auth, no writes; a user can opt out per-account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Finger {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for Finger {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "0.0.0.0".into(),
+            port: 79,
         }
     }
 }
@@ -892,6 +916,16 @@ tls = true
 # acme_email   = \"sysop@example.com\"
 # acme_cache   = \"acme-cache\"
 # acme_staging = false   # true = Let's Encrypt staging (untrusted, for testing)
+
+[finger]
+# A read-only finger service (RFC 1288). Off by default. `finger @host` lists
+# who's online; `finger user@host` shows a user's public profile. No auth, no
+# writes; a user can hide themselves from the Profile screen (press f).
+enabled = false
+host = \"0.0.0.0\"
+# Port 79 is the finger convention but needs privilege to bind — run behind a
+# redirect, grant the capability, or pick a high port.
+port = 79
 
 [federation]
 # ActivityPub federation: syndicate boards across bbs-rs instances, and make

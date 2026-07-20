@@ -2254,8 +2254,33 @@ impl App {
             KeyCode::Char('i') if self.viewing_own_profile() && !self.user.is_guest() => {
                 self.open_ignore_list().await
             }
+            KeyCode::Char('f') if self.viewing_own_profile() && !self.user.is_guest() => {
+                self.toggle_finger_optout().await
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.profile_back,
             _ => {}
+        }
+    }
+
+    /// Toggle the viewer's own finger visibility (#77) and refresh the shown
+    /// profile so the marker updates in place.
+    async fn toggle_finger_optout(&mut self) {
+        let now_opted_out = !self
+            .current_profile
+            .as_ref()
+            .is_some_and(|p| p.finger_optout);
+        match profiles::set_finger_optout(&self.pool, self.user.id, now_opted_out).await {
+            Ok(()) => {
+                if let Some(p) = self.current_profile.as_mut() {
+                    p.finger_optout = now_opted_out;
+                }
+                self.status = if now_opted_out {
+                    "Hidden from finger.".into()
+                } else {
+                    "Listed in finger.".into()
+                };
+            }
+            Err(e) => self.status = format!("Could not update finger setting: {e}"),
         }
     }
 
