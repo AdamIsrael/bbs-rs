@@ -44,6 +44,8 @@ pub enum Screen {
     AdminUsers,
     AdminLogins,
     AdminAudit,
+    AdminFederation,
+    ComposeFederation,
     ComposeBroadcast,
 }
 
