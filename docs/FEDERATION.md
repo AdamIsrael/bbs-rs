@@ -416,6 +416,25 @@ Phase 4 (#110) is sliced:
 Phase 2 leads because it pays off against live Mastodon sooner than board syndication, which needs a
 second bbs-rs instance to exist before it means anything.
 
+### #156 — outbound edit/delete propagation for board posts (post-epic follow-up)
+
+#92 gave authors in-BBS edit/delete of their own posts, but locally: a subscriber kept the stale copy.
+This closes the loop on the **outbound** side. A successful edit now fans out the Group's
+`Announce{Update{Page}}` (`deliver_board_update`), the mirror image of the `Announce{Create{Page}}` a new
+post already sent — same `board_item_for` body, same followers, differing only in the inner activity's
+`type` and its ids. Author-initiated deletes already propagated: `delete_post` is the one path #92 routes
+both admin and author deletes through, and it was already wrapped in the #133 build-before/dispatch-after
+`Announce{Delete}` ordering, so no new work there.
+
+**The `Announce` id is minted from our origin and the local row id, never the post's URI** — the #131 rule
+applied to `Update`. An edit of a *remote-authored* post (one that arrived at a board we host) must still
+be **our** activity; deriving the id from the post would put it under the author's domain, and their own
+server would then reject the announcement as spoofed. The inbound half was already in place from #133
+(`Update::receive_announced` → `update_announced`, authorization in the SQL `WHERE`), so this is purely
+the missing outbound leg. Verified end-to-end by a two-instance round-trip in one process: instance A's
+serialized `Announce{Update}` is fed through instance B's real inbound handler and refreshes B's mirror —
+the same test shape that guards against outbound/inbound wire drift.
+
 ### What phase 2 does *not* deliver
 
 **Being followed requires an inbox.** Mastodon POSTs a `Follow` and expects an `Accept`; with no inbox

@@ -857,6 +857,43 @@ pub mod objects {
             object: create,
         }
     }
+
+    /// Wrap an edited board `Page` in the Group's `Announce{Update{Page}}` so
+    /// subscribers refresh their mirror (#156). The mirror image of
+    /// [`board_announce`], differing only in the inner activity's `type`
+    /// (`Update`, not `Create`) and the ids — both the inner `Update`'s and the
+    /// `Announce`'s own id are distinct from the original Create's, and, exactly
+    /// as in [`board_announce`], the `Announce` id is minted from **our** origin
+    /// and the local row id, never from the (possibly remote) post's URI.
+    pub fn board_update(
+        origin: &Origin,
+        slug: &str,
+        author_uri: &str,
+        local_id: i64,
+        page: BoardItem,
+    ) -> Announce {
+        let group_uri = origin.group(slug);
+        let followers = origin.group_followers(slug);
+        let update = CreatePage {
+            context: AS_CONTEXT,
+            kind: "Update",
+            id: format!("{}/update", page.id),
+            actor: author_uri.to_string(),
+            to: page.to.clone(),
+            cc: page.cc.clone(),
+            audience: group_uri.clone(),
+            object: page,
+        };
+        Announce {
+            context: AS_CONTEXT,
+            kind: "Announce",
+            id: format!("{group_uri}/announce/update/{local_id}"),
+            actor: group_uri,
+            to: vec![PUBLIC.to_string()],
+            cc: vec![followers],
+            object: update,
+        }
+    }
 }
 
 /// Build the AP object for a board message — the single place that decides what
@@ -1447,6 +1484,37 @@ pub mod outbound {
         let announce = objects::board_announce(origin, &keys.slug, &author_uri, msg.id, item);
         let activity = serde_json::to_string(&announce)
             .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce: {e}")))?;
+
+        let mut queued = 0;
+        for inbox in inboxes {
+            queue::enqueue(pool, &keys.actor_uri, &inbox, &activity, Some(&announce.id)).await?;
+            queued += 1;
+        }
+        Ok(queued)
+    }
+
+    /// Fan an **edited** board post out to the board's Group followers as the
+    /// Group's `Announce{Update{…}}` (#156), so their mirrors refresh. Only
+    /// posts that already syndicated have an `ap_id`; editing one that never did
+    /// mints its URI here, which is fine — the very next thing we do is Announce
+    /// it, and thereafter its Create/Update/Delete all share that id. Returns the
+    /// number of deliveries queued (`0` with no remote subscribers).
+    pub async fn deliver_board_update(
+        pool: &SqlitePool,
+        origin: &Origin,
+        message_id: i64,
+    ) -> Result<usize> {
+        let msg = crate::services::boards::get_message(pool, message_id).await?;
+        let keys = ensure_group_keys(pool, origin, msg.board_id).await?;
+        let inboxes = follows::follower_inboxes(pool, &keys.actor_uri).await?;
+        if inboxes.is_empty() {
+            return Ok(0);
+        }
+
+        let (item, author_uri) = board_item_for(pool, origin, &keys.slug, &msg).await?;
+        let announce = objects::board_update(origin, &keys.slug, &author_uri, msg.id, item);
+        let activity = serde_json::to_string(&announce)
+            .map_err(|e| AppError::Other(anyhow::anyhow!("serializing Announce{{Update}}: {e}")))?;
 
         let mut queued = 0;
         for inbox in inboxes {
