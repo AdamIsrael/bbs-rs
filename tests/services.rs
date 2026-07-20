@@ -2115,3 +2115,115 @@ async fn audit_recent_respects_its_limit() {
     }
     assert_eq!(audit::recent(&pool, 3).await.unwrap().len(), 3);
 }
+
+// ---- #97: ignore / block list -----------------------------------------------
+
+#[tokio::test]
+async fn block_hides_and_is_queryable_but_refuses_admins_self_and_guests() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{admin, auth, blocks};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+    auth::register_user(&pool, "boss", "pw", &Default::default())
+        .await
+        .unwrap();
+    admin::set_role(&pool, "boss", "admin").await.unwrap();
+    let boss = auth::find_user(&pool, "boss").await.unwrap().unwrap();
+
+    // Happy path: alice blocks bob (idempotent).
+    blocks::block(&pool, &alice, &bob).await.unwrap();
+    blocks::block(&pool, &alice, &bob).await.unwrap();
+    assert!(blocks::is_blocked(&pool, alice.id, bob.id).await.unwrap());
+    assert!(
+        !blocks::is_blocked(&pool, bob.id, alice.id).await.unwrap(),
+        "one-directional"
+    );
+    assert_eq!(
+        blocks::blocked_ids(&pool, alice.id).await.unwrap(),
+        std::collections::HashSet::from([bob.id])
+    );
+    assert_eq!(
+        blocks::list_blocked(&pool, alice.id).await.unwrap(),
+        vec![(bob.id, "bob".to_string())]
+    );
+
+    // Guards.
+    assert!(
+        matches!(
+            blocks::block(&pool, &alice, &boss).await,
+            Err(AppError::Blocked)
+        ),
+        "can't block an admin"
+    );
+    assert!(
+        matches!(
+            blocks::block(&pool, &alice, &alice).await,
+            Err(AppError::Blocked)
+        ),
+        "can't block yourself"
+    );
+    assert!(
+        matches!(
+            blocks::block(&pool, &guest, &bob).await,
+            Err(AppError::GuestNotAllowed)
+        ),
+        "guest has no ignore list"
+    );
+
+    // Unblock.
+    blocks::unblock(&pool, alice.id, bob.id).await.unwrap();
+    assert!(!blocks::is_blocked(&pool, alice.id, bob.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_blocked_sender_cannot_mail_the_blocker_but_an_admin_still_can() {
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{admin, auth, blocks, mail};
+    let pool = setup().await;
+    let alice = auth::register_user(&pool, "alice", "pw", &Default::default())
+        .await
+        .unwrap();
+    let bob = auth::register_user(&pool, "bob", "pw", &Default::default())
+        .await
+        .unwrap();
+    // alice blocks bob.
+    blocks::block(&pool, &alice, &bob).await.unwrap();
+
+    // bob -> alice is refused.
+    assert!(matches!(
+        mail::send_mail(&pool, &bob, "alice", "hi", "let me in", &Default::default()).await,
+        Err(AppError::Blocked)
+    ));
+    assert!(mail::inbox(&pool, alice.id).await.unwrap().is_empty());
+
+    // A sysop is exempt even if (somehow) blocked.
+    auth::register_user(&pool, "boss", "pw", &Default::default())
+        .await
+        .unwrap();
+    admin::set_role(&pool, "boss", "admin").await.unwrap();
+    let boss = auth::find_user(&pool, "boss").await.unwrap().unwrap();
+    // Force a stale block row against the admin to prove the enforcement exemption.
+    sqlx::query("INSERT INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, 0)")
+        .bind(alice.id)
+        .bind(boss.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    mail::send_mail(
+        &pool,
+        &boss,
+        "alice",
+        "notice",
+        "maintenance",
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mail::inbox(&pool, alice.id).await.unwrap().len(), 1);
+}

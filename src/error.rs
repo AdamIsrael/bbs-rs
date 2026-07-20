@@ -58,6 +58,9 @@ pub enum AppError {
     #[error("recipient not found")]
     RecipientNotFound,
 
+    #[error("that user isn't accepting messages from you")]
+    Blocked,
+
     #[error("not found")]
     NotFound,
 

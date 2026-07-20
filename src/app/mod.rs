@@ -32,7 +32,9 @@ use crate::services::presence::{OnlineUser, Presence};
 use crate::services::profiles::{self, Profile};
 use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
-use crate::services::{admin, audit, auth, boards, bulletins, files, keys, mail, oneliners};
+use crate::services::{
+    admin, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners,
+};
 use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
 use crate::util::{now_unix, reply_subject};
@@ -118,6 +120,12 @@ pub struct App {
     pub current_profile: Option<Profile>,
     /// Where the profile screen returns to (main menu, or who's-online).
     profile_back: Screen,
+    /// Whether the viewer has blocked the currently-shown profile (#97).
+    pub current_profile_blocked: bool,
+
+    // Ignore / block list (#97)
+    pub ignored: Vec<(i64, String)>,
+    pub ignored_sel: usize,
 
     // Stats / leaderboards
     pub stats: Option<Stats>,
@@ -279,6 +287,9 @@ impl App {
             reply_parent: None,
             current_profile: None,
             profile_back: Screen::MainMenu,
+            current_profile_blocked: false,
+            ignored: Vec::new(),
+            ignored_sel: 0,
             stats: None,
             search_results: Vec::new(),
             search_sel: 0,
@@ -351,6 +362,7 @@ impl App {
             Screen::WhoOnline => self.on_who(key).await,
             Screen::ComposePage => self.on_compose_page(key).await,
             Screen::Profile => self.on_profile(key).await,
+            Screen::IgnoreList => self.on_ignore_list(key).await,
             Screen::EditProfile => self.on_edit_profile(key).await,
             Screen::Stats => self.on_stats(key).await,
             Screen::SearchInput => self.on_search_input(key).await,
@@ -1188,7 +1200,7 @@ impl App {
                     }
                     self.board_unread.remove(&board.id);
                 }
-                self.messages = m;
+                self.messages = self.hide_blocked(m).await;
                 self.current_board = Some(board);
                 true
             }
@@ -1199,6 +1211,26 @@ impl App {
         }
     }
 
+    /// Drop posts authored by users this reader has blocked (#97). Admins can't
+    /// be blocked, so moderation/pinned notices always remain visible. Applied
+    /// on every path that loads a board's messages, so a block takes effect
+    /// immediately — on open and on reload.
+    async fn hide_blocked(&self, mut m: Vec<boards::ThreadItem>) -> Vec<boards::ThreadItem> {
+        if let Ok(blocked) = blocks::blocked_ids(&self.pool, self.user.id).await
+            && !blocked.is_empty()
+        {
+            m.retain(|item| !blocked.contains(&item.message.author_id));
+        }
+        m
+    }
+
+    /// Test hook: reload the current board's message list, exercising the
+    /// block/ignore filter (#97) on the exact code path the app uses.
+    #[doc(hidden)]
+    pub async fn reload_messages_for_test(&mut self) {
+        self.reload_messages().await;
+    }
+
     /// Reload the current board's messages in place (after posting or a
     /// moderation change), keeping the selection in range.
     async fn reload_messages(&mut self) {
@@ -1206,6 +1238,7 @@ impl App {
             return;
         };
         if let Ok(m) = boards::list_thread(&self.pool, board_id).await {
+            let m = self.hide_blocked(m).await;
             self.msg_sel = self.msg_sel.min(m.len().saturating_sub(1));
             self.messages = m;
         }
@@ -1883,6 +1916,17 @@ impl App {
             self.page_target = Some(target); // keep composing
             return;
         }
+        // Honor the target's block list (#97), unless the sender is a sysop.
+        if !self.user.is_admin()
+            && let Ok(Some(t)) = auth::find_user(&self.pool, &target).await
+            && blocks::is_blocked(&self.pool, t.id, self.user.id)
+                .await
+                .unwrap_or(false)
+        {
+            self.status = format!("{target} isn't accepting pages from you.");
+            self.screen = Screen::WhoOnline;
+            return;
+        }
         let event = Event::Paged {
             from: self.user.username.clone(),
             body,
@@ -1901,12 +1945,26 @@ impl App {
 
     // ---- Profiles --------------------------------------------------------
 
+    /// Note whether the viewer has blocked the profile now shown (#97), so the
+    /// Profile screen can label the toggle. Own profile is never "blocked".
+    async fn refresh_profile_block_state(&mut self) {
+        self.current_profile_blocked = match self.current_profile.as_ref() {
+            Some(p) if p.user_id != self.user.id => {
+                blocks::is_blocked(&self.pool, self.user.id, p.user_id)
+                    .await
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+    }
+
     /// Load and show a profile by user id, remembering where to return.
     async fn open_profile(&mut self, user_id: i64, back: Screen) {
         match profiles::get_profile(&self.pool, user_id).await {
             Ok(p) => {
                 self.current_profile = Some(p);
                 self.profile_back = back;
+                self.refresh_profile_block_state().await;
                 self.screen = Screen::Profile;
             }
             Err(e) => self.status = format!("Error loading profile: {e}"),
@@ -1919,6 +1977,7 @@ impl App {
             Ok(p) => {
                 self.current_profile = Some(p);
                 self.profile_back = back;
+                self.refresh_profile_block_state().await;
                 self.screen = Screen::Profile;
             }
             Err(e) => self.status = format!("Error loading profile: {e}"),
@@ -1937,12 +1996,97 @@ impl App {
         self.viewing_own_profile() && !self.user.is_guest()
     }
 
+    /// Whether the shown profile can be blocked/unblocked by the viewer (#97):
+    /// someone else's, a real (non-guest) viewer, and not an admin's.
+    pub fn can_block_current_profile(&self) -> bool {
+        !self.user.is_guest()
+            && self
+                .current_profile
+                .as_ref()
+                .is_some_and(|p| p.user_id != self.user.id && p.role != "admin")
+    }
+
     async fn on_profile(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('e') if self.viewing_own_profile() && !self.user.is_guest() => {
                 self.begin_edit_profile()
             }
+            KeyCode::Char('b') if self.can_block_current_profile() => {
+                self.toggle_block_current_profile().await
+            }
+            KeyCode::Char('i') if self.viewing_own_profile() && !self.user.is_guest() => {
+                self.open_ignore_list().await
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.profile_back,
+            _ => {}
+        }
+    }
+
+    async fn toggle_block_current_profile(&mut self) {
+        let Some(p) = self.current_profile.clone() else {
+            return;
+        };
+        if self.current_profile_blocked {
+            match blocks::unblock(&self.pool, self.user.id, p.user_id).await {
+                Ok(()) => {
+                    self.current_profile_blocked = false;
+                    self.status = format!("Unblocked {}.", p.username);
+                }
+                Err(e) => self.status = format!("Could not unblock: {e}"),
+            }
+        } else {
+            // Resolve the target to a User so the service can apply its guards
+            // (no admins, no self, no guests).
+            let target = match auth::find_user(&self.pool, &p.username).await {
+                Ok(Some(u)) => u,
+                _ => {
+                    self.status = "Could not find that user.".into();
+                    return;
+                }
+            };
+            match blocks::block(&self.pool, &self.user, &target).await {
+                Ok(()) => {
+                    self.current_profile_blocked = true;
+                    self.status = format!(
+                        "Blocked {}. You won't see their posts or hear from them.",
+                        p.username
+                    );
+                }
+                Err(e) => self.status = format!("Could not block: {e}"),
+            }
+        }
+    }
+
+    async fn open_ignore_list(&mut self) {
+        match blocks::list_blocked(&self.pool, self.user.id).await {
+            Ok(list) => {
+                self.ignored = list;
+                self.ignored_sel = 0;
+                self.screen = Screen::IgnoreList;
+            }
+            Err(e) => self.status = format!("Error loading ignore list: {e}"),
+        }
+    }
+
+    async fn on_ignore_list(&mut self, key: KeyEvent) {
+        let last = self.ignored.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => self.ignored_sel = self.ignored_sel.saturating_sub(1),
+            KeyCode::Down => self.ignored_sel = (self.ignored_sel + 1).min(last),
+            KeyCode::Char('u') | KeyCode::Enter => {
+                if let Some((id, name)) = self.ignored.get(self.ignored_sel).cloned() {
+                    match blocks::unblock(&self.pool, self.user.id, id).await {
+                        Ok(()) => {
+                            self.ignored.remove(self.ignored_sel);
+                            self.ignored_sel =
+                                self.ignored_sel.min(self.ignored.len().saturating_sub(1));
+                            self.status = format!("Unblocked {name}.");
+                        }
+                        Err(e) => self.status = format!("Could not unblock: {e}"),
+                    }
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::Profile,
             _ => {}
         }
     }

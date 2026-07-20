@@ -192,6 +192,10 @@ pub async fn send_mail(
         .await?
         .filter(|u| !u.is_remote)
         .ok_or(AppError::RecipientNotFound)?;
+    // Honor the recipient's block list (#97) — but a sysop can always be heard.
+    if !from.is_admin() && crate::services::blocks::is_blocked(pool, to.id, from.id).await? {
+        return Err(AppError::Blocked);
+    }
     insert(pool, from.id, to.id, subject, body).await?;
     Ok(())
 }
