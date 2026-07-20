@@ -147,6 +147,10 @@ pub struct App {
     pub current_mail: Option<Mail>,
     /// Where to return after a mail-delete confirmation (#70).
     mail_delete_return: Screen,
+    // Mail full-text search (#93)
+    pub mail_search: Vec<Mail>,
+    pub mail_search_sel: usize,
+    pub mail_search_query: String,
 
     // Who's online
     pub online: Vec<OnlineUser>,
@@ -306,6 +310,9 @@ impl App {
             mail_sel: 0,
             current_mail: None,
             mail_delete_return: Screen::Mailbox,
+            mail_search: Vec::new(),
+            mail_search_sel: 0,
+            mail_search_query: String::new(),
             online: Vec::new(),
             who_sel: 0,
             page_target: None,
@@ -365,6 +372,8 @@ impl App {
             Screen::ReadMessage => self.on_read_message(key).await,
             Screen::ComposePost => self.on_compose_post(key).await,
             Screen::Mailbox => self.on_mailbox(key).await,
+            Screen::MailSearchInput => self.on_mail_search_input(key).await,
+            Screen::MailSearchResults => self.on_mail_search_results(key).await,
             Screen::ReadMail => self.on_read_mail(key).await,
             Screen::ConfirmDeleteMail => self.on_confirm_delete_mail(key).await,
             Screen::ComposeMail => self.on_compose_mail(key).await,
@@ -1822,6 +1831,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.begin_compose_mail(None),
+            KeyCode::Char('/') => self.begin_mail_search(),
             // Delete the selected message from the list, with a confirm.
             KeyCode::Char('d') => {
                 if let Some(m) = self.mails.get(self.mail_sel).cloned() {
@@ -1836,6 +1846,74 @@ impl App {
                 self.refresh_unread().await;
                 self.screen = Screen::MainMenu;
             }
+            _ => {}
+        }
+    }
+
+    // ---- Mail full-text search (#93) -------------------------------------
+
+    fn begin_mail_search(&mut self) {
+        self.form = Form::new(vec![Field::new("Search mail", false)]);
+        self.screen = Screen::MailSearchInput;
+    }
+
+    async fn on_mail_search_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Mailbox,
+            KeyCode::Enter => self.submit_mail_search().await,
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_mail_search(&mut self) {
+        let query = self.form.value(0).to_string();
+        if query.trim().is_empty() {
+            self.status = "Enter a search term.".into();
+            return;
+        }
+        match search::search_mail(&self.pool, self.user.id, &query, search::SEARCH_LIMIT).await {
+            Ok(hits) => {
+                if hits.is_empty() {
+                    self.status = format!("No mail matches \"{query}\".");
+                }
+                self.mail_search = hits;
+                self.mail_search_sel = 0;
+                self.mail_search_query = query;
+                self.screen = Screen::MailSearchResults;
+            }
+            Err(e) => self.status = format!("Search failed: {e}"),
+        }
+    }
+
+    async fn on_mail_search_results(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.mail_search_sel = self.mail_search_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.mail_search_sel =
+                    (self.mail_search_sel + 1).min(self.mail_search.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(m) = self.mail_search.get(self.mail_search_sel) {
+                    match mail::read_mail(&self.pool, m.id, self.user.id).await {
+                        Ok(full) => {
+                            self.current_mail = Some(full);
+                            // Returning from the reader goes to the mailbox; land
+                            // there rather than back in a now-stale result list.
+                            self.screen = Screen::ReadMail;
+                        }
+                        Err(e) => self.status = format!("Error: {e}"),
+                    }
+                }
+            }
+            // Refine: back to the input, prefilled with the last query.
+            KeyCode::Char('/') => {
+                self.form = Form::new(vec![Field::new("Search mail", false)]);
+                self.form.fields[0].value = self.mail_search_query.clone();
+                self.screen = Screen::MailSearchInput;
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::Mailbox,
             _ => {}
         }
     }

@@ -74,6 +74,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             render_compose(f, body, title, app)
         }
         Screen::Mailbox => render_mailbox(f, body, app),
+        Screen::MailSearchInput => render_form(f, body, " Search Mail ", app),
+        Screen::MailSearchResults => render_mail_search_results(f, body, app),
         Screen::ReadMail => render_read_mail(f, body, app),
         Screen::ConfirmDeleteMail => render_confirm_delete_mail(f, body, app),
         Screen::ComposeMail => render_compose(f, body, " Compose Mail ", app),
@@ -633,6 +635,36 @@ fn render_mailbox(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     render_selectable(f, area, " Mailbox ", lines, app.mail_sel);
+}
+
+fn render_mail_search_results(f: &mut Frame, area: Rect, app: &App) {
+    let title = format!(
+        " Mail matching \"{}\" ",
+        truncate(&app.mail_search_query, 30)
+    );
+    if app.mail_search.is_empty() {
+        return placeholder(
+            f,
+            area,
+            &title,
+            "No matching mail. Press / to search again.",
+        );
+    }
+    let lines: Vec<Line> = app
+        .mail_search
+        .iter()
+        .map(|m| {
+            let flag = if m.read_at.is_none() { "*" } else { " " };
+            Line::from(format!(
+                "{} {:<32} from {:<20} {}",
+                flag,
+                truncate(&m.subject, 32),
+                truncate(&m.from_name, 20),
+                fmt_time(m.created_at)
+            ))
+        })
+        .collect();
+    render_selectable(f, area, &title, lines, app.mail_search_sel);
 }
 
 fn render_read_mail(f: &mut Frame, area: Rect, app: &App) {
@@ -1322,6 +1354,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadMessage => "Reading",
         Screen::ComposePost => "New Post",
         Screen::Mailbox => "Mailbox",
+        Screen::MailSearchInput => "Search Mail",
+        Screen::MailSearchResults => "Mail Search",
         Screen::ReadMail => "Reading Mail",
         Screen::ConfirmDeleteMail => "Delete Mail",
         Screen::ComposeMail => "Compose Mail",
@@ -1397,7 +1431,9 @@ fn hints(
             " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel "
         }
         Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",
-        Screen::Mailbox => " ↑/↓ move · Enter read · n compose · d delete · Esc back ",
+        Screen::Mailbox => " ↑/↓ move · Enter read · n compose · / search · d delete · Esc back ",
+        Screen::MailSearchInput => " type a query · Enter search · Esc cancel ",
+        Screen::MailSearchResults => " ↑/↓ move · Enter read · / refine · Esc back ",
         Screen::ConfirmDeleteMail => " y delete · any key keep ",
         Screen::WhoOnline => " ↑/↓ move · Enter profile · p page · r refresh · Esc back ",
         Screen::ComposePage => " type your message · Enter send · Esc cancel ",

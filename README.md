@@ -26,7 +26,8 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   **transfer over SFTP** (`sftp user@host`).
 - **User profiles** — real name, location, tagline, and a **signature** shown beneath your posts;
   a profile screen also shows member-since, last-on, and post count. View others' profiles from Who's Online.
-- **Private mail** — send and read user-to-user messages.
+- **Private mail** — send and read user-to-user messages; **full-text search** your own mailbox with `/`
+  (SQLite FTS5, scoped to mail addressed to you).
 - **Ignore / block list** — block another user (`b` on their profile) to hide their board posts and
   refuse their mail and pages. Review and unblock from your own profile (`i` → Ignored Users). Admins
   can't be blocked, so a sysop is always reachable.
