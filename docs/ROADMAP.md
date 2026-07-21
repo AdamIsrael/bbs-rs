@@ -168,6 +168,14 @@ Today the menu is a compile-time `MenuItem` enum with hardcoded labels/order (`s
 | **2 — ANSI backdrop + item placement** | L | [#85](https://github.com/AdamIsrael/bbs-rs/issues/85) |
 | **3 — submenus & custom targets** *(doors/boards/nested menus)* | M | [#86](https://github.com/AdamIsrael/bbs-rs/issues/86) |
 
+**Shipped (all phases).** `[[menu]]` drives labels/order/hotkeys with feature and role gating; an
+`[art] welcome` backdrop plus per-entry `row`/`col` renders the menu as a placed ANSI screen (falling
+back to the list when incomplete or too small); and an entry's `action` can target a built-in, a
+`door:<name>`, a `board:<name>`, or a `submenu:<name>` — the last pushing a `[[submenus.<name>]]` group
+onto a menu stack so menus nest into a tree (Esc pops one level, capped against cycles). `bbsctl
+validate-menu` reports unknown actions, dangling door/board/submenu targets, duplicate hotkeys, and
+submenu cycles.
+
 ## Theme G — Context-aware templating *(epic [#91](https://github.com/AdamIsrael/bbs-rs/issues/91))*
 
 Vary layout and content by runtime context — most notably the **connection method (SSH vs web)**, so a web

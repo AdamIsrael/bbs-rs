@@ -249,6 +249,10 @@ enum Cmd {
         #[arg(long)]
         failures: bool,
     },
+    /// Check the configured menu (#86) for problems: unknown actions, dangling
+    /// door/board/submenu targets, duplicate hotkeys within a level, submenu
+    /// cycles, and unreachable submenus. Exits non-zero if any error is found.
+    ValidateMenu,
     /// Snapshot the database (and optionally the file blobs) into a directory.
     /// Uses SQLite's online VACUUM INTO, so it's safe while the server runs.
     Backup {
@@ -275,6 +279,180 @@ async fn local_federatable_user(
         "{username} cannot federate (guests and remote actors don't have follows)"
     );
     Ok(user)
+}
+
+/// The hotkey an entry would resolve to (#86), mirroring `build_menu_group`:
+/// the operator's `key`, else the target's default (a built-in's key, or the
+/// first letter of a compound target's label/name). Used to spot collisions.
+fn menu_effective_key(
+    e: &bbs_rs::config::MenuEntry,
+    action: &bbs_rs::app::state::MenuAction,
+) -> Option<char> {
+    use bbs_rs::app::state::MenuAction;
+    if let Some(c) = e.key.chars().next() {
+        return Some(c);
+    }
+    let label = if e.label.trim().is_empty() {
+        match action {
+            MenuAction::Builtin(i) => i.label().to_string(),
+            MenuAction::Door(n) | MenuAction::Board(n) | MenuAction::Submenu(n) => n.clone(),
+        }
+    } else {
+        e.label.trim().to_string()
+    };
+    action.default_key(&label)
+}
+
+/// Validate the configured menu tree (#86). Prints every problem found and
+/// returns whether the config is error-free (warnings don't count as failure).
+async fn validate_menu(
+    settings: &bbs_rs::config::Settings,
+    pool: &sqlx::SqlitePool,
+) -> anyhow::Result<bool> {
+    use bbs_rs::app::state::MenuAction;
+    use std::collections::{HashMap, HashSet};
+
+    let board_names: HashSet<String> = boards::list_boards(pool)
+        .await?
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    let door_names: HashSet<&str> = settings.doors.iter().map(|d| d.name.as_str()).collect();
+    let submenu_names: HashSet<&str> = settings.submenus.keys().map(|s| s.as_str()).collect();
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Validate one named group, returning the submenu names it references.
+    let validate_group = |group: &str,
+                          entries: &[bbs_rs::config::MenuEntry],
+                          errors: &mut Vec<String>,
+                          warnings: &mut Vec<String>|
+     -> Vec<String> {
+        let mut refs = Vec::new();
+        let mut keys: HashMap<char, String> = HashMap::new();
+        // An empty top-level menu is the "use the built-in default" signal, so
+        // only an empty *submenu* (which would resolve to nothing) is notable.
+        if entries.is_empty() && group != "menu" {
+            warnings.push(format!("{group}: has no entries"));
+        }
+        for e in entries {
+            let Some(action) = MenuAction::parse(&e.action) else {
+                errors.push(format!("{group}: unknown action {:?}", e.action));
+                continue;
+            };
+            match &action {
+                MenuAction::Door(n) if !door_names.contains(n.as_str()) => {
+                    errors.push(format!("{group}: door target {n:?} has no [[doors]] entry"));
+                }
+                MenuAction::Submenu(n) => {
+                    if !submenu_names.contains(n.as_str()) {
+                        errors.push(format!(
+                            "{group}: submenu target {n:?} has no [[submenus.{n}]] group"
+                        ));
+                    }
+                    refs.push(n.clone());
+                }
+                MenuAction::Board(n) if !board_names.contains(n) => {
+                    // A warning, not an error: boards are created by admins at
+                    // runtime and this may run before the first server seed, so
+                    // a missing board isn't necessarily a config mistake.
+                    warnings.push(format!("{group}: board target {n:?} does not exist yet"));
+                }
+                _ => {}
+            }
+            if let Some(k) = menu_effective_key(e, &action) {
+                match keys.get(&k) {
+                    Some(prev) => errors.push(format!(
+                        "{group}: hotkey {k:?} is bound to both {prev:?} and {:?}",
+                        e.action
+                    )),
+                    None => {
+                        keys.insert(k, e.action.clone());
+                    }
+                }
+            }
+        }
+        refs
+    };
+
+    // Reference graph: main menu + every defined submenu.
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    graph.insert(
+        "menu".to_string(),
+        validate_group("menu", &settings.menu, &mut errors, &mut warnings),
+    );
+    for (name, entries) in &settings.submenus {
+        let group = format!("submenu {name:?}");
+        let refs = validate_group(&group, entries, &mut errors, &mut warnings);
+        graph.insert(name.clone(), refs);
+    }
+
+    // Reachability from the main menu (for unreachable + cycle detection).
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut stack = graph.get("menu").cloned().unwrap_or_default();
+    while let Some(n) = stack.pop() {
+        if reachable.insert(n.clone())
+            && let Some(refs) = graph.get(&n)
+        {
+            stack.extend(refs.iter().cloned());
+        }
+    }
+    for name in settings.submenus.keys() {
+        if !reachable.contains(name) {
+            warnings.push(format!(
+                "submenu {name:?} is never referenced by any submenu: action"
+            ));
+        }
+    }
+
+    // Cycle detection over the submenu subgraph (a cycle would loop forever if
+    // the depth cap didn't stop it; flag it either way).
+    let mut color: HashMap<&str, u8> = HashMap::new(); // 0=unseen 1=in-progress 2=done
+    fn dfs<'a>(
+        node: &'a str,
+        graph: &'a std::collections::HashMap<String, Vec<String>>,
+        color: &mut std::collections::HashMap<&'a str, u8>,
+        errors: &mut Vec<String>,
+    ) {
+        color.insert(node, 1);
+        if let Some(refs) = graph.get(node) {
+            for r in refs {
+                match color.get(r.as_str()).copied().unwrap_or(0) {
+                    1 => errors.push(format!("submenu cycle through {r:?}")),
+                    0 => dfs(r, graph, color, errors),
+                    _ => {}
+                }
+            }
+        }
+        color.insert(node, 2);
+    }
+    // Start from each submenu name present in the graph.
+    let submenu_keys: Vec<String> = settings.submenus.keys().cloned().collect();
+    for name in &submenu_keys {
+        if color.get(name.as_str()).copied().unwrap_or(0) == 0 {
+            dfs(name, &graph, &mut color, &mut errors);
+        }
+    }
+
+    for w in &warnings {
+        println!("warning: {w}");
+    }
+    for e in &errors {
+        println!("error: {e}");
+    }
+    if errors.is_empty() {
+        if settings.menu.is_empty() {
+            println!("no [[menu]] configured — the built-in default menu is used.");
+        } else {
+            println!(
+                "menu OK: {} top-level entries, {} submenu(s), no errors.",
+                settings.menu.len(),
+                settings.submenus.len()
+            );
+        }
+    }
+    Ok(errors.is_empty())
 }
 
 #[tokio::main]
@@ -821,6 +999,12 @@ async fn main() -> anyhow::Result<()> {
                     result,
                     l.ip.as_deref().unwrap_or("-")
                 );
+            }
+        }
+        Cmd::ValidateMenu => {
+            let ok = validate_menu(&settings, &pool).await?;
+            if !ok {
+                std::process::exit(1);
             }
         }
         Cmd::Backup { out, files } => {

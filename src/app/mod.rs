@@ -39,7 +39,20 @@ use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
 use crate::util::{now_unix, reply_subject};
 
-use state::{Field, Form, MenuEntry, MenuItem, MirrorRow, Screen};
+use state::{Field, Form, MenuAction, MenuEntry, MenuItem, MirrorRow, Screen};
+
+/// One suspended menu level while a submenu is open (#86). Holds the parent
+/// menu's entries and selection so popping restores it exactly, plus the
+/// parent's title for the breadcrumb.
+pub struct MenuFrame {
+    pub menu: Vec<MenuEntry>,
+    pub sel: usize,
+    pub title: Option<String>,
+}
+
+/// Deepest submenu nesting allowed (#86). A guard against a config that cycles
+/// (`a → b → a`) or nests absurdly; descending past it is simply ignored.
+const MAX_MENU_DEPTH: usize = 16;
 
 /// All per-session state.
 pub struct App {
@@ -65,6 +78,12 @@ pub struct App {
     // Main menu
     pub menu: Vec<MenuEntry>,
     pub menu_sel: usize,
+    /// Submenu breadcrumb (#86): each frame is the parent menu we descended
+    /// from, with its selection preserved so a pop restores it. Empty at the
+    /// top-level main menu.
+    pub menu_stack: Vec<MenuFrame>,
+    /// Title of the menu currently shown; `None` at the top-level main menu.
+    pub menu_title: Option<String>,
 
     // Bulletins
     pub bulletins: Vec<Bulletin>,
@@ -253,39 +272,71 @@ fn default_menu_order() -> [MenuItem; 17] {
     ]
 }
 
+/// Whether a resolved [`MenuAction`] is reachable under the current config and
+/// role (#86). Built-ins defer to [`menu_item_available`]; a `door:`/`submenu:`
+/// target is dropped when its name isn't configured (a dangling target); a
+/// `board:` target is always shown and validated when activated (board access
+/// is per-message-visibility, not a menu-time gate).
+fn menu_action_available(action: &MenuAction, config: &Settings, user: &User) -> bool {
+    match action {
+        MenuAction::Builtin(item) => menu_item_available(*item, config, user),
+        MenuAction::Door(name) => config.doors.iter().any(|d| &d.name == name),
+        MenuAction::Submenu(name) => config.submenus.contains_key(name),
+        MenuAction::Board(_) => true,
+    }
+}
+
+/// Resolve one configured entry group into displayable [`MenuEntry`]s (#86),
+/// dropping entries whose action is unknown or unavailable. Shared by the main
+/// menu and every submenu so nesting behaves identically at each level.
+fn build_menu_group(entries: &[crate::config::MenuEntry], config: &Settings, user: &User) -> Vec<MenuEntry> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let action = MenuAction::parse(&e.action)?;
+            if !menu_action_available(&action, config, user) {
+                return None;
+            }
+            let default_label = match &action {
+                MenuAction::Builtin(item) => item.label().to_string(),
+                MenuAction::Door(n) | MenuAction::Board(n) | MenuAction::Submenu(n) => n.clone(),
+            };
+            let label = if e.label.trim().is_empty() {
+                default_label
+            } else {
+                e.label.trim().to_string()
+            };
+            let key = e.key.chars().next().or_else(|| action.default_key(&label));
+            Some(MenuEntry {
+                action,
+                label,
+                key,
+                row: e.row,
+                col: e.col,
+            })
+        })
+        .collect()
+}
+
 /// Build the resolved main menu for a session (#84): the configured `[[menu]]`
 /// when the operator set one (array order, each entry's label/key falling back
 /// to the target's default), otherwise the built-in default set. Both are
-/// filtered by [`menu_item_available`].
+/// filtered by [`menu_action_available`].
 fn build_menu(config: &Settings, user: &User) -> Vec<MenuEntry> {
-    let resolve =
-        |item: MenuItem, label: &str, key: &str, row: Option<u16>, col: Option<u16>| MenuEntry {
-            item,
-            label: if label.trim().is_empty() {
-                item.label().to_string()
-            } else {
-                label.trim().to_string()
-            },
-            key: key.chars().next().or(Some(item.default_key())),
-            row,
-            col,
-        };
     if config.menu.is_empty() {
         default_menu_order()
             .into_iter()
             .filter(|&i| menu_item_available(i, config, user))
-            .map(|i| resolve(i, "", "", None, None))
-            .collect()
-    } else {
-        config
-            .menu
-            .iter()
-            .filter_map(|e| {
-                let item = MenuItem::from_action(&e.action)?;
-                menu_item_available(item, config, user)
-                    .then(|| resolve(item, &e.label, &e.key, e.row, e.col))
+            .map(|item| MenuEntry {
+                action: MenuAction::Builtin(item),
+                label: item.label().to_string(),
+                key: Some(item.default_key()),
+                row: None,
+                col: None,
             })
             .collect()
+    } else {
+        build_menu_group(&config.menu, config, user)
     }
 }
 
@@ -318,6 +369,8 @@ impl App {
             status: String::new(),
             menu,
             menu_sel: 0,
+            menu_stack: Vec::new(),
+            menu_title: None,
             bulletins: Vec::new(),
             bulletin_sel: 0,
             current_bulletin: None,
@@ -462,21 +515,41 @@ impl App {
             }
             KeyCode::Enter => self.activate_menu().await,
             // Classic command-menu hotkeys (#84): a letter jumps to and runs the
-            // matching entry. Esc always quits; `q` does too via the Quit entry's
-            // default key, unless the operator rebound it.
+            // matching entry. Esc pops out of a submenu, or quits at the top
+            // level; `q` quits via the Quit entry's default key unless rebound.
             KeyCode::Char(c) => {
                 if let Some(idx) = self.menu.iter().position(|e| e.key == Some(c)) {
                     self.menu_sel = idx;
                     self.activate_menu().await;
                 }
             }
-            KeyCode::Esc => self.should_quit = true,
+            KeyCode::Esc | KeyCode::Left => self.escape_menu(),
             _ => {}
         }
     }
 
+    /// Back out of the current menu: pop to the parent submenu (#86), or quit
+    /// when already at the top level.
+    fn escape_menu(&mut self) {
+        if !self.pop_submenu() {
+            self.should_quit = true;
+        }
+    }
+
+    /// Run the currently-selected menu entry, dispatching on its [`MenuAction`]
+    /// (#86): a built-in screen, a named door, a board opened directly, or a
+    /// submenu to descend into.
     async fn activate_menu(&mut self) {
-        match self.menu[self.menu_sel].item {
+        match self.menu[self.menu_sel].action.clone() {
+            MenuAction::Builtin(item) => self.activate_item(item).await,
+            MenuAction::Door(name) => self.launch_door_by_name(&name),
+            MenuAction::Board(name) => self.open_board_by_name(&name).await,
+            MenuAction::Submenu(name) => self.push_submenu(&name),
+        }
+    }
+
+    async fn activate_item(&mut self, item: MenuItem) {
+        match item {
             MenuItem::Bulletins => self.open_bulletins().await,
             MenuItem::Boards => self.open_boards().await,
             MenuItem::Oneliners => self.open_oneliners().await,
@@ -511,6 +584,84 @@ impl App {
             MenuItem::Admin => self.open_admin_users().await,
             MenuItem::Help => self.screen = Screen::Help,
             MenuItem::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Descend into a named submenu (#86), pushing the current menu onto the
+    /// stack so Esc restores it. Rejected if the submenu is unknown, resolves to
+    /// no available items for this user, or nesting would exceed
+    /// [`MAX_MENU_DEPTH`] (a cycle guard).
+    fn push_submenu(&mut self, name: &str) {
+        if self.menu_stack.len() >= MAX_MENU_DEPTH {
+            self.status = "Menu nesting is too deep.".into();
+            return;
+        }
+        let Some(entries) = self.config.submenus.get(name).cloned() else {
+            self.status = format!("No such submenu: {name}");
+            return;
+        };
+        let group = build_menu_group(&entries, &self.config, &self.user);
+        if group.is_empty() {
+            self.status = format!("Submenu '{name}' has no available items.");
+            return;
+        }
+        // The activated entry's label names the level we're entering.
+        let title = self.menu[self.menu_sel].label.clone();
+        let parent = std::mem::replace(&mut self.menu, group);
+        self.menu_stack.push(MenuFrame {
+            menu: parent,
+            sel: self.menu_sel,
+            title: self.menu_title.take(),
+        });
+        self.menu_sel = 0;
+        self.menu_title = Some(title);
+    }
+
+    /// Pop back to the parent menu (#86). Returns false at the top level, where
+    /// the caller treats Esc as "quit".
+    fn pop_submenu(&mut self) -> bool {
+        match self.menu_stack.pop() {
+            Some(frame) => {
+                self.menu = frame.menu;
+                self.menu_sel = frame.sel;
+                self.menu_title = frame.title;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Launch a door named directly from the menu (#86). The run loop picks up
+    /// `pending_door` and bridges the program's raw I/O.
+    fn launch_door_by_name(&mut self, name: &str) {
+        match self.config.doors.iter().position(|d| d.name == name) {
+            Some(idx) => self.pending_door = Some(idx),
+            None => self.status = format!("No such door: {name}"),
+        }
+    }
+
+    /// Open a board named directly from the menu (#86). Board access is by
+    /// readability, so an unknown or unreadable name reports "not found" rather
+    /// than distinguishing the two. Populates the board list too, so Esc from
+    /// the message view lands on the matching row.
+    async fn open_board_by_name(&mut self, name: &str) {
+        match boards::list_readable_boards(&self.pool, &self.user.role).await {
+            Ok(list) => {
+                self.boards = list;
+                match self.boards.iter().position(|b| b.name == name) {
+                    Some(idx) => {
+                        self.board_sel = idx;
+                        let board = self.boards[idx].clone();
+                        self.refresh_unread().await;
+                        self.open_board(board).await;
+                    }
+                    None => {
+                        self.board_sel = 0;
+                        self.status = format!("Board '{name}' not found or not accessible.");
+                    }
+                }
+            }
+            Err(e) => self.status = format!("Error loading boards: {e}"),
         }
     }
 
