@@ -175,11 +175,56 @@ impl MenuItem {
     }
 }
 
-/// A resolved main-menu entry (#84): the built-in [`MenuItem`] it dispatches to,
-/// plus the operator-chosen (or defaulted) display label and hotkey.
+/// What a menu entry does (#86). A built-in screen, or a compound target: a
+/// named door, a board opened directly, or a submenu to descend into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuAction {
+    Builtin(MenuItem),
+    /// Launch the `[[doors]]` entry with this name.
+    Door(String),
+    /// Open the board with this name directly.
+    Board(String),
+    /// Push the `[[submenus.<name>]]` group.
+    Submenu(String),
+}
+
+impl MenuAction {
+    /// Parse a config `action` string. `door:`/`board:`/`submenu:` prefixes give
+    /// the compound targets; anything else is a built-in id. Returns `None` only
+    /// for an unknown built-in or an empty compound name.
+    pub fn parse(action: &str) -> Option<Self> {
+        let action = action.trim();
+        for (prefix, ctor) in [
+            ("door:", MenuAction::Door as fn(String) -> MenuAction),
+            ("board:", MenuAction::Board as fn(String) -> MenuAction),
+            ("submenu:", MenuAction::Submenu as fn(String) -> MenuAction),
+        ] {
+            if let Some(rest) = action.strip_prefix(prefix) {
+                let name = rest.trim();
+                return (!name.is_empty()).then(|| ctor(name.to_string()));
+            }
+        }
+        MenuItem::from_action(action).map(MenuAction::Builtin)
+    }
+
+    /// A default hotkey when the operator didn't set one: the built-in's key, or
+    /// the first letter of a compound target's name.
+    pub fn default_key(&self, name_hint: &str) -> Option<char> {
+        match self {
+            MenuAction::Builtin(item) => Some(item.default_key()),
+            _ => name_hint
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .map(|c| c.to_ascii_lowercase()),
+        }
+    }
+}
+
+/// A resolved menu entry (#84, #86): the [`MenuAction`] it dispatches to, plus
+/// the operator-chosen (or defaulted) display label, hotkey, and placement.
 #[derive(Debug, Clone)]
 pub struct MenuEntry {
-    pub item: MenuItem,
+    pub action: MenuAction,
     pub label: String,
     pub key: Option<char>,
     /// Placement on an ANSI menu backdrop (#85); `None` = the list layout.

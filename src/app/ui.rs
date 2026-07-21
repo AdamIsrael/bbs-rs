@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::App;
-use crate::app::state::{MenuItem, Screen};
+use crate::app::state::{MenuAction, MenuItem, Screen};
 use crate::transport::Transport;
 use crate::util::fmt_time;
 
@@ -200,7 +200,7 @@ fn render_selectable(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, s
 /// canvas renderers so they never drift.
 fn menu_label(app: &App, entry: &crate::app::state::MenuEntry) -> String {
     let mut label = entry.label.clone();
-    if entry.item == MenuItem::Mail {
+    if matches!(entry.action, MenuAction::Builtin(MenuItem::Mail)) {
         if app.user.is_guest() {
             label.push_str("   (register required)");
         } else if app.mail_unread > 0 {
@@ -214,7 +214,10 @@ fn menu_label(app: &App, entry: &crate::app::state::MenuEntry) -> String {
 /// backdrop is configured *and* every shown entry has a placement. All-or-none,
 /// so a partial layout can never hide an item.
 fn menu_canvas_active(app: &App) -> bool {
-    app.art.contains_key(&Screen::MainMenu)
+    // Only the top-level menu uses the backdrop; a submenu (#86) always renders
+    // as the bordered list, so its title breadcrumb is visible.
+    app.menu_stack.is_empty()
+        && app.art.contains_key(&Screen::MainMenu)
         && !app.menu.is_empty()
         && app.menu.iter().all(|e| e.row.is_some() && e.col.is_some())
 }
@@ -323,7 +326,12 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
             Line::from(format!("{key}{}", menu_label(app, m)))
         })
         .collect();
-    render_selectable(f, area, " Main Menu ", lines, app.menu_sel);
+    // A submenu (#86) shows its breadcrumb title; the top level is "Main Menu".
+    let title = match &app.menu_title {
+        Some(t) => format!(" {t} "),
+        None => " Main Menu ".to_string(),
+    };
+    render_selectable(f, area, &title, lines, app.menu_sel);
 }
 
 fn render_bulletins(f: &mut Frame, area: Rect, app: &App) {

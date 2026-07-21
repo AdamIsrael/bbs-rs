@@ -10,7 +10,7 @@ use ratatui::text::Text;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
-use bbs_rs::app::state::{MenuEntry, MenuItem, Screen};
+use bbs_rs::app::state::{MenuAction, MenuEntry, MenuItem, Screen};
 use bbs_rs::app::{App, ui};
 use bbs_rs::config::Settings;
 use bbs_rs::services::{self, auth, presence::Presence};
@@ -44,7 +44,7 @@ async fn base_app() -> App {
 
 fn entry(item: MenuItem, label: &str, row: Option<u16>, col: Option<u16>) -> MenuEntry {
     MenuEntry {
-        item,
+        action: MenuAction::Builtin(item),
         label: label.into(),
         key: Some(item.default_key()),
         row,

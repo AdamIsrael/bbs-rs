@@ -65,7 +65,11 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   the classic default. Arrow keys still work, and a letter jumps straight to its item. Feature toggles
   and role gates still apply. Give every entry a `row`/`col` and set `[art] welcome` to draw the menu as
   a **hand-made ANSI screen** — labels placed over your backdrop — with a graceful fall back to the list
-  when a layout is incomplete or the terminal is too small.
+  when a layout is incomplete or the terminal is too small. Beyond the built-ins, an `action` can target
+  a specific door (`door:<name>`), a board (`board:<name>`), or a **submenu** (`submenu:<name>`, a named
+  `[[submenus.<name>]]` group) — so menus **nest into a tree**, with Esc backing out one level. Check a
+  menu config for typos, dangling targets, duplicate hotkeys, and submenu cycles with
+  `bbsctl validate-menu`.
 
 ## Run it
 

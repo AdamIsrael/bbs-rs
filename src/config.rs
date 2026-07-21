@@ -62,16 +62,23 @@ pub struct Settings {
     #[serde(default)]
     pub doors: Vec<Door>,
     /// Operator-designed main menu (#84). Empty = the built-in default menu.
-    /// Each entry names a built-in `action` and may override its label/hotkey;
-    /// array order is menu order. Feature toggles and role gates still apply,
-    /// so an entry whose target is unavailable is silently dropped.
+    /// Each entry names an `action` and may override its label/hotkey; array
+    /// order is menu order. Feature toggles and role gates still apply, so an
+    /// entry whose target is unavailable is silently dropped.
     #[serde(default)]
     pub menu: Vec<MenuEntry>,
+    /// Named submenus (#86), pushed by a `submenu:<name>` action. A submenu is
+    /// itself a `[[submenus.<name>]]` array of entries, so menus can nest into a
+    /// tree.
+    #[serde(default)]
+    pub submenus: std::collections::HashMap<String, Vec<MenuEntry>>,
 }
 
-/// One configured main-menu item (#84). `action` is a stable built-in target id
-/// (see `MenuItem::action`); a blank `label`/`key` falls back to that target's
-/// built-in default.
+/// One configured menu item. `action` is either a stable built-in id (see
+/// `MenuItem::action`) or, since #86, a compound target: `door:<name>` launches
+/// a `[[doors]]` entry, `board:<name>` opens a board directly, and
+/// `submenu:<name>` pushes a `[[submenus.<name>]]` group. A blank `label`/`key`
+/// falls back to the target's default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MenuEntry {
     pub action: String,
@@ -1040,6 +1047,21 @@ max_length = 500       # max characters per oneliner (0 = no cap; 500 = Mastodon
 # label  = \"Boards\"
 # row    = 6
 # col    = 20
+#
+# Beyond the built-ins, an action can target a specific resource or a submenu:
+#   action = \"door:lord\"     launches the [[doors]] entry named \"lord\"
+#   action = \"board:general\" opens the board named \"general\" directly
+#   action = \"submenu:games\" descends into the [[submenus.games]] group
+# Submenus nest (so you can build a whole menu tree) and Esc pops back out. A
+# blank label/key defaults to the target name and its first letter.
+# [[menu]]
+# action = \"submenu:games\"
+# label  = \"Game Room\"
+# [[submenus.games]]
+# action = \"door:lord\"
+# [[submenus.games]]
+# action = \"door:tw2002\"
+# label  = \"Trade Wars\"
 ";
 
 #[cfg(test)]

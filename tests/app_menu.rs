@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
 use bbs_rs::app::App;
-use bbs_rs::app::state::MenuItem;
+use bbs_rs::app::state::{MenuAction, MenuItem};
 use bbs_rs::config::Settings;
 use bbs_rs::services::{self, auth, presence::Presence};
 use bbs_rs::transport::Transport;
@@ -38,7 +38,9 @@ async fn guest_sees_register() {
     let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
     let app = App::new(pool, Presence::new(), config(), guest, 1, Transport::Ssh);
     assert!(
-        app.menu.iter().any(|e| e.item == MenuItem::Register),
+        app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Register)),
         "guest should see the Register option"
     );
 }
@@ -51,13 +53,27 @@ async fn registered_user_does_not_see_register() {
         .unwrap();
     let app = App::new(pool, Presence::new(), config(), user, 1, Transport::Ssh);
     assert!(
-        !app.menu.iter().any(|e| e.item == MenuItem::Register),
+        !app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Register)),
         "registered users should not see the Register option"
     );
     // ...but the rest of the menu is intact.
-    assert!(app.menu.iter().any(|e| e.item == MenuItem::Boards));
-    assert!(app.menu.iter().any(|e| e.item == MenuItem::Mail));
-    assert!(app.menu.iter().any(|e| e.item == MenuItem::Quit));
+    assert!(
+        app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Boards))
+    );
+    assert!(
+        app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Mail))
+    );
+    assert!(
+        app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Quit))
+    );
 }
 
 #[tokio::test]
@@ -74,7 +90,11 @@ async fn oneliners_menu_follows_feature_toggle() {
         1,
         Transport::Ssh,
     );
-    assert!(app.menu.iter().any(|e| e.item == MenuItem::Oneliners));
+    assert!(
+        app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Oneliners))
+    );
 
     // Disabling the feature removes the menu item.
     let mut settings = Settings::default();
@@ -87,5 +107,9 @@ async fn oneliners_menu_follows_feature_toggle() {
         2,
         Transport::Ssh,
     );
-    assert!(!app.menu.iter().any(|e| e.item == MenuItem::Oneliners));
+    assert!(
+        !app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Oneliners))
+    );
 }
