@@ -59,7 +59,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles,
   with **hot reload**: edit the file (or send `SIGHUP`) and new sessions pick it up without a restart.
 - **Themes & ANSI art** — pick a built-in color preset (or override individual colors), and drop in a
-  custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work).
+  custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work). Art can be
+  **context-conditional** (`[[art.variants]]`): swap a screen's file per session by a `when` flag —
+  `web`/`ssh`, `guest`/`admin`, or time of day — with graceful fallback to the default.
 - **Designable main menu** — rename, reorder, and hotkey the menu items with a `[[menu]]` config array
   (each entry names a built-in `action`, with an optional label and one-letter hotkey); leave it out for
   the classic default. Arrow keys still work, and a letter jumps straight to its item. Feature toggles
@@ -73,7 +75,7 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Text templates** — the tagline, welcome MOTD, bulletins, and menu labels are rendered per session
   through a tiny, safe template engine: `{{user}}`-style variables and `{{#if web}}…{{else}}…{{/if}}` /
   `{{#unless …}}` conditionals, over the session context (transport, identity, unread/online counts, bbs
-  name, date/time). No expression evaluation or loops, so operator templates stay safe by construction,
+  name, date/time, and time-of-day flags like `night`). No expression evaluation or loops, so operator templates stay safe by construction,
   and ANSI bytes pass through untouched. E.g. `welcome = "Hi {{user}}!{{#if unread_mail}} {{unread_mail}}
   new.{{/if}}"`.
 

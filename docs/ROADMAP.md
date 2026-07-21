@@ -186,7 +186,13 @@ transport hint), so phase 1 is the prerequisite for the rest — and for the men
 |---|---|---|
 | **1 — transport & session context in the UI** *(keystone; also ships the cross-advertising)* | S | [#88](https://github.com/AdamIsrael/bbs-rs/issues/88) — **shipped** |
 | **2 — template engine for text content** *(variables + conditionals)* | M | [#89](https://github.com/AdamIsrael/bbs-rs/issues/89) — **shipped** |
-| **3 — context-conditional ANSI/art & layout variants** | M | [#90](https://github.com/AdamIsrael/bbs-rs/issues/90) |
+| **3 — context-conditional ANSI/art & layout variants** | M | [#90](https://github.com/AdamIsrael/bbs-rs/issues/90) — **shipped** |
+
+**Phase 3 shipped (epic complete).** `[[art.variants]]` swap a screen's art file per session — the first
+variant whose `when` flag (`web`/`ssh`, `guest`/`admin`, `morning`/`afternoon`/`evening`/`night`) is
+truthy wins, falling back to the `welcome`/`screens` default (and past a missing variant file). Resolved
+once at login against the shared template context; the same time-of-day flags are now available to the
+#89 text templates too.
 
 **Phase 2 shipped.** A small hand-rolled engine (`src/template.rs`) renders the tagline, welcome MOTD,
 bulletins, and menu labels per session: `{{var}}` substitution and `{{#if}}`/`{{#unless}}`/`{{else}}`
