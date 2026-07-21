@@ -362,7 +362,8 @@ impl App {
         // and role gates (#84).
         let menu = build_menu(&config, &user);
         let theme = Theme::resolve(&config.theme);
-        let art = load_art(&config.art);
+        // Resolve context-conditional art (#90) against the login-time context.
+        let art = load_art(&config.art, &base_context(&config, &user, transport));
         Self {
             pool,
             presence,
@@ -1514,41 +1515,15 @@ impl App {
         crate::template::render(template, &self.template_context())
     }
 
-    /// The variables [`Self::render_text`] exposes to templates.
+    /// The variables [`Self::render_text`] exposes to templates: the
+    /// session-static [`base_context`] plus the live per-session counts.
     fn template_context(&self) -> crate::template::Context {
-        use crate::template::Context;
-        let now = chrono::Local::now();
         let unread_posts: i64 = self.board_unread.values().sum();
-        let bbs = &self.config.bbs;
-        let web = matches!(self.transport, Transport::Web);
-        Context::new()
-            .set("bbs_name", bbs.name.as_str())
-            .set("tagline", bbs.tagline.as_str())
-            .set("sysop", bbs.sysop.as_str())
-            .set("user", self.user.username.as_str())
-            .set("username", self.user.username.as_str())
-            .set("role", self.user.role.as_str())
-            .set("guest", self.user.is_guest())
-            .set("admin", self.user.is_admin())
-            .set("transport", if web { "web" } else { "ssh" })
-            .set("web", web)
-            .set("ssh", !web)
-            .set("ssh_host", self.config.network.connect_host())
-            .set("ssh_port", self.config.network.port as i64)
-            .set(
-                "web_url",
-                if self.config.web.enabled {
-                    self.config.web.connect_url()
-                } else {
-                    String::new()
-                },
-            )
+        base_context(&self.config, &self.user, self.transport)
             .set("unread_mail", self.mail_unread)
             .set("unread_posts", unread_posts)
             .set("who_online", self.online_count)
             .set("node", self.session_id as i64)
-            .set("date", now.format("%Y-%m-%d").to_string())
-            .set("time", now.format("%H:%M").to_string())
     }
 
     async fn on_board_list(&mut self, key: KeyEvent) {
@@ -3235,18 +3210,67 @@ pub fn screen_from_art_key(key: &str) -> Option<Screen> {
     })
 }
 
-/// Load operator art into per-screen [`Text`]. `welcome` heads the main menu;
-/// `screens` maps keys to files. Missing/oversized files are logged and skipped
-/// so a bad art path never breaks a session. Files are read once at login.
-fn load_art(cfg: &crate::config::Art) -> HashMap<Screen, Text<'static>> {
+/// The session-static template variables shared by text rendering (#89) and
+/// art-variant selection (#90): identity, transport, bbs branding, and the
+/// clock (date/time plus `morning`/`afternoon`/`evening`/`night` flags). The
+/// live per-session counts are layered on top by [`App::template_context`].
+fn base_context(config: &Settings, user: &User, transport: Transport) -> crate::template::Context {
+    use crate::template::Context;
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    let hour = now.hour();
+    let bbs = &config.bbs;
+    let web = matches!(transport, Transport::Web);
+    Context::new()
+        .set("bbs_name", bbs.name.as_str())
+        .set("tagline", bbs.tagline.as_str())
+        .set("sysop", bbs.sysop.as_str())
+        .set("user", user.username.as_str())
+        .set("username", user.username.as_str())
+        .set("role", user.role.as_str())
+        .set("guest", user.is_guest())
+        .set("admin", user.is_admin())
+        .set("transport", if web { "web" } else { "ssh" })
+        .set("web", web)
+        .set("ssh", !web)
+        .set("ssh_host", config.network.connect_host())
+        .set("ssh_port", config.network.port as i64)
+        .set(
+            "web_url",
+            if config.web.enabled {
+                config.web.connect_url()
+            } else {
+                String::new()
+            },
+        )
+        // Time-of-day buckets, so art/text can vary by the clock (#90).
+        .set("morning", (5..12).contains(&hour))
+        .set("afternoon", (12..17).contains(&hour))
+        .set("evening", (17..21).contains(&hour))
+        .set("night", !(5..21).contains(&hour))
+        .set("date", now.format("%Y-%m-%d").to_string())
+        .set("time", now.format("%H:%M").to_string())
+}
+
+/// Load operator art into per-screen [`Text`], resolving context-conditional
+/// `[[art.variants]]` (#90) against `ctx`: for each screen the first variant
+/// whose `when` flag is truthy wins, else the `welcome`/`screens` default.
+/// Missing/oversized files are logged and skipped — and a matched-but-missing
+/// variant falls back to the default — so a bad art path never breaks a
+/// session. Files are read once at login.
+fn load_art(
+    cfg: &crate::config::Art,
+    ctx: &crate::template::Context,
+) -> HashMap<Screen, Text<'static>> {
     /// Cap on a single art file, so a pathological file can't blow up memory.
     const MAX_ART_BYTES: u64 = 256 * 1024;
 
-    let mut out = HashMap::new();
-    let mut load = |screen: Screen, file: &str| {
+    // Read one art file into `Text`, or `None` (logged) if it's blank, missing,
+    // or oversized — so the caller can fall a variant back to its default.
+    let read_art = |file: &str| -> Option<Text<'static>> {
         let file = file.trim();
         if file.is_empty() {
-            return;
+            return None;
         }
         let path = cfg.dir.join(file);
         match std::fs::metadata(&path) {
@@ -3255,27 +3279,63 @@ fn load_art(cfg: &crate::config::Art) -> HashMap<Screen, Text<'static>> {
                     "art file {} exceeds {MAX_ART_BYTES} bytes; skipping",
                     path.display()
                 );
-                return;
+                return None;
             }
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("cannot read art file {}: {e}", path.display());
-                return;
+                return None;
             }
         }
         match std::fs::read(&path) {
-            Ok(bytes) => {
-                out.insert(screen, ansi::to_text(&bytes));
+            Ok(bytes) => Some(ansi::to_text(&bytes)),
+            Err(e) => {
+                tracing::warn!("cannot read art file {}: {e}", path.display());
+                None
             }
-            Err(e) => tracing::warn!("cannot read art file {}: {e}", path.display()),
         }
     };
 
-    load(Screen::MainMenu, &cfg.welcome);
+    // The default file per screen (`welcome` heads the main menu).
+    let mut defaults: HashMap<Screen, &str> = HashMap::new();
+    if !cfg.welcome.trim().is_empty() {
+        defaults.insert(Screen::MainMenu, cfg.welcome.as_str());
+    }
     for (key, file) in &cfg.screens {
         match screen_from_art_key(key) {
-            Some(screen) => load(screen, file),
+            Some(screen) => {
+                defaults.insert(screen, file.as_str());
+            }
             None => tracing::warn!("unknown [art.screens] key: {key:?}"),
+        }
+    }
+
+    // The first variant per screen whose `when` flag is truthy this session
+    // (#90). Warn on an unknown screen key so a typo isn't silently inert.
+    let mut chosen_variant: HashMap<Screen, &str> = HashMap::new();
+    for v in &cfg.variants {
+        let Some(screen) = screen_from_art_key(&v.screen) else {
+            tracing::warn!("unknown [[art.variants]] screen: {:?}", v.screen);
+            continue;
+        };
+        if ctx.truthy(&v.when) {
+            chosen_variant.entry(screen).or_insert(v.file.as_str());
+        }
+    }
+
+    // Every screen with either a default or a matched variant; the variant wins,
+    // falling back to the default when its file is blank/missing.
+    let mut out = HashMap::new();
+    let screens: std::collections::HashSet<Screen> = defaults
+        .keys()
+        .chain(chosen_variant.keys())
+        .copied()
+        .collect();
+    for screen in screens {
+        let variant = chosen_variant.get(&screen).and_then(|f| read_art(f));
+        let text = variant.or_else(|| defaults.get(&screen).and_then(|f| read_art(f)));
+        if let Some(text) = text {
+            out.insert(screen, text);
         }
     }
     out

@@ -100,7 +100,9 @@ impl Context {
         self.vars.get(name)
     }
 
-    fn truthy(&self, name: &str) -> bool {
+    /// Whether `name` is bound to a truthy value. Public so art-variant
+    /// selection (#90) can test a `when` flag against the same context.
+    pub fn truthy(&self, name: &str) -> bool {
         self.get(name).map(Value::truthy).unwrap_or(false)
     }
 }

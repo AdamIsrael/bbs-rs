@@ -466,12 +466,17 @@ pub struct ThemeConfig {
 /// on the main menu, and `screens` maps a screen key (e.g. `board_list`,
 /// `file_areas`) to a file rendered as a header band on that screen. Real
 /// CP437 `.ans` art and UTF-8 text with ANSI color escapes are both supported.
+///
+/// `variants` (#90) override the file for a screen per session: the first entry
+/// whose `screen` matches and whose `when` context flag is truthy wins, falling
+/// back to `welcome`/`screens` (and to no art) when nothing matches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Art {
     pub dir: PathBuf,
     pub welcome: String,
     pub screens: std::collections::HashMap<String, String>,
+    pub variants: Vec<ArtVariant>,
 }
 
 impl Default for Art {
@@ -480,8 +485,19 @@ impl Default for Art {
             dir: PathBuf::from("art"),
             welcome: String::new(),
             screens: std::collections::HashMap::new(),
+            variants: Vec::new(),
         }
     }
+}
+
+/// A context-conditional art override (#90). `screen` is an `[art.screens]` key
+/// (or `main_menu`); `when` names a session-context flag (e.g. `web`, `ssh`,
+/// `guest`, `admin`, `night`) that must be truthy for `file` to be used.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtVariant {
+    pub screen: String,
+    pub when: String,
+    pub file: String,
 }
 
 /// Branding shown to connected users.
@@ -934,6 +950,20 @@ welcome = \"\"
 # [art.screens]
 # board_list = \"boards.ans\"
 # file_areas = \"files.ans\"
+#
+# Context-conditional art (#90): swap a screen's file per session. The FIRST
+# variant whose `when` flag is truthy wins, else the welcome/screens default
+# above (and a missing variant file also falls back). `when` names a session
+# flag: web, ssh, guest, admin, morning, afternoon, evening, night (same
+# context as the text templates). Resolved once at login.
+# [[art.variants]]
+# screen = \"main_menu\"
+# when   = \"web\"
+# file   = \"menu-web.ans\"
+# [[art.variants]]
+# screen = \"main_menu\"
+# when   = \"night\"
+# file   = \"menu-night.ans\"
 
 [web]
 # Browser frontend: a WebSocket + xterm.js terminal that reuses the whole TUI,
