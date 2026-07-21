@@ -48,6 +48,8 @@ fn entry(action: &str, label: &str, key: &str) -> MenuEntry {
         action: action.into(),
         label: label.into(),
         key: key.into(),
+        row: None,
+        col: None,
     }
 }
 

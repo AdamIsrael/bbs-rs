@@ -182,6 +182,9 @@ pub struct MenuEntry {
     pub item: MenuItem,
     pub label: String,
     pub key: Option<char>,
+    /// Placement on an ANSI menu backdrop (#85); `None` = the list layout.
+    pub row: Option<u16>,
+    pub col: Option<u16>,
 }
 
 /// A single editable, single-line form field.

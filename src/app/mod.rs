@@ -258,20 +258,23 @@ fn default_menu_order() -> [MenuItem; 17] {
 /// to the target's default), otherwise the built-in default set. Both are
 /// filtered by [`menu_item_available`].
 fn build_menu(config: &Settings, user: &User) -> Vec<MenuEntry> {
-    let resolve = |item: MenuItem, label: &str, key: &str| MenuEntry {
-        item,
-        label: if label.trim().is_empty() {
-            item.label().to_string()
-        } else {
-            label.trim().to_string()
-        },
-        key: key.chars().next().or(Some(item.default_key())),
-    };
+    let resolve =
+        |item: MenuItem, label: &str, key: &str, row: Option<u16>, col: Option<u16>| MenuEntry {
+            item,
+            label: if label.trim().is_empty() {
+                item.label().to_string()
+            } else {
+                label.trim().to_string()
+            },
+            key: key.chars().next().or(Some(item.default_key())),
+            row,
+            col,
+        };
     if config.menu.is_empty() {
         default_menu_order()
             .into_iter()
             .filter(|&i| menu_item_available(i, config, user))
-            .map(|i| resolve(i, "", ""))
+            .map(|i| resolve(i, "", "", None, None))
             .collect()
     } else {
         config
@@ -279,7 +282,8 @@ fn build_menu(config: &Settings, user: &User) -> Vec<MenuEntry> {
             .iter()
             .filter_map(|e| {
                 let item = MenuItem::from_action(&e.action)?;
-                menu_item_available(item, config, user).then(|| resolve(item, &e.label, &e.key))
+                menu_item_available(item, config, user)
+                    .then(|| resolve(item, &e.label, &e.key, e.row, e.col))
             })
             .collect()
     }

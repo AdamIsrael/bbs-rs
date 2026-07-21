@@ -63,7 +63,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Designable main menu** — rename, reorder, and hotkey the menu items with a `[[menu]]` config array
   (each entry names a built-in `action`, with an optional label and one-letter hotkey); leave it out for
   the classic default. Arrow keys still work, and a letter jumps straight to its item. Feature toggles
-  and role gates still apply.
+  and role gates still apply. Give every entry a `row`/`col` and set `[art] welcome` to draw the menu as
+  a **hand-made ANSI screen** — labels placed over your backdrop — with a graceful fall back to the list
+  when a layout is incomplete or the terminal is too small.
 
 ## Run it
 

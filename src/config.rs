@@ -79,6 +79,15 @@ pub struct MenuEntry {
     pub label: String,
     #[serde(default)]
     pub key: String,
+    /// Placement on an ANSI menu backdrop (#85), 0-indexed from the top-left of
+    /// the menu area. When **every** shown entry has both `row` and `col` and a
+    /// main-menu backdrop is configured (`[art] welcome`), the menu renders as a
+    /// canvas — labels drawn at these positions over the art — instead of the
+    /// bordered list. Leave them unset for the list.
+    #[serde(default)]
+    pub row: Option<u16>,
+    #[serde(default)]
+    pub col: Option<u16>,
 }
 
 /// An external program launchable from the Doors menu. Run on a pseudo-terminal
@@ -1021,6 +1030,16 @@ max_length = 500       # max characters per oneliner (0 = no cap; 500 = Mastodon
 # action = \"who\"
 # [[menu]]
 # action = \"quit\"
+#
+# To draw the menu over a hand-made ANSI backdrop instead of the bordered list,
+# set [art] welcome to your .ans file and give EVERY entry a row/col (0-indexed
+# from the top-left of the menu area). Labels are drawn at those positions over
+# the art; leave a placement off any entry and the whole menu stays a list.
+# [[menu]]
+# action = \"boards\"
+# label  = \"Boards\"
+# row    = 6
+# col    = 20
 ";
 
 #[cfg(test)]
