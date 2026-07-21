@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 
 use bbs_rs::config::Settings;
 use bbs_rs::db;
-use bbs_rs::services::{admin, audit, auth, boards, bulletins, files, keys, oneliners};
+use bbs_rs::services::{admin, audit, auth, boards, bulletins, files, keys, oneliners, polls};
 use bbs_rs::ssh::pubkey;
 use bbs_rs::util::fmt_time;
 
@@ -172,6 +172,16 @@ enum Cmd {
     },
     /// Remove a oneliner by id (moderation).
     RmOneliner { id: i64 },
+    /// List polls with their vote totals and open/closed state.
+    Polls {
+        /// Maximum rows to show.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Close a poll by id (stops further voting; results stay visible).
+    ClosePoll { id: i64 },
+    /// Remove a poll by id, along with its options and votes (moderation).
+    RmPoll { id: i64 },
     /// List the ActivityPub federation allow/block domains.
     ApPeers,
     /// Allow a domain to federate (needed in the default allowlist posture).
@@ -771,6 +781,37 @@ async fn main() -> anyhow::Result<()> {
                 println!("removed oneliner #{id}");
             } else {
                 println!("no oneliner #{id}");
+            }
+        }
+        Cmd::Polls { limit } => {
+            let list = polls::list_polls(&pool, limit).await?;
+            println!(
+                "{:<5} {:<6} {:<6} {:<14} QUESTION",
+                "ID", "VOTES", "STATE", "AUTHOR"
+            );
+            for p in list {
+                println!(
+                    "{:<5} {:<6} {:<6} {:<14} {}",
+                    p.id,
+                    p.total_votes,
+                    if p.is_closed() { "closed" } else { "open" },
+                    p.author_name,
+                    p.question,
+                );
+            }
+        }
+        Cmd::ClosePoll { id } => {
+            if polls::close_poll(&pool, id, bbs_rs::util::now_unix()).await? {
+                println!("closed poll #{id}");
+            } else {
+                println!("poll #{id} not found or already closed");
+            }
+        }
+        Cmd::RmPoll { id } => {
+            if polls::delete_poll(&pool, id).await? {
+                println!("removed poll #{id}");
+            } else {
+                println!("no poll #{id}");
             }
         }
         Cmd::ApPeers => {

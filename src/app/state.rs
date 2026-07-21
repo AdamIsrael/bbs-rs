@@ -9,6 +9,9 @@ pub enum Screen {
     ReadBulletin,
     Oneliners,
     ComposeOneliner,
+    Polls,
+    ViewPoll,
+    ComposePoll,
     Timeline,
     FollowRemote,
     RemoteBoards,
@@ -57,6 +60,7 @@ pub enum MenuItem {
     Bulletins,
     Boards,
     Oneliners,
+    Polls,
     Timeline,
     RemoteBoards,
     Mail,
@@ -80,6 +84,7 @@ impl MenuItem {
             MenuItem::Bulletins => "Bulletins",
             MenuItem::Boards => "Message Boards",
             MenuItem::Oneliners => "Oneliners",
+            MenuItem::Polls => "Polls",
             MenuItem::Timeline => "Timeline",
             MenuItem::RemoteBoards => "Remote Boards",
             MenuItem::Mail => "Private Mail",
@@ -105,6 +110,7 @@ impl MenuItem {
             MenuItem::Bulletins => "bulletins",
             MenuItem::Boards => "boards",
             MenuItem::Oneliners => "oneliners",
+            MenuItem::Polls => "polls",
             MenuItem::Timeline => "timeline",
             MenuItem::RemoteBoards => "remote_boards",
             MenuItem::Mail => "mail",
@@ -126,10 +132,11 @@ impl MenuItem {
     /// `None`, so a typo in `[[menu]]` drops that entry rather than crashing.
     pub fn from_action(action: &str) -> Option<Self> {
         // Every variant's `action()` is checked, so this can't drift out of sync.
-        const ALL: [MenuItem; 17] = [
+        const ALL: [MenuItem; 18] = [
             MenuItem::Bulletins,
             MenuItem::Boards,
             MenuItem::Oneliners,
+            MenuItem::Polls,
             MenuItem::Timeline,
             MenuItem::RemoteBoards,
             MenuItem::Mail,
@@ -157,6 +164,7 @@ impl MenuItem {
             MenuItem::Bulletins => 'n', // "news"
             MenuItem::Boards => 'b',
             MenuItem::Oneliners => 'o',
+            MenuItem::Polls => 'v', // "voting booth"
             MenuItem::Timeline => 't',
             MenuItem::RemoteBoards => 'r',
             MenuItem::Mail => 'm',

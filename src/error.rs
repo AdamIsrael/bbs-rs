@@ -43,6 +43,12 @@ pub enum AppError {
     #[error("this board is locked")]
     BoardLocked,
 
+    #[error("a poll needs a question and at least two options")]
+    PollInvalid,
+
+    #[error("this poll is closed")]
+    PollClosed,
+
     #[error("you don't have permission to post to this board")]
     BoardWriteDenied,
 

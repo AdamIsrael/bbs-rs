@@ -113,3 +113,41 @@ async fn oneliners_menu_follows_feature_toggle() {
             .any(|e| e.action == MenuAction::Builtin(MenuItem::Oneliners))
     );
 }
+
+#[tokio::test]
+async fn polls_menu_follows_feature_toggle() {
+    let pool = setup().await;
+    let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+
+    // On by default.
+    let app = App::new(
+        pool.clone(),
+        Presence::new(),
+        config(),
+        guest.clone(),
+        1,
+        Transport::Ssh,
+    );
+    assert!(
+        app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Polls))
+    );
+
+    // Disabling the feature removes the menu item.
+    let mut settings = Settings::default();
+    settings.features.polls = false;
+    let app = App::new(
+        pool,
+        Presence::new(),
+        Arc::new(settings),
+        guest,
+        2,
+        Transport::Ssh,
+    );
+    assert!(
+        !app.menu
+            .iter()
+            .any(|e| e.action == MenuAction::Builtin(MenuItem::Polls))
+    );
+}

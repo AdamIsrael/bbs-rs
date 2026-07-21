@@ -24,6 +24,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.
+- **Polls / voting booth** — registered users create multiple-choice polls and vote (one changeable vote
+  each); results render as live percentage bars. Creators and admins can close or delete a poll. Gated by
+  `[features] polls`, with `bbsctl polls` / `close-poll` / `rm-poll` for moderation.
 - **File areas** — browsable download areas with role ACLs, per-user storage quotas, and file-type
   limits; **read text files and peek inside archives** (zip / tar.gz / gz) in the TUI, and
   **transfer over SFTP** (`sftp user@host`).
@@ -130,6 +133,7 @@ guest = true           # allow the shared guest account to log in
 private_mail = true
 who_online = true
 oneliners = true       # the graffiti wall
+polls = true           # the voting booth
 pubkey_auth = true     # allow SSH public-key login (users register keys in the BBS)
 file_areas = true      # browse downloadable file areas
 advertise_transports = true  # tell users the other way in (SSH ↔ browser)
@@ -296,6 +300,9 @@ bbsctl post-bulletin <title> --body <text>          # post a bulletin
 bbsctl rm-bulletin <id>          # remove a bulletin
 bbsctl oneliners [--limit N]     # list recent oneliners (graffiti wall)
 bbsctl rm-oneliner <id>          # remove a oneliner (moderation)
+bbsctl polls [--limit N]         # list polls with vote totals and open/closed state
+bbsctl close-poll <id>           # close a poll (stops voting; results stay visible)
+bbsctl rm-poll <id>              # remove a poll and its votes (moderation)
 bbsctl boards                    # list boards with read/write ACLs and lock state
 bbsctl set-board <name> [--read ROLE] [--write ROLE] [--lock|--unlock]   # configure a board
 bbsctl file-areas                # list file areas with ACLs
