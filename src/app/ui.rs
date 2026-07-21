@@ -48,9 +48,14 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     render_title(f, chunks[0], app);
 
-    // If the operator configured art for this screen, render it as a header
-    // band above the screen body (capped so it can't crowd out the content).
-    let body = render_art_header(f, chunks[1], app);
+    // The main menu with a full ANSI backdrop (#85) owns the whole area and
+    // draws its own art; every other screen gets the art (if any) as a capped
+    // header band above its body.
+    let body = if app.screen == Screen::MainMenu && menu_canvas_active(app) {
+        chunks[1]
+    } else {
+        render_art_header(f, chunks[1], app)
+    };
     match app.screen {
         Screen::MainMenu => render_main_menu(f, body, app),
         Screen::Bulletins => render_bulletins(f, body, app),
@@ -191,7 +196,79 @@ fn render_selectable(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, s
     }
 }
 
+/// The menu label for `entry`, including the Mail badge — shared by the list and
+/// canvas renderers so they never drift.
+fn menu_label(app: &App, entry: &crate::app::state::MenuEntry) -> String {
+    let mut label = entry.label.clone();
+    if entry.item == MenuItem::Mail {
+        if app.user.is_guest() {
+            label.push_str("   (register required)");
+        } else if app.mail_unread > 0 {
+            label.push_str(&format!("   ({} new)", app.mail_unread));
+        }
+    }
+    label
+}
+
+/// Whether the main menu should render as an ANSI canvas (#85): a main-menu
+/// backdrop is configured *and* every shown entry has a placement. All-or-none,
+/// so a partial layout can never hide an item.
+fn menu_canvas_active(app: &App) -> bool {
+    app.art.contains_key(&Screen::MainMenu)
+        && !app.menu.is_empty()
+        && app.menu.iter().all(|e| e.row.is_some() && e.col.is_some())
+}
+
+/// Whether the placed items fit within `area` (else we fall back to the list so
+/// nothing is clipped off the bottom or right).
+fn menu_canvas_fits(app: &App, area: Rect) -> bool {
+    app.menu.iter().all(|e| match (e.row, e.col) {
+        (Some(row), Some(col)) => {
+            let w = menu_label(app, e).chars().count() as u16;
+            row < area.height && col.saturating_add(w) <= area.width
+        }
+        _ => false,
+    })
+}
+
+/// Draw the menu as labels placed over the ANSI backdrop at operator-chosen
+/// coordinates (#85). The selected entry is highlighted; arrow keys still move
+/// the selection in menu order.
+fn render_menu_canvas(f: &mut Frame, area: Rect, app: &App) {
+    if let Some(art) = app.art.get(&Screen::MainMenu) {
+        f.render_widget(Paragraph::new(art.clone()), area);
+    }
+    for (i, entry) in app.menu.iter().enumerate() {
+        let (Some(row), Some(col)) = (entry.row, entry.col) else {
+            continue;
+        };
+        let label = menu_label(app, entry);
+        let x = area.x + col;
+        let y = area.y + row;
+        if y >= area.bottom() || x >= area.right() {
+            continue;
+        }
+        let w = (label.chars().count() as u16).min(area.right() - x);
+        let cell = Rect::new(x, y, w, 1);
+        // Selected item pops via reverse-video; the rest use the terminal
+        // default so they sit naturally on the operator's art.
+        let style = if i == app.menu_sel {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        f.render_widget(Paragraph::new(Span::styled(label, style)), cell);
+    }
+}
+
 fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
+    // ANSI-canvas layout (#85) when the operator placed every item and it fits;
+    // otherwise the classic bordered list below.
+    if menu_canvas_active(app) && menu_canvas_fits(app, area) {
+        render_menu_canvas(f, area, app);
+        return;
+    }
+
     let bbs = &app.config.bbs;
 
     // When welcome art is configured it heads the screen (drawn as the art
@@ -238,20 +315,12 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|m| {
             // A leading "[k] " hotkey hint (classic command menu, #84), then the
-            // operator's label.
+            // operator's label (+ any Mail badge).
             let key = m
                 .key
                 .map(|c| format!("[{c}] "))
                 .unwrap_or_else(|| "    ".to_string());
-            let mut label = format!("{key}{}", m.label);
-            if m.item == MenuItem::Mail {
-                if app.user.is_guest() {
-                    label.push_str("   (register required)");
-                } else if app.mail_unread > 0 {
-                    label.push_str(&format!("   ({} new)", app.mail_unread));
-                }
-            }
-            Line::from(label)
+            Line::from(format!("{key}{}", menu_label(app, m)))
         })
         .collect();
     render_selectable(f, area, " Main Menu ", lines, app.menu_sel);
