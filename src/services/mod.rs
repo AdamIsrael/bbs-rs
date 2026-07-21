@@ -16,6 +16,7 @@ pub mod mail;
 pub mod oneliners;
 pub mod presence;
 pub mod profiles;
+pub mod reactions;
 pub mod search;
 pub mod stats;
 

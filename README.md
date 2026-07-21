@@ -18,6 +18,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Edit & delete your own posts** — authors can `e` edit or `d` delete their own messages (from the
   list or while reading); an edited post is marked `(edited …)`. A locked board freezes even your own
   posts. Full-text search stays in step with edits automatically.
+- **Post reactions** — registered users react to a post with the digit keys while reading it (👍 ❤ 😄);
+  counts show under the post and a `♥N` tally appears in the thread list. One of each kind per user,
+  rate-limited via `[limits] max_reactions`.
 - **Board moderation & ACLs** — per-board read/write role requirements, lockable boards, and pin/delete
   of individual posts by admins.
 - **Oneliners** — a shared "graffiti wall" of short public one-liners any registered user can append to.

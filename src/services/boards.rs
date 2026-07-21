@@ -404,6 +404,9 @@ pub async fn delete_own_message(pool: &SqlitePool, id: i64, author: &User) -> Re
     .execute(pool)
     .await?
     .rows_affected();
+    if affected > 0 {
+        crate::services::reactions::clear_for_message(pool, id).await?;
+    }
     Ok(affected > 0)
 }
 
@@ -416,6 +419,9 @@ pub async fn delete_message(pool: &SqlitePool, id: i64) -> Result<bool> {
         .execute(pool)
         .await?
         .rows_affected();
+    if affected > 0 {
+        crate::services::reactions::clear_for_message(pool, id).await?;
+    }
     Ok(affected > 0)
 }
 

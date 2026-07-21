@@ -376,6 +376,15 @@ pub static SECTIONS: &[Section] = &[
                 help: "Matters more now the wall no longer auto-trims.",
             },
             Field {
+                key: "max_reactions",
+                label: "Reactions per window",
+                kind: FieldKind::Int {
+                    min: 0,
+                    max: 10_000,
+                },
+                help: "Post reactions added. 0 disables.",
+            },
+            Field {
                 key: "max_subject_chars",
                 label: "Max subject length",
                 kind: FieldKind::Int {
