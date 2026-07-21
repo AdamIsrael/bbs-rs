@@ -199,7 +199,10 @@ fn render_selectable(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, s
 /// The menu label for `entry`, including the Mail badge — shared by the list and
 /// canvas renderers so they never drift.
 fn menu_label(app: &App, entry: &crate::app::state::MenuEntry) -> String {
-    let mut label = entry.label.clone();
+    // The operator's label is a template (#89); render it against the session
+    // context, then collapse any newlines a conditional produced so the label
+    // stays on one row.
+    let mut label = app.render_text(&entry.label).replace('\n', " ");
     if matches!(entry.action, MenuAction::Builtin(MenuItem::Mail)) {
         if app.user.is_guest() {
             label.push_str("   (register required)");
@@ -283,15 +286,19 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
             bbs.name.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ))];
-        if !bbs.tagline.is_empty() {
+        // The tagline and MOTD are operator templates (#89), rendered against
+        // the session context; the MOTD may expand to several lines.
+        let tagline = app.render_text(&bbs.tagline);
+        if !tagline.is_empty() {
             banner.push(Line::from(Span::styled(
-                bbs.tagline.clone(),
+                tagline,
                 Style::default().fg(app.theme.dim),
             )));
         }
-        if !bbs.welcome.is_empty() {
+        let welcome = app.render_text(&bbs.welcome);
+        if !welcome.is_empty() {
             banner.push(Line::from(""));
-            banner.push(Line::from(bbs.welcome.clone()));
+            banner.extend(welcome.lines().map(|l| Line::from(l.to_string())));
         }
         // Point users at the other way in (browser ↔ SSH).
         if let Some(hint) = other_transport_hint(app) {
@@ -345,7 +352,7 @@ fn render_bulletins(f: &mut Frame, area: Rect, app: &App) {
             Line::from(format!(
                 "{:<12} {}",
                 fmt_time(b.created_at),
-                truncate(&b.title, 60)
+                truncate(&app.render_text(&b.title).replace('\n', " "), 60)
             ))
         })
         .collect();
@@ -356,9 +363,15 @@ fn render_read_bulletin(f: &mut Frame, area: Rect, app: &App) {
     let Some(b) = &app.current_bulletin else {
         return placeholder(f, area, " Bulletin ", "Nothing to show.");
     };
-    let body = format!("Date: {}\n\n{}", fmt_time(b.created_at), b.body);
+    // Title and body are operator templates (#89), rendered per session.
+    let body = format!(
+        "Date: {}\n\n{}",
+        fmt_time(b.created_at),
+        app.render_text(&b.body)
+    );
+    let title = app.render_text(&b.title).replace('\n', " ");
     let p = Paragraph::new(body)
-        .block(Block::bordered().title(format!(" {} ", truncate(&b.title, 60))))
+        .block(Block::bordered().title(format!(" {} ", truncate(&title, 60))))
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
 }

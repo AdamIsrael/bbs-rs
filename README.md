@@ -70,6 +70,12 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   `[[submenus.<name>]]` group) — so menus **nest into a tree**, with Esc backing out one level. Check a
   menu config for typos, dangling targets, duplicate hotkeys, and submenu cycles with
   `bbsctl validate-menu`.
+- **Text templates** — the tagline, welcome MOTD, bulletins, and menu labels are rendered per session
+  through a tiny, safe template engine: `{{user}}`-style variables and `{{#if web}}…{{else}}…{{/if}}` /
+  `{{#unless …}}` conditionals, over the session context (transport, identity, unread/online counts, bbs
+  name, date/time). No expression evaluation or loops, so operator templates stay safe by construction,
+  and ANSI bytes pass through untouched. E.g. `welcome = "Hi {{user}}!{{#if unread_mail}} {{unread_mail}}
+  new.{{/if}}"`.
 
 ## Run it
 

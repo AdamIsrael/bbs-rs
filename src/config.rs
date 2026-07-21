@@ -814,6 +814,16 @@ tagline = \"a tiny bulletin board over SSH\"
 sysop = \"\"
 # Message-of-the-day banner shown on the main menu (blank to hide).
 welcome = \"Welcome to the board.\"
+# The tagline, welcome MOTD, bulletins, and menu labels are TEMPLATES: they can
+# embed session values and simple conditionals, rendered per viewer.
+#   {{name}}                  substitute a variable (unknown -> empty)
+#   {{#if flag}}..{{/if}}     include a block when a value is truthy
+#   {{#unless flag}}..{{/unless}}, and {{else}} inside either
+# Variables: bbs_name, tagline, sysop, user (or username), role, transport
+# (\"ssh\"/\"web\"), ssh_host, ssh_port, web_url, date, time; counts unread_mail,
+# unread_posts, who_online, node; flags web, ssh, guest, admin. Example:
+#   welcome = \"Hi {{user}}!{{#if unread_mail}} You have {{unread_mail}} new.{{/if}}\"
+#   tagline = \"{{#if web}}Also on SSH: ssh {{ssh_host}}{{/if}}\"
 
 [network]
 host = \"0.0.0.0\"

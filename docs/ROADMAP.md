@@ -184,6 +184,13 @@ transport hint), so phase 1 is the prerequisite for the rest — and for the men
 
 | Phase | Size | Issue |
 |---|---|---|
-| **1 — transport & session context in the UI** *(keystone; also ships the cross-advertising)* | S | [#88](https://github.com/AdamIsrael/bbs-rs/issues/88) |
-| **2 — template engine for text content** *(variables + conditionals)* | M | [#89](https://github.com/AdamIsrael/bbs-rs/issues/89) |
+| **1 — transport & session context in the UI** *(keystone; also ships the cross-advertising)* | S | [#88](https://github.com/AdamIsrael/bbs-rs/issues/88) — **shipped** |
+| **2 — template engine for text content** *(variables + conditionals)* | M | [#89](https://github.com/AdamIsrael/bbs-rs/issues/89) — **shipped** |
 | **3 — context-conditional ANSI/art & layout variants** | M | [#90](https://github.com/AdamIsrael/bbs-rs/issues/90) |
+
+**Phase 2 shipped.** A small hand-rolled engine (`src/template.rs`) renders the tagline, welcome MOTD,
+bulletins, and menu labels per session: `{{var}}` substitution and `{{#if}}`/`{{#unless}}`/`{{else}}`
+conditionals over the session context (transport, identity, unread/online counts, bbs name, date/time),
+with no expression evaluation or loops — safe on operator input, ANSI-preserving. Chose a custom engine
+over `minijinja`: the need is narrow (scalars + boolean conditionals, no loops/filters), and this keeps
+the dependency footprint and the failure mode (malformed tags degrade to literal text) fully controlled.

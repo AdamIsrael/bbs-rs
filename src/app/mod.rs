@@ -174,6 +174,10 @@ pub struct App {
     // Who's online
     pub online: Vec<OnlineUser>,
     pub who_sel: usize,
+    /// Cached count of online sessions, refreshed with the unread counts so it's
+    /// available synchronously to the template context (#89) without an async
+    /// call on the render path.
+    pub online_count: usize,
     /// The user being paged, while the page-compose screen is open (#68).
     page_target: Option<String>,
 
@@ -419,6 +423,7 @@ impl App {
             mail_search_query: String::new(),
             online: Vec::new(),
             who_sel: 0,
+            online_count: 0,
             page_target: None,
             user_keys: Vec::new(),
             key_sel: 0,
@@ -1479,6 +1484,9 @@ impl App {
     /// private-mail count. Guests share a single account with no meaningful
     /// watermark and can't receive mail, so they get no counts.
     async fn refresh_unread(&mut self) {
+        // The online count feeds the template context (#89) and is cheap
+        // (in-memory presence), so refresh it for everyone, guests included.
+        self.online_count = self.presence.list().await.len();
         if self.user.is_guest() {
             self.board_unread.clear();
             self.mail_unread = 0;
@@ -1496,6 +1504,51 @@ impl App {
         } else {
             self.mail_unread = 0;
         }
+    }
+
+    /// Render an operator-authored template string against this session's
+    /// context (#89) — transport, identity, live counts, bbs/date info — for the
+    /// MOTD/welcome banner, bulletins, and menu labels. Cheap for the common
+    /// case of a string with no `{{ }}` tags.
+    pub fn render_text(&self, template: &str) -> String {
+        crate::template::render(template, &self.template_context())
+    }
+
+    /// The variables [`Self::render_text`] exposes to templates.
+    fn template_context(&self) -> crate::template::Context {
+        use crate::template::Context;
+        let now = chrono::Local::now();
+        let unread_posts: i64 = self.board_unread.values().sum();
+        let bbs = &self.config.bbs;
+        let web = matches!(self.transport, Transport::Web);
+        Context::new()
+            .set("bbs_name", bbs.name.as_str())
+            .set("tagline", bbs.tagline.as_str())
+            .set("sysop", bbs.sysop.as_str())
+            .set("user", self.user.username.as_str())
+            .set("username", self.user.username.as_str())
+            .set("role", self.user.role.as_str())
+            .set("guest", self.user.is_guest())
+            .set("admin", self.user.is_admin())
+            .set("transport", if web { "web" } else { "ssh" })
+            .set("web", web)
+            .set("ssh", !web)
+            .set("ssh_host", self.config.network.connect_host())
+            .set("ssh_port", self.config.network.port as i64)
+            .set(
+                "web_url",
+                if self.config.web.enabled {
+                    self.config.web.connect_url()
+                } else {
+                    String::new()
+                },
+            )
+            .set("unread_mail", self.mail_unread)
+            .set("unread_posts", unread_posts)
+            .set("who_online", self.online_count)
+            .set("node", self.session_id as i64)
+            .set("date", now.format("%Y-%m-%d").to_string())
+            .set("time", now.format("%H:%M").to_string())
     }
 
     async fn on_board_list(&mut self, key: KeyEvent) {

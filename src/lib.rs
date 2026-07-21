@@ -16,6 +16,7 @@ pub mod input;
 pub mod reload;
 pub mod services;
 pub mod ssh;
+pub mod template;
 pub mod transport;
 pub mod util;
 pub mod web;
