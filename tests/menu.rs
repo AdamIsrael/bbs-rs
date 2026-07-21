@@ -218,7 +218,10 @@ async fn a_submenu_pushes_and_esc_pops_back() {
         vec![entry("who", "", ""), entry("quit", "", "")],
     );
     let settings = Settings {
-        menu: vec![entry("submenu:games", "Game Room", ""), entry("quit", "", "")],
+        menu: vec![
+            entry("submenu:games", "Game Room", ""),
+            entry("quit", "", ""),
+        ],
         submenus,
         ..Default::default()
     };

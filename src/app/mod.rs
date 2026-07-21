@@ -289,7 +289,11 @@ fn menu_action_available(action: &MenuAction, config: &Settings, user: &User) ->
 /// Resolve one configured entry group into displayable [`MenuEntry`]s (#86),
 /// dropping entries whose action is unknown or unavailable. Shared by the main
 /// menu and every submenu so nesting behaves identically at each level.
-fn build_menu_group(entries: &[crate::config::MenuEntry], config: &Settings, user: &User) -> Vec<MenuEntry> {
+fn build_menu_group(
+    entries: &[crate::config::MenuEntry],
+    config: &Settings,
+    user: &User,
+) -> Vec<MenuEntry> {
     entries
         .iter()
         .filter_map(|e| {
