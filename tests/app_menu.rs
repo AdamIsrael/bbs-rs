@@ -38,7 +38,7 @@ async fn guest_sees_register() {
     let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
     let app = App::new(pool, Presence::new(), config(), guest, 1, Transport::Ssh);
     assert!(
-        app.menu.contains(&MenuItem::Register),
+        app.menu.iter().any(|e| e.item == MenuItem::Register),
         "guest should see the Register option"
     );
 }
@@ -51,13 +51,13 @@ async fn registered_user_does_not_see_register() {
         .unwrap();
     let app = App::new(pool, Presence::new(), config(), user, 1, Transport::Ssh);
     assert!(
-        !app.menu.contains(&MenuItem::Register),
+        !app.menu.iter().any(|e| e.item == MenuItem::Register),
         "registered users should not see the Register option"
     );
     // ...but the rest of the menu is intact.
-    assert!(app.menu.contains(&MenuItem::Boards));
-    assert!(app.menu.contains(&MenuItem::Mail));
-    assert!(app.menu.contains(&MenuItem::Quit));
+    assert!(app.menu.iter().any(|e| e.item == MenuItem::Boards));
+    assert!(app.menu.iter().any(|e| e.item == MenuItem::Mail));
+    assert!(app.menu.iter().any(|e| e.item == MenuItem::Quit));
 }
 
 #[tokio::test]
@@ -74,7 +74,7 @@ async fn oneliners_menu_follows_feature_toggle() {
         1,
         Transport::Ssh,
     );
-    assert!(app.menu.contains(&MenuItem::Oneliners));
+    assert!(app.menu.iter().any(|e| e.item == MenuItem::Oneliners));
 
     // Disabling the feature removes the menu item.
     let mut settings = Settings::default();
@@ -87,5 +87,5 @@ async fn oneliners_menu_follows_feature_toggle() {
         2,
         Transport::Ssh,
     );
-    assert!(!app.menu.contains(&MenuItem::Oneliners));
+    assert!(!app.menu.iter().any(|e| e.item == MenuItem::Oneliners));
 }

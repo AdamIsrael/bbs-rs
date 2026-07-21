@@ -61,6 +61,24 @@ pub struct Settings {
     /// External "door" programs launchable per session (classic BBS doors).
     #[serde(default)]
     pub doors: Vec<Door>,
+    /// Operator-designed main menu (#84). Empty = the built-in default menu.
+    /// Each entry names a built-in `action` and may override its label/hotkey;
+    /// array order is menu order. Feature toggles and role gates still apply,
+    /// so an entry whose target is unavailable is silently dropped.
+    #[serde(default)]
+    pub menu: Vec<MenuEntry>,
+}
+
+/// One configured main-menu item (#84). `action` is a stable built-in target id
+/// (see `MenuItem::action`); a blank `label`/`key` falls back to that target's
+/// built-in default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MenuEntry {
+    pub action: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub key: String,
 }
 
 /// An external program launchable from the Doors menu. Run on a pseudo-terminal
@@ -986,6 +1004,23 @@ max_length = 500       # max characters per oneliner (0 = no cap; 500 = Mastodon
 # cwd = \"/var/bbs/doors/adventure\"
 # time_limit_secs = 900        # 0 = no limit
 # drop_file = \"dorinfo1.def\"   # or \"door.sys\"; blank = none
+
+# Main menu: design your own instead of the built-in list. Leave this out for
+# the default menu. Each entry names a built-in `action` (boards, mail, who,
+# files, profile, stats, search, oneliners, bulletins, timeline, remote_boards,
+# keys, register, admin, doors, help, quit); array order is menu order. `label`
+# and `key` (a one-letter hotkey) are optional and default per action. Entries
+# whose feature is off or whose role the user lacks are dropped automatically.
+# [[menu]]
+# action = \"boards\"
+# label  = \"Message Bases\"
+# key    = \"m\"
+# [[menu]]
+# action = \"mail\"
+# [[menu]]
+# action = \"who\"
+# [[menu]]
+# action = \"quit\"
 ";
 
 #[cfg(test)]

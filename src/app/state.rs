@@ -74,6 +74,7 @@ pub enum MenuItem {
 }
 
 impl MenuItem {
+    /// The built-in default label, used when the operator hasn't set one.
     pub fn label(self) -> &'static str {
         match self {
             MenuItem::Bulletins => "Bulletins",
@@ -95,6 +96,92 @@ impl MenuItem {
             MenuItem::Quit => "Quit",
         }
     }
+
+    /// The stable identifier an operator names this target by in `[[menu]]`
+    /// config (#84). Distinct from [`label`](Self::label), which is display text
+    /// the operator may change; the action is the wiring and never changes.
+    pub fn action(self) -> &'static str {
+        match self {
+            MenuItem::Bulletins => "bulletins",
+            MenuItem::Boards => "boards",
+            MenuItem::Oneliners => "oneliners",
+            MenuItem::Timeline => "timeline",
+            MenuItem::RemoteBoards => "remote_boards",
+            MenuItem::Mail => "mail",
+            MenuItem::Who => "who",
+            MenuItem::Profile => "profile",
+            MenuItem::Stats => "stats",
+            MenuItem::Search => "search",
+            MenuItem::Doors => "doors",
+            MenuItem::Files => "files",
+            MenuItem::Keys => "keys",
+            MenuItem::Register => "register",
+            MenuItem::Admin => "admin",
+            MenuItem::Help => "help",
+            MenuItem::Quit => "quit",
+        }
+    }
+
+    /// Resolve a config `action` string to its target. Unknown actions return
+    /// `None`, so a typo in `[[menu]]` drops that entry rather than crashing.
+    pub fn from_action(action: &str) -> Option<Self> {
+        // Every variant's `action()` is checked, so this can't drift out of sync.
+        const ALL: [MenuItem; 17] = [
+            MenuItem::Bulletins,
+            MenuItem::Boards,
+            MenuItem::Oneliners,
+            MenuItem::Timeline,
+            MenuItem::RemoteBoards,
+            MenuItem::Mail,
+            MenuItem::Who,
+            MenuItem::Profile,
+            MenuItem::Stats,
+            MenuItem::Search,
+            MenuItem::Doors,
+            MenuItem::Files,
+            MenuItem::Keys,
+            MenuItem::Register,
+            MenuItem::Admin,
+            MenuItem::Help,
+            MenuItem::Quit,
+        ];
+        let action = action.trim().to_ascii_lowercase();
+        ALL.into_iter().find(|i| i.action() == action)
+    }
+
+    /// The built-in default hotkey (#84), used when the operator hasn't set one.
+    /// Chosen to be distinct across every item so the default menu has no
+    /// collisions; an operator's `key` override may of course reuse a letter.
+    pub fn default_key(self) -> char {
+        match self {
+            MenuItem::Bulletins => 'n', // "news"
+            MenuItem::Boards => 'b',
+            MenuItem::Oneliners => 'o',
+            MenuItem::Timeline => 't',
+            MenuItem::RemoteBoards => 'r',
+            MenuItem::Mail => 'm',
+            MenuItem::Who => 'w',
+            MenuItem::Profile => 'p',
+            MenuItem::Stats => 's',
+            MenuItem::Search => '/',
+            MenuItem::Doors => 'd',
+            MenuItem::Files => 'f',
+            MenuItem::Keys => 'k',
+            MenuItem::Register => 'g', // "get access"
+            MenuItem::Admin => 'a',
+            MenuItem::Help => 'h',
+            MenuItem::Quit => 'q',
+        }
+    }
+}
+
+/// A resolved main-menu entry (#84): the built-in [`MenuItem`] it dispatches to,
+/// plus the operator-chosen (or defaulted) display label and hotkey.
+#[derive(Debug, Clone)]
+pub struct MenuEntry {
+    pub item: MenuItem,
+    pub label: String,
+    pub key: Option<char>,
 }
 
 /// A single editable, single-line form field.

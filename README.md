@@ -60,6 +60,10 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   with **hot reload**: edit the file (or send `SIGHUP`) and new sessions pick it up without a restart.
 - **Themes & ANSI art** — pick a built-in color preset (or override individual colors), and drop in a
   custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work).
+- **Designable main menu** — rename, reorder, and hotkey the menu items with a `[[menu]]` config array
+  (each entry names a built-in `action`, with an optional label and one-letter hotkey); leave it out for
+  the classic default. Arrow keys still work, and a letter jumps straight to its item. Feature toggles
+  and role gates still apply.
 
 ## Run it
 

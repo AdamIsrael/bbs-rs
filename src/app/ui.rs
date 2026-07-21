@@ -237,8 +237,14 @@ fn render_main_menu(f: &mut Frame, area: Rect, app: &App) {
         .menu
         .iter()
         .map(|m| {
-            let mut label = m.label().to_string();
-            if *m == MenuItem::Mail {
+            // A leading "[k] " hotkey hint (classic command menu, #84), then the
+            // operator's label.
+            let key = m
+                .key
+                .map(|c| format!("[{c}] "))
+                .unwrap_or_else(|| "    ".to_string());
+            let mut label = format!("{key}{}", m.label);
+            if m.item == MenuItem::Mail {
                 if app.user.is_guest() {
                     label.push_str("   (register required)");
                 } else if app.mail_unread > 0 {
@@ -1408,7 +1414,7 @@ fn hints(
     can_block: bool,
 ) -> String {
     let base = match screen {
-        Screen::MainMenu => " ↑/↓ move · Enter select · q quit ",
+        Screen::MainMenu => " ↑/↓ or [hotkey] · Enter select · Esc quit ",
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
         Screen::Oneliners => " n new · Esc back ",
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",

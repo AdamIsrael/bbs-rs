@@ -19,7 +19,7 @@ use std::path::PathBuf;
 /// How many lines of the shipped config are comments. Asserted rather than
 /// computed so the point survives: this file is *mostly documentation*, which
 /// is the entire reason we edit it in place instead of regenerating it.
-const COMMENT_LINES: usize = 133;
+const COMMENT_LINES: usize = 149;
 
 /// Real `[[doors]]` entries, ignoring the commented-out example the shipped
 /// config carries — a plain `contains("[[doors]]")` matches that comment and
