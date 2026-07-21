@@ -33,7 +33,7 @@ use crate::services::profiles::{self, Profile};
 use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
 use crate::services::{
-    admin, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners,
+    admin, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners, reactions,
 };
 use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
@@ -132,6 +132,12 @@ pub struct App {
     /// The signature of the message currently being read (empty if none), shown
     /// beneath its body.
     pub current_msg_signature: String,
+    /// Per-kind reaction counts for the message being read (#94), in palette
+    /// order, and the kinds the viewer has themselves reacted with.
+    pub current_msg_reactions: Vec<(&'static str, i64)>,
+    pub current_msg_my_reactions: std::collections::HashSet<String>,
+    /// Total reaction count per message id for the current thread list's badges.
+    pub msg_reaction_totals: std::collections::HashMap<i64, i64>,
     /// When composing, the message being replied to (None = new thread).
     reply_parent: Option<i64>,
 
@@ -403,6 +409,9 @@ impl App {
             edit_target: None,
             msg_seen_threshold: i64::MAX,
             current_msg_signature: String::new(),
+            current_msg_reactions: Vec::new(),
+            current_msg_my_reactions: std::collections::HashSet::new(),
+            msg_reaction_totals: std::collections::HashMap::new(),
             reply_parent: None,
             current_profile: None,
             profile_back: Screen::MainMenu,
@@ -1605,6 +1614,7 @@ impl App {
                     self.board_unread.remove(&board.id);
                 }
                 self.messages = self.hide_blocked(m).await;
+                self.refresh_reaction_totals(board.id).await;
                 self.current_board = Some(board);
                 true
             }
@@ -1645,7 +1655,16 @@ impl App {
             let m = self.hide_blocked(m).await;
             self.msg_sel = self.msg_sel.min(m.len().saturating_sub(1));
             self.messages = m;
+            self.refresh_reaction_totals(board_id).await;
         }
+    }
+
+    /// Refresh the per-message reaction totals for a board's thread list (#94),
+    /// for the list's badges.
+    async fn refresh_reaction_totals(&mut self, board_id: i64) {
+        self.msg_reaction_totals = reactions::totals_for_board(&self.pool, board_id)
+            .await
+            .unwrap_or_default();
     }
 
     // ---- Messages --------------------------------------------------------
@@ -1664,7 +1683,9 @@ impl App {
                                 profiles::signature_of(&self.pool, full.author_id)
                                     .await
                                     .unwrap_or_default();
+                            let mid = full.id;
                             self.current_message = Some(full);
+                            self.load_current_reactions(mid).await;
                             self.screen = Screen::ReadMessage;
                         }
                         Err(e) => self.status = format!("Error: {e}"),
@@ -1719,10 +1740,63 @@ impl App {
             KeyCode::Char('d') if self.can_delete(&m) => {
                 self.delete_post(m.id, &m.subject, true).await;
             }
+            // Digit keys toggle the matching palette reaction (#94).
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = c as usize - '1' as usize;
+                if idx < reactions::PALETTE.len() {
+                    self.toggle_reaction(m.id, idx).await;
+                }
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') | KeyCode::Enter => {
                 self.screen = Screen::MessageList
             }
             _ => {}
+        }
+    }
+
+    /// Load the reaction counts and the viewer's own reactions for the message
+    /// being read (#94), for the reader footer.
+    async fn load_current_reactions(&mut self, message_id: i64) {
+        self.current_msg_reactions = reactions::counts(&self.pool, message_id)
+            .await
+            .unwrap_or_default();
+        self.current_msg_my_reactions = reactions::my_kinds(&self.pool, message_id, self.user.id)
+            .await
+            .unwrap_or_default();
+    }
+
+    /// Toggle the viewer's reaction of palette index `idx` on a message (#94),
+    /// then refresh the counts. Surfaces the guest and rate-limit refusals.
+    async fn toggle_reaction(&mut self, message_id: i64, idx: usize) {
+        let kind = reactions::PALETTE[idx].kind;
+        match reactions::toggle(
+            &self.pool,
+            message_id,
+            &self.user,
+            kind,
+            &self.config.limits,
+            now_unix(),
+        )
+        .await
+        {
+            Ok(_) => {
+                self.load_current_reactions(message_id).await;
+                // Keep the thread-list badge in step with the change.
+                if let Ok(n) = reactions::total_for_message(&self.pool, message_id).await {
+                    if n > 0 {
+                        self.msg_reaction_totals.insert(message_id, n);
+                    } else {
+                        self.msg_reaction_totals.remove(&message_id);
+                    }
+                }
+            }
+            Err(AppError::GuestNotAllowed) => {
+                self.status = "Guests can't react — register an account first.".into();
+            }
+            Err(AppError::RateLimited) => {
+                self.status = "You're reacting too fast — slow down a moment.".into();
+            }
+            Err(e) => self.status = format!("Could not react: {e}"),
         }
     }
 
@@ -2768,7 +2842,9 @@ impl App {
                 self.current_msg_signature = profiles::signature_of(&self.pool, full.author_id)
                     .await
                     .unwrap_or_default();
+                let mid = full.id;
                 self.current_message = Some(full);
+                self.load_current_reactions(mid).await;
                 self.screen = Screen::ReadMessage;
             }
             Err(e) => {

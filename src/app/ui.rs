@@ -653,14 +653,20 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
             // viewer. Flagged with a leading dot and a green subject.
             let is_new = m.created_at > app.msg_seen_threshold && m.author_id != app.user.id;
             let marker = if is_new { "•" } else { " " };
+            // A compact reaction tally (#94), only when a post has any.
+            let reactions = match app.msg_reaction_totals.get(&m.id) {
+                Some(n) if *n > 0 => format!("  ♥{n}"),
+                _ => String::new(),
+            };
             let row = format!(
-                "{}{}{}{:<width$} {:<12} {}",
+                "{}{}{}{:<width$} {:<12} {}{}",
                 marker,
                 indent,
                 lead,
                 truncate(&m.subject, subj_width.max(8)),
                 truncate(&m.author_name, 12),
                 fmt_time(m.created_at),
+                reactions,
                 width = subj_width.max(8),
             );
             if is_new {
@@ -697,10 +703,37 @@ fn render_read_message(f: &mut Frame, area: Rect, app: &App) {
     if !app.current_msg_signature.is_empty() {
         body.push_str(&format!("\n\n-- \n{}", app.current_msg_signature));
     }
+    // Reaction palette (#94): `n) glyph ×count`, the viewer's own picks in
+    // [brackets]. Counts always show; the digit-key hint too (guests get a
+    // "register first" nudge when they press one).
+    let palette = reactions_footer(app);
+    body.push_str(&format!("\n\n{palette}"));
     let p = Paragraph::new(body)
         .block(Block::bordered().title(format!(" {} ", truncate(&m.subject, 60))))
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
+}
+
+/// The reaction footer line for the read-message view (#94).
+fn reactions_footer(app: &App) -> String {
+    use crate::services::reactions;
+    let mut parts = Vec::new();
+    for (i, r) in reactions::PALETTE.iter().enumerate() {
+        let count = app
+            .current_msg_reactions
+            .iter()
+            .find(|(k, _)| *k == r.kind)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        let mine = app.current_msg_my_reactions.contains(r.kind);
+        let cell = format!("{}) {} ×{}", i + 1, r.glyph, count);
+        parts.push(if mine { format!("[{cell}]") } else { cell });
+    }
+    format!(
+        "Reactions:  {}   (press 1-{} to react)",
+        parts.join("   "),
+        reactions::PALETTE.len()
+    )
 }
 
 fn render_mailbox(f: &mut Frame, area: Rect, app: &App) {
@@ -1529,9 +1562,9 @@ fn hints(
         }
         Screen::ReadMessage => {
             if is_admin {
-                " r reply · e edit · d delete · Esc back "
+                " r reply · e edit · d delete · 1-3 react · Esc back "
             } else {
-                " r reply · e edit own · d delete own · Esc back "
+                " r reply · e edit own · d delete own · 1-3 react · Esc back "
             }
         }
         Screen::ReadMail => " r reply · f forward · d delete · Esc back ",

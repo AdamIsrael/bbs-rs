@@ -619,6 +619,8 @@ pub struct Limits {
     pub max_mail: u32,
     /// Max oneliners per user per window (0 disables).
     pub max_oneliners: u32,
+    /// Max post reactions added per user per window (#94; 0 disables).
+    pub max_reactions: u32,
     /// Max characters in a post/mail subject (0 disables).
     pub max_subject_chars: usize,
     /// Max characters in a post/mail body (0 disables).
@@ -634,6 +636,7 @@ impl Default for Limits {
             max_posts: 5,
             max_mail: 10,
             max_oneliners: 8,
+            max_reactions: 30,
             max_subject_chars: 120,
             max_body_chars: 8000,
         }
@@ -903,6 +906,8 @@ max_posts = 5
 max_mail = 10
 # Max oneliners per user per window.
 max_oneliners = 8
+# Max post reactions added per user per window.
+max_reactions = 30
 # Max characters in a post/mail subject (0 disables).
 max_subject_chars = 120
 # Max characters in a post/mail body (0 disables).

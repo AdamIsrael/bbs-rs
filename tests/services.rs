@@ -667,6 +667,7 @@ async fn subject_and_body_length_limits() {
         max_posts: 0,
         max_mail: 0,
         max_oneliners: 0,
+        max_reactions: 0,
         max_subject_chars: 5,
         max_body_chars: 10,
     };
@@ -2342,4 +2343,180 @@ async fn a_blank_mail_query_returns_nothing() {
             .unwrap()
             .is_empty()
     );
+}
+
+// ---- Post reactions (#94) -----------------------------------------------
+
+#[cfg(test)]
+mod reactions {
+    use super::setup;
+    use bbs_rs::config::Limits;
+    use bbs_rs::db::models::User;
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, boards, reactions};
+    use sqlx::SqlitePool;
+
+    async fn user(pool: &SqlitePool, name: &str) -> User {
+        auth::register_user(pool, name, "pw", &Default::default())
+            .await
+            .unwrap()
+    }
+
+    /// A board id and a post on it, authored by `author`.
+    async fn a_post(pool: &SqlitePool, author: &User) -> i64 {
+        let board = boards::list_boards(pool).await.unwrap()[0].id;
+        boards::post_message(pool, board, author, "hi", "body", None, &Limits::default())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn toggle_adds_then_removes() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let mid = a_post(&pool, &alice).await;
+        let lim = Limits::default();
+
+        // First toggle adds it.
+        assert!(
+            reactions::toggle(&pool, mid, &alice, "up", &lim, 100)
+                .await
+                .unwrap()
+        );
+        let counts = reactions::counts(&pool, mid).await.unwrap();
+        assert_eq!(counts.iter().find(|(k, _)| *k == "up").unwrap().1, 1);
+        assert!(
+            reactions::my_kinds(&pool, mid, alice.id)
+                .await
+                .unwrap()
+                .contains("up")
+        );
+        assert_eq!(reactions::total_for_message(&pool, mid).await.unwrap(), 1);
+
+        // Second toggle removes it (idempotent per user per kind).
+        assert!(
+            !reactions::toggle(&pool, mid, &alice, "up", &lim, 101)
+                .await
+                .unwrap()
+        );
+        assert_eq!(reactions::total_for_message(&pool, mid).await.unwrap(), 0);
+        assert!(
+            reactions::my_kinds(&pool, mid, alice.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_users_and_kinds_accumulate() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let bob = user(&pool, "bob").await;
+        let mid = a_post(&pool, &alice).await;
+        let lim = Limits::default();
+
+        reactions::toggle(&pool, mid, &alice, "up", &lim, 1)
+            .await
+            .unwrap();
+        reactions::toggle(&pool, mid, &bob, "up", &lim, 1)
+            .await
+            .unwrap();
+        reactions::toggle(&pool, mid, &alice, "love", &lim, 1)
+            .await
+            .unwrap();
+
+        let counts = reactions::counts(&pool, mid).await.unwrap();
+        assert_eq!(counts.iter().find(|(k, _)| *k == "up").unwrap().1, 2);
+        assert_eq!(counts.iter().find(|(k, _)| *k == "love").unwrap().1, 1);
+        assert_eq!(counts.iter().find(|(k, _)| *k == "laugh").unwrap().1, 0);
+        assert_eq!(reactions::total_for_message(&pool, mid).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn guests_and_bad_kinds_are_rejected() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+        let mid = a_post(&pool, &alice).await;
+        let lim = Limits::default();
+
+        assert!(matches!(
+            reactions::toggle(&pool, mid, &guest, "up", &lim, 1).await,
+            Err(AppError::GuestNotAllowed)
+        ));
+        assert!(matches!(
+            reactions::toggle(&pool, mid, &alice, "bogus", &lim, 1).await,
+            Err(AppError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn adding_is_rate_limited_but_removing_is_not() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let mid = a_post(&pool, &alice).await;
+        let lim = Limits {
+            window_secs: 60,
+            max_reactions: 1,
+            ..Default::default()
+        };
+
+        // First add is allowed; the second (a different kind) trips the cap.
+        reactions::toggle(&pool, mid, &alice, "up", &lim, 100)
+            .await
+            .unwrap();
+        assert!(matches!(
+            reactions::toggle(&pool, mid, &alice, "love", &lim, 101).await,
+            Err(AppError::RateLimited)
+        ));
+        // Removing an existing reaction is always allowed, even at the cap.
+        assert!(
+            !reactions::toggle(&pool, mid, &alice, "up", &lim, 102)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_post_clears_its_reactions() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let mid = a_post(&pool, &alice).await;
+        let lim = Limits::default();
+
+        reactions::toggle(&pool, mid, &alice, "up", &lim, 1)
+            .await
+            .unwrap();
+        assert_eq!(reactions::total_for_message(&pool, mid).await.unwrap(), 1);
+
+        assert!(
+            boards::delete_own_message(&pool, mid, &alice)
+                .await
+                .unwrap()
+        );
+        assert_eq!(reactions::total_for_message(&pool, mid).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn totals_for_board_batches_the_counts() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let board = boards::list_boards(&pool).await.unwrap()[0].id;
+        let lim = Limits::default();
+        let m1 = boards::post_message(&pool, board, &alice, "a", "b", None, &lim)
+            .await
+            .unwrap();
+        let m2 = boards::post_message(&pool, board, &alice, "c", "d", None, &lim)
+            .await
+            .unwrap();
+
+        reactions::toggle(&pool, m1, &alice, "up", &lim, 1)
+            .await
+            .unwrap();
+
+        let totals = reactions::totals_for_board(&pool, board).await.unwrap();
+        assert_eq!(totals.get(&m1), Some(&1));
+        assert_eq!(totals.get(&m2), None, "a post with no reactions is absent");
+    }
 }
