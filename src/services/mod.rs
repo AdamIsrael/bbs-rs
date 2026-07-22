@@ -14,6 +14,7 @@ pub mod finger;
 pub mod keys;
 pub mod mail;
 pub mod oneliners;
+pub mod polls;
 pub mod presence;
 pub mod profiles;
 pub mod reactions;

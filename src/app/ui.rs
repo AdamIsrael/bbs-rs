@@ -61,6 +61,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Bulletins => render_bulletins(f, body, app),
         Screen::ReadBulletin => render_read_bulletin(f, body, app),
         Screen::Oneliners => render_oneliners(f, body, app),
+        Screen::Polls => render_polls(f, body, app),
+        Screen::ViewPoll => render_view_poll(f, body, app),
+        Screen::ComposePoll => render_form(f, body, " New Poll ", app),
         Screen::Timeline => render_timeline(f, body, app),
         Screen::FollowRemote => render_form(f, body, " Follow Remote Account ", app),
         Screen::RemoteBoards => render_remote_boards(f, body, app),
@@ -408,6 +411,89 @@ fn render_oneliners(f: &mut Frame, area: Rect, app: &App) {
     }
     // A read-only wall: reuse the list renderer with no selection highlight.
     render_selectable(f, area, " Oneliners ", lines, usize::MAX);
+}
+
+fn render_polls(f: &mut Frame, area: Rect, app: &App) {
+    if app.polls.is_empty() {
+        return placeholder(f, area, " Polls ", "No polls yet. Press 'n' to create one.");
+    }
+    let lines: Vec<Line> = app
+        .polls
+        .iter()
+        .map(|p| {
+            let status = if p.is_closed() { "closed" } else { "open" };
+            Line::from(format!(
+                "{:<44} {:>4} votes · {:<6} · by {}",
+                truncate(&p.question, 44),
+                p.total_votes,
+                status,
+                truncate(&p.author_name, 16),
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Polls ", lines, app.poll_sel);
+}
+
+fn render_view_poll(f: &mut Frame, area: Rect, app: &App) {
+    let Some(detail) = &app.current_poll else {
+        return placeholder(f, area, " Poll ", "Nothing to show.");
+    };
+    let total = detail.poll.total_votes.max(0);
+    let closed = detail.poll.is_closed();
+    // A horizontal bar sized to the option's share of the vote.
+    let bar_cells = 20usize;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        detail.poll.question.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for (i, opt) in detail.options.iter().enumerate() {
+        let pct = if total > 0 {
+            (opt.votes as f64 / total as f64 * 100.0).round() as i64
+        } else {
+            0
+        };
+        let filled = if total > 0 {
+            (opt.votes as usize * bar_cells) / total as usize
+        } else {
+            0
+        };
+        let bar = format!("{}{}", "█".repeat(filled), "·".repeat(bar_cells - filled));
+        let mine = detail.my_vote == Some(opt.id);
+        let marker = if mine { "◉" } else { "○" };
+        let text = format!(
+            "{marker} {}) {:<24} {bar} {:>3}% ({})",
+            i + 1,
+            truncate(&opt.label, 24),
+            pct,
+            opt.votes,
+        );
+        let style = if i == app.poll_opt_sel {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else if mine {
+            Style::default().fg(app.theme.accent)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    lines.push(Line::from(""));
+    let footer = if closed {
+        format!("{total} vote(s) · closed")
+    } else {
+        format!("{total} vote(s) · ↑/↓ + Enter (or 1-9) to vote")
+    };
+    lines.push(Line::from(Span::styled(
+        footer,
+        Style::default().fg(app.theme.dim),
+    )));
+
+    let title = if closed { " Poll (closed) " } else { " Poll " };
+    let p = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title(title))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
@@ -1434,6 +1520,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Message Boards : browse boards, read and (registered users) post messages
                      (admins: l lock a board, p pin, d delete a post)
   • Oneliners      : a shared graffiti wall of short public one-liners (press n to add)
+  • Polls          : create and vote on multiple-choice polls (press n to add, 1-9 to vote)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
@@ -1486,6 +1573,9 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadBulletin => "Bulletin",
         Screen::Oneliners => "Oneliners",
         Screen::ComposeOneliner => "New Oneliner",
+        Screen::Polls => "Polls",
+        Screen::ViewPoll => "Poll",
+        Screen::ComposePoll => "New Poll",
         Screen::Timeline => "Timeline",
         Screen::RemoteBoards => "Remote Boards",
         Screen::RemoteBoardPosts => "Remote Board",
@@ -1541,6 +1631,15 @@ fn hints(
         Screen::Bulletins => " ↑/↓ move · Enter read · Esc to menu ",
         Screen::Oneliners => " n new · Esc back ",
         Screen::ComposeOneliner => " type your oneliner · Enter post · Esc cancel ",
+        Screen::Polls => " ↑/↓ select · Enter open · n new · Esc back ",
+        Screen::ViewPoll => {
+            if is_admin {
+                " ↑/↓ + Enter vote · c close · d delete · Esc back "
+            } else {
+                " ↑/↓ + Enter vote · (c/d if yours) · Esc back "
+            }
+        }
+        Screen::ComposePoll => " Tab/Enter next field · Enter on last creates · Esc cancel ",
         Screen::Timeline => " ↑/↓ scroll · f follow · r refresh · Esc back ",
         Screen::RemoteBoards => " ↑/↓ select · Enter open · r refresh · Esc back ",
         Screen::RemoteBoardPosts => " ↑/↓ scroll · p post · r reply · R refresh · Esc back ",

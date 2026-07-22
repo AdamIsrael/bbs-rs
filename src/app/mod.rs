@@ -33,7 +33,7 @@ use crate::services::profiles::{self, Profile};
 use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
 use crate::services::{
-    admin, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners, reactions,
+    admin, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners, polls, reactions,
 };
 use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
@@ -92,6 +92,14 @@ pub struct App {
 
     // Oneliners (graffiti wall)
     pub oneliners: Vec<Oneliner>,
+
+    // Polls / voting booth (#72)
+    pub polls: Vec<polls::Poll>,
+    pub poll_sel: usize,
+    /// The poll currently being viewed, with its options and the viewer's vote.
+    pub current_poll: Option<polls::PollDetail>,
+    /// Which option row is highlighted in the poll view (the vote target).
+    pub poll_opt_sel: usize,
 
     // Federated timeline: cached statuses from followed remote accounts.
     pub timeline: Vec<crate::services::federation::timeline::Entry>,
@@ -245,6 +253,7 @@ fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
         | MenuItem::Help
         | MenuItem::Quit => true,
         MenuItem::Oneliners => f.oneliners,
+        MenuItem::Polls => f.polls,
         MenuItem::Timeline | MenuItem::RemoteBoards => config.federation.enabled,
         MenuItem::Mail => f.private_mail,
         MenuItem::Who => f.who_online,
@@ -259,12 +268,13 @@ fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
 
 /// The built-in menu order, used when no `[[menu]]` is configured. Matches the
 /// classic layout before the menu became config-driven.
-fn default_menu_order() -> [MenuItem; 17] {
+fn default_menu_order() -> [MenuItem; 18] {
     use MenuItem::*;
     [
         Bulletins,
         Boards,
         Oneliners,
+        Polls,
         Timeline,
         RemoteBoards,
         Mail,
@@ -390,6 +400,10 @@ impl App {
             bulletin_sel: 0,
             current_bulletin: None,
             oneliners: Vec::new(),
+            polls: Vec::new(),
+            poll_sel: 0,
+            current_poll: None,
+            poll_opt_sel: 0,
             timeline: Vec::new(),
             timeline_sel: 0,
             remote_boards: Vec::new(),
@@ -481,6 +495,9 @@ impl App {
             Screen::ReadBulletin => self.on_reader(key, Screen::Bulletins),
             Screen::Oneliners => self.on_oneliners(key).await,
             Screen::ComposeOneliner => self.on_compose_oneliner(key).await,
+            Screen::Polls => self.on_polls(key).await,
+            Screen::ViewPoll => self.on_view_poll(key).await,
+            Screen::ComposePoll => self.on_compose_poll(key).await,
             Screen::Timeline => self.on_timeline(key).await,
             Screen::RemoteBoards => self.on_remote_boards(key).await,
             Screen::RemoteBoardPosts => self.on_remote_board_posts(key).await,
@@ -572,6 +589,7 @@ impl App {
             MenuItem::Bulletins => self.open_bulletins().await,
             MenuItem::Boards => self.open_boards().await,
             MenuItem::Oneliners => self.open_oneliners().await,
+            MenuItem::Polls => self.open_polls().await,
             MenuItem::Timeline => self.open_timeline().await,
             MenuItem::RemoteBoards => self.open_remote_boards().await,
             MenuItem::Mail => {
@@ -820,6 +838,203 @@ impl App {
             Ok(0) => {}
             Ok(n) => tracing::info!("queued status {oneliner_id} to {n} follower inbox(es)"),
             Err(e) => tracing::warn!("could not queue status {oneliner_id} for delivery: {e:#}"),
+        }
+    }
+
+    // ---- Polls / voting booth (#72) --------------------------------------
+
+    async fn open_polls(&mut self) {
+        match polls::list_polls(&self.pool, 100).await {
+            Ok(list) => {
+                self.poll_sel = self.poll_sel.min(list.len().saturating_sub(1));
+                self.polls = list;
+                self.screen = Screen::Polls;
+            }
+            Err(e) => self.status = format!("Error loading polls: {e}"),
+        }
+    }
+
+    async fn on_polls(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.poll_sel = self.poll_sel.saturating_sub(1),
+            KeyCode::Down => {
+                self.poll_sel = (self.poll_sel + 1).min(self.polls.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(p) = self.polls.get(self.poll_sel) {
+                    self.open_poll(p.id).await;
+                }
+            }
+            KeyCode::Char('n') => {
+                if self.user.is_guest() {
+                    self.status = "Guests cannot create polls — register an account first.".into();
+                } else {
+                    self.begin_compose_poll();
+                }
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = Screen::MainMenu,
+            _ => {}
+        }
+    }
+
+    /// Load a poll into the view, placing the cursor on the viewer's current
+    /// choice (or the first option).
+    async fn open_poll(&mut self, poll_id: i64) {
+        match polls::get_poll(&self.pool, poll_id, self.user.id).await {
+            Ok(detail) => {
+                self.poll_opt_sel = detail
+                    .my_vote
+                    .and_then(|opt| detail.options.iter().position(|o| o.id == opt))
+                    .unwrap_or(0);
+                self.current_poll = Some(detail);
+                self.screen = Screen::ViewPoll;
+            }
+            Err(e) => self.status = format!("Could not open poll: {e}"),
+        }
+    }
+
+    async fn on_view_poll(&mut self, key: KeyEvent) {
+        let Some(detail) = self.current_poll.as_ref() else {
+            self.screen = Screen::Polls;
+            return;
+        };
+        let n = detail.options.len();
+        match key.code {
+            KeyCode::Up => self.poll_opt_sel = self.poll_opt_sel.saturating_sub(1),
+            KeyCode::Down => self.poll_opt_sel = (self.poll_opt_sel + 1).min(n.saturating_sub(1)),
+            // Enter or a digit votes for the selected / numbered option.
+            KeyCode::Enter => self.vote_selected().await,
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = c as usize - '1' as usize;
+                if idx < n {
+                    self.poll_opt_sel = idx;
+                    self.vote_selected().await;
+                }
+            }
+            // Close (creator or admin) or delete (creator or admin).
+            KeyCode::Char('c') if self.can_moderate_poll() => self.close_current_poll().await,
+            KeyCode::Char('d') if self.can_moderate_poll() => self.delete_current_poll().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
+                self.current_poll = None;
+                self.open_polls().await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the viewer may close/delete the current poll: an admin, or its
+    /// author.
+    fn can_moderate_poll(&self) -> bool {
+        self.user.is_admin()
+            || self
+                .current_poll
+                .as_ref()
+                .is_some_and(|d| d.poll.author_name == self.user.username)
+    }
+
+    /// Cast the viewer's vote for the highlighted option, then reload the poll.
+    async fn vote_selected(&mut self) {
+        let Some(detail) = self.current_poll.as_ref() else {
+            return;
+        };
+        let poll_id = detail.poll.id;
+        let Some(option) = detail.options.get(self.poll_opt_sel) else {
+            return;
+        };
+        let option_id = option.id;
+        match polls::vote(&self.pool, poll_id, &self.user, option_id, now_unix()).await {
+            Ok(()) => {
+                self.open_poll(poll_id).await;
+                self.status = "Vote recorded.".into();
+            }
+            Err(AppError::GuestNotAllowed) => {
+                self.status = "Guests can't vote — register an account first.".into();
+            }
+            Err(AppError::PollClosed) => self.status = "This poll is closed.".into(),
+            Err(e) => self.status = format!("Could not vote: {e}"),
+        }
+    }
+
+    async fn close_current_poll(&mut self) {
+        let Some(poll_id) = self.current_poll.as_ref().map(|d| d.poll.id) else {
+            return;
+        };
+        match polls::close_poll(&self.pool, poll_id, now_unix()).await {
+            Ok(true) => {
+                self.open_poll(poll_id).await;
+                self.status = "Poll closed.".into();
+            }
+            Ok(false) => self.status = "Poll was already closed.".into(),
+            Err(e) => self.status = format!("Could not close poll: {e}"),
+        }
+    }
+
+    async fn delete_current_poll(&mut self) {
+        let Some(poll_id) = self.current_poll.as_ref().map(|d| d.poll.id) else {
+            return;
+        };
+        match polls::delete_poll(&self.pool, poll_id).await {
+            Ok(_) => {
+                self.current_poll = None;
+                self.open_polls().await;
+                self.status = "Poll deleted.".into();
+            }
+            Err(e) => self.status = format!("Could not delete poll: {e}"),
+        }
+    }
+
+    /// Open the poll composer: a question field plus [`polls::MAX_OPTIONS`]
+    /// option fields (blanks are ignored; two are required).
+    fn begin_compose_poll(&mut self) {
+        let mut fields = vec![Field::new("Question", false)];
+        for i in 1..=polls::MAX_OPTIONS {
+            fields.push(Field::new(&format!("Option {i}"), false));
+        }
+        self.form = Form::new(fields);
+        self.screen = Screen::ComposePoll;
+    }
+
+    async fn on_compose_poll(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Polls,
+            KeyCode::Enter if self.form.on_last() => self.submit_poll().await,
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.form.next_field(),
+            KeyCode::BackTab | KeyCode::Up => self.form.prev_field(),
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_poll(&mut self) {
+        let question = self.form.value(0).to_string();
+        let options: Vec<String> = (1..self.form.fields.len())
+            .map(|i| self.form.value(i).to_string())
+            .collect();
+        match polls::create_poll(
+            &self.pool,
+            &self.user,
+            &question,
+            &options,
+            &self.config.limits,
+            now_unix(),
+        )
+        .await
+        {
+            Ok(id) => {
+                self.open_poll(id).await;
+                self.status = "Poll created.".into();
+            }
+            Err(AppError::PollInvalid) => {
+                self.status = "A poll needs a question and at least two options.".into();
+            }
+            Err(AppError::FieldTooLong(field, max)) => {
+                self.status = format!("{field} is too long (max {max} characters).");
+            }
+            Err(AppError::RateLimited) => {
+                self.status = "You're creating polls too quickly — slow down.".into();
+            }
+            Err(e) => self.status = format!("Could not create poll: {e}"),
         }
     }
 

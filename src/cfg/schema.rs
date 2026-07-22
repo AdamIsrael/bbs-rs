@@ -267,6 +267,12 @@ pub static SECTIONS: &[Section] = &[
                 help: "The graffiti wall. Also this board's ActivityPub statuses when federation is on.",
             },
             Field {
+                key: "polls",
+                label: "Polls",
+                kind: FieldKind::Bool,
+                help: "The voting booth — users create and vote on polls.",
+            },
+            Field {
                 key: "pubkey_auth",
                 label: "SSH public-key auth",
                 kind: FieldKind::Bool,

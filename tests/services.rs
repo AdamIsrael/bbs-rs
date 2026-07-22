@@ -2520,3 +2520,196 @@ mod reactions {
         assert_eq!(totals.get(&m2), None, "a post with no reactions is absent");
     }
 }
+
+// ---- Polls / voting booth (#72) -----------------------------------------
+
+#[cfg(test)]
+mod polls {
+    use super::setup;
+    use bbs_rs::config::Limits;
+    use bbs_rs::db::models::User;
+    use bbs_rs::error::AppError;
+    use bbs_rs::services::{auth, polls};
+    use sqlx::SqlitePool;
+
+    async fn user(pool: &SqlitePool, name: &str) -> User {
+        auth::register_user(pool, name, "pw", &Default::default())
+            .await
+            .unwrap()
+    }
+
+    fn opts(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn create_requires_question_and_two_options() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let lim = Limits::default();
+
+        // Valid.
+        let id = polls::create_poll(
+            &pool,
+            &alice,
+            "Best editor?",
+            &opts(&["vim", "emacs"]),
+            &lim,
+            1,
+        )
+        .await
+        .unwrap();
+        let detail = polls::get_poll(&pool, id, alice.id).await.unwrap();
+        assert_eq!(detail.poll.question, "Best editor?");
+        assert_eq!(detail.options.len(), 2);
+        assert_eq!(detail.my_vote, None);
+
+        // Blank options are dropped → fewer than two → rejected.
+        assert!(matches!(
+            polls::create_poll(&pool, &alice, "Q", &opts(&["only one", "  "]), &lim, 1).await,
+            Err(AppError::PollInvalid)
+        ));
+        // Empty question → rejected.
+        assert!(matches!(
+            polls::create_poll(&pool, &alice, "  ", &opts(&["a", "b"]), &lim, 1).await,
+            Err(AppError::PollInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn guests_cannot_create_or_vote() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let guest = auth::find_user(&pool, "guest").await.unwrap().unwrap();
+        let lim = Limits::default();
+        let id = polls::create_poll(&pool, &alice, "Q", &opts(&["a", "b"]), &lim, 1)
+            .await
+            .unwrap();
+        let opt = polls::get_poll(&pool, id, alice.id).await.unwrap().options[0].id;
+
+        assert!(matches!(
+            polls::create_poll(&pool, &guest, "Q", &opts(&["a", "b"]), &lim, 1).await,
+            Err(AppError::GuestNotAllowed)
+        ));
+        assert!(matches!(
+            polls::vote(&pool, id, &guest, opt, 2).await,
+            Err(AppError::GuestNotAllowed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn voting_records_and_a_revote_replaces() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let bob = user(&pool, "bob").await;
+        let lim = Limits::default();
+        let id = polls::create_poll(&pool, &alice, "Q", &opts(&["a", "b"]), &lim, 1)
+            .await
+            .unwrap();
+        let o = polls::get_poll(&pool, id, alice.id).await.unwrap().options;
+        let (a, b) = (o[0].id, o[1].id);
+
+        polls::vote(&pool, id, &alice, a, 10).await.unwrap();
+        polls::vote(&pool, id, &bob, a, 10).await.unwrap();
+        let d = polls::get_poll(&pool, id, alice.id).await.unwrap();
+        assert_eq!(d.poll.total_votes, 2);
+        assert_eq!(d.options[0].votes, 2);
+        assert_eq!(d.my_vote, Some(a));
+
+        // Alice changes her vote to b — total unchanged, tallies shift.
+        polls::vote(&pool, id, &alice, b, 11).await.unwrap();
+        let d = polls::get_poll(&pool, id, alice.id).await.unwrap();
+        assert_eq!(d.poll.total_votes, 2, "still one vote per user");
+        assert_eq!(d.options[0].votes, 1);
+        assert_eq!(d.options[1].votes, 1);
+        assert_eq!(d.my_vote, Some(b));
+    }
+
+    #[tokio::test]
+    async fn a_forged_option_id_is_rejected() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let lim = Limits::default();
+        let id = polls::create_poll(&pool, &alice, "Q", &opts(&["a", "b"]), &lim, 1)
+            .await
+            .unwrap();
+        // Option 999_999 doesn't belong to this poll.
+        assert!(matches!(
+            polls::vote(&pool, id, &alice, 999_999, 1).await,
+            Err(AppError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_stops_voting() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let lim = Limits::default();
+        let id = polls::create_poll(&pool, &alice, "Q", &opts(&["a", "b"]), &lim, 1)
+            .await
+            .unwrap();
+        let opt = polls::get_poll(&pool, id, alice.id).await.unwrap().options[0].id;
+
+        assert!(polls::close_poll(&pool, id, 100).await.unwrap());
+        assert!(
+            !polls::close_poll(&pool, id, 101).await.unwrap(),
+            "already closed"
+        );
+        assert!(
+            polls::get_poll(&pool, id, alice.id)
+                .await
+                .unwrap()
+                .poll
+                .is_closed()
+        );
+        assert!(matches!(
+            polls::vote(&pool, id, &alice, opt, 102).await,
+            Err(AppError::PollClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deleting_removes_the_poll_and_its_votes() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let lim = Limits::default();
+        let id = polls::create_poll(&pool, &alice, "Q", &opts(&["a", "b"]), &lim, 1)
+            .await
+            .unwrap();
+        let opt = polls::get_poll(&pool, id, alice.id).await.unwrap().options[0].id;
+        polls::vote(&pool, id, &alice, opt, 1).await.unwrap();
+
+        assert!(polls::delete_poll(&pool, id).await.unwrap());
+        assert!(matches!(
+            polls::get_poll(&pool, id, alice.id).await,
+            Err(AppError::NotFound)
+        ));
+        // Vote rows are gone too (no orphans).
+        let leftover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poll_votes WHERE poll_id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(leftover, 0);
+    }
+
+    #[tokio::test]
+    async fn list_shows_newest_first_with_totals() {
+        let pool = setup().await;
+        let alice = user(&pool, "alice").await;
+        let lim = Limits::default();
+        let p1 = polls::create_poll(&pool, &alice, "First", &opts(&["a", "b"]), &lim, 10)
+            .await
+            .unwrap();
+        let _p2 = polls::create_poll(&pool, &alice, "Second", &opts(&["a", "b"]), &lim, 20)
+            .await
+            .unwrap();
+        let opt = polls::get_poll(&pool, p1, alice.id).await.unwrap().options[0].id;
+        polls::vote(&pool, p1, &alice, opt, 30).await.unwrap();
+
+        let list = polls::list_polls(&pool, 50).await.unwrap();
+        assert_eq!(list[0].question, "Second", "newest first");
+        assert_eq!(list[1].question, "First");
+        assert_eq!(list[1].total_votes, 1);
+    }
+}
