@@ -331,12 +331,20 @@ pub static SECTIONS: &[Section] = &[
         help: "Registration policy.",
         restart_only: false,
         kind: SectionKind::Fields,
-        fields: &[Field {
-            key: "reserved_usernames",
-            label: "Reserved usernames",
-            kind: FieldKind::StrList,
-            help: "Names nobody may register (case-insensitive). \"guest\" is always reserved. Usernames containing @ are always refused, to stop impersonation of remote actors.",
-        }],
+        fields: &[
+            Field {
+                key: "reserved_usernames",
+                label: "Reserved usernames",
+                kind: FieldKind::StrList,
+                help: "Names nobody may register (case-insensitive). \"guest\" is always reserved. Usernames containing @ are always refused, to stop impersonation of remote actors.",
+            },
+            Field {
+                key: "require_validation",
+                label: "Require sysop approval",
+                kind: FieldKind::Bool,
+                help: "New registrations wait in a pending queue until a sysop approves them.",
+            },
+        ],
     },
     Section {
         name: "limits",

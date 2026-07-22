@@ -403,6 +403,7 @@ mod tests {
             role: "user".into(),
             created_at: 0,
             banned_at: None,
+            validated_at: Some(0),
             is_remote: false,
         };
         let body = dorinfo1(&user, "My BBS", "Jane Sysop", 30, 30);

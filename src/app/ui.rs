@@ -1416,7 +1416,13 @@ fn render_admin_users(f: &mut Frame, area: Rect, app: &App) {
         .admin_users
         .iter()
         .map(|u| {
-            let status = if u.is_banned() { "BANNED" } else { "" };
+            let status = if u.is_banned() {
+                "BANNED"
+            } else if !u.is_validated() {
+                "PENDING"
+            } else {
+                ""
+            };
             Line::from(format!(
                 "{:<20} {:<7} {:<7} {}",
                 truncate(&u.username, 20),
@@ -1708,7 +1714,7 @@ fn hints(
         Screen::Keys => " ↑/↓ move · n add · d delete · Esc back ",
         Screen::AddKey => " paste your public key · Enter add · Esc cancel ",
         Screen::AdminUsers => {
-            " ↑/↓ · b ban · u unban · w broadcast · l logins · a audit · f federation · Esc back "
+            " ↑/↓ · b ban · u unban · v approve · x reject · w broadcast · l logins · a audit · f fed · Esc back "
         }
         Screen::AdminAudit => " ↑/↓ move · PgUp/PgDn · Home/End · Esc back ",
         Screen::AdminFederation => " ↑/↓ · a allow · b block · s silence · d remove · Esc back ",

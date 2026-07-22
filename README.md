@@ -147,6 +147,7 @@ ban_secs = 3600        # how long an auto-ban lasts (0 = permanent)
 # Usernames that may not be registered (case-insensitive, whitespace-trimmed).
 # "guest" is always reserved regardless of this list.
 reserved_usernames = ["root", "admin"]
+require_validation = false  # gate new accounts behind sysop approval
 
 [limits]     # per-user rate limits + content length caps (admins bypass rates; 0 = off)
 window_secs = 60       # sliding window for counting a user's recent actions
@@ -282,7 +283,10 @@ Users have one of three roles: `guest`, `user`, or `admin`. Manage users with th
 (operates on the same SQLite database as the server):
 
 ```sh
-bbsctl users                     # list users (role + ban status)
+bbsctl users                     # list users (role + ban/pending status)
+bbsctl pending                   # list accounts awaiting sysop approval
+bbsctl approve <user>            # approve a pending account
+bbsctl reject <user>             # reject (delete) a pending registration
 bbsctl role <user> admin         # promote/demote (guest|user|admin)
 bbsctl ban <user>                # ban / unban a user
 bbsctl unban <user>
@@ -327,6 +331,11 @@ migrations or writes to the live database. Schedule it with cron/systemd for reg
 Point it at a non-default database with `--database-url`. To create your **first admin**, register a
 normal account, then run `bbsctl role <that-user> admin`. Registration refuses reserved usernames —
 `root` and `admin` by default (plus `guest` always), configurable via `[accounts].reserved_usernames`.
+
+**New-user approval.** Set `[accounts].require_validation = true` to gate new registrations behind sysop
+review: a new account lands in a pending queue and can't log in until approved. Approve or reject from the
+**Admin · Users** screen (`v` approve, `x` reject) or with `bbsctl pending` / `bbsctl approve <user>` /
+`bbsctl reject <user>`. Admins and the shared guest are never gated.
 
 A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get

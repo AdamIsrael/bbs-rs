@@ -22,7 +22,7 @@ pub const ROLES: [&str; 3] = ["guest", "user", "admin"];
 /// meaningfully.
 pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>> {
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at, is_remote \
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
          FROM users WHERE is_remote = 0 ORDER BY id",
     )
     .fetch_all(pool)
@@ -47,6 +47,46 @@ pub async fn unban_user(pool: &SqlitePool, username: &str) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// List the local accounts still pending sysop approval (#73), oldest first so
+/// the queue is worked front-to-back.
+pub async fn pending_users(pool: &SqlitePool) -> Result<Vec<User>> {
+    let users = sqlx::query_as::<_, User>(
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
+         FROM users WHERE is_remote = 0 AND validated_at IS NULL ORDER BY created_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(users)
+}
+
+/// Approve a pending account (#73): stamp `validated_at` so it can log in.
+/// Returns whether a still-pending user was activated.
+pub async fn validate_user(pool: &SqlitePool, username: &str) -> Result<bool> {
+    let affected = sqlx::query(
+        "UPDATE users SET validated_at = ? WHERE username = ? AND validated_at IS NULL",
+    )
+    .bind(now_unix())
+    .bind(username)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// Reject a pending registration (#73) by deleting it. Only ever removes a
+/// still-pending, non-remote account, so an already-active user (or a remote
+/// actor) can't be dropped through this path. Returns whether a row was removed.
+pub async fn reject_user(pool: &SqlitePool, username: &str) -> Result<bool> {
+    let affected = sqlx::query(
+        "DELETE FROM users WHERE username = ? AND validated_at IS NULL AND is_remote = 0",
+    )
+    .bind(username)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
 }
 
 /// Set a user's role. Rejects anything outside [`ROLES`].

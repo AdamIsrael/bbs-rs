@@ -582,12 +582,17 @@ pub struct Accounts {
     /// ignores surrounding whitespace. `guest` is always reserved regardless of
     /// this list (it is the shared limited account).
     pub reserved_usernames: Vec<String>,
+    /// Require sysop approval before a newly registered account can log in
+    /// (#73). Off by default; when on, registrations land in a pending queue an
+    /// admin approves (in-BBS or `bbsctl approve`).
+    pub require_validation: bool,
 }
 
 impl Default for Accounts {
     fn default() -> Self {
         Self {
             reserved_usernames: vec!["root".into(), "admin".into()],
+            require_validation: false,
         }
     }
 }
@@ -899,6 +904,10 @@ ban_secs = 3600
 # Usernames that may not be registered (case-insensitive; whitespace-trimmed).
 # \"guest\" is always reserved regardless of this list.
 reserved_usernames = [\"root\", \"admin\"]
+# Require sysop approval before a newly registered account can log in. When on,
+# registrations wait in a pending queue (approve in the Admin screen or with
+# `bbsctl approve <user>`); off by default.
+require_validation = false
 
 [limits]
 # Per-user rate limits (admins are never throttled). A 0 cap disables that
@@ -1379,6 +1388,7 @@ boards = [
     fn empty_list_still_reserves_guest() {
         let a = Accounts {
             reserved_usernames: vec![],
+            ..Default::default()
         };
         assert!(a.is_reserved("guest"));
         assert!(!a.is_reserved("root"));
