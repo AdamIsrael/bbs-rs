@@ -88,6 +88,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ConfirmDeleteMail => render_confirm_delete_mail(f, body, app),
         Screen::ComposeMail => render_compose(f, body, " Compose Mail ", app),
         Screen::WhoOnline => render_who(f, body, app),
+        Screen::Chat => render_chat(f, body, app),
         Screen::ComposePage => {
             let title = format!(" Page {} ", app.page_target().unwrap_or("user"));
             render_form(f, body, &title, app)
@@ -948,6 +949,57 @@ fn render_who(f: &mut Frame, area: Rect, app: &App) {
     render_selectable(f, area, " Who's Online ", lines, app.who_sel);
 }
 
+/// The live chat room (#67): a scrollback pane over an input line. System
+/// notices (blank `from`) render dimmed; a user's own line is highlighted.
+fn render_chat(f: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area);
+    let inner_w = rows[0].width.saturating_sub(2) as usize;
+    let scroll_h = rows[0].height.saturating_sub(2) as usize;
+
+    // Wrap each line, then keep only the most recent that fit the pane.
+    let mut lines: Vec<Line> = Vec::new();
+    for (from, text) in &app.chat_log {
+        if from.is_empty() {
+            // System notice: "* alice joined the chat".
+            for (i, seg) in wrap_text(&format!("* {text}"), inner_w)
+                .into_iter()
+                .enumerate()
+            {
+                let s = if i == 0 { seg } else { format!("  {seg}") };
+                lines.push(Line::from(Span::styled(
+                    s,
+                    Style::default().fg(app.theme.dim),
+                )));
+            }
+        } else {
+            let head = format!("{from}: ");
+            let mine = *from == app.user.username;
+            let style = if mine {
+                Style::default().fg(app.theme.accent)
+            } else {
+                Style::default()
+            };
+            let wrapped = wrap_text(&format!("{head}{text}"), inner_w);
+            for (i, seg) in wrapped.into_iter().enumerate() {
+                let s = if i == 0 { seg } else { format!("  {seg}") };
+                lines.push(Line::from(Span::styled(s, style)));
+            }
+        }
+    }
+    if lines.len() > scroll_h {
+        lines.drain(0..lines.len() - scroll_h);
+    }
+    let log = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title(" Chat "))
+        .wrap(Wrap { trim: false });
+    f.render_widget(log, rows[0]);
+
+    // The compose line.
+    let input = Paragraph::new(format!("> {}", app.chat_input))
+        .block(Block::bordered().title(" Say (Enter sends · Esc leaves) "));
+    f.render_widget(input, rows[1]);
+}
+
 fn render_profile(f: &mut Frame, area: Rect, app: &App) {
     let Some(p) = &app.current_profile else {
         return placeholder(f, area, " Profile ", "Nothing to show.");
@@ -1529,6 +1581,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Polls          : create and vote on multiple-choice polls (press n to add, 1-9 to vote)
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
+  • Chat           : a live multi-user chat room (type to talk, Esc to leave)
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
   • SSH Keys       : register public keys to log in over SSH without a password
 ",
@@ -1598,6 +1651,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ConfirmDeleteMail => "Delete Mail",
         Screen::ComposeMail => "Compose Mail",
         Screen::WhoOnline => "Who's Online",
+        Screen::Chat => "Chat",
         Screen::ComposePage => "Page User",
         Screen::Profile => "Profile",
         Screen::IgnoreList => "Ignored Users",
@@ -1683,6 +1737,7 @@ fn hints(
         Screen::MailSearchResults => " ↑/↓ move · Enter read · / refine · Esc back ",
         Screen::ConfirmDeleteMail => " y delete · any key keep ",
         Screen::WhoOnline => " ↑/↓ move · Enter profile · p page · r refresh · Esc back ",
+        Screen::Chat => " type a message · Enter send · Esc leave the room ",
         Screen::ComposePage => " type your message · Enter send · Esc cancel ",
         Screen::Profile => {
             if can_edit_profile {

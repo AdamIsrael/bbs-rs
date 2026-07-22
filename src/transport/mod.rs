@@ -46,4 +46,8 @@ pub enum Event {
     /// notice. Fanned out via [`crate::services::presence::Presence::broadcast`]
     /// and surfaced as a toast like [`Event::Paged`].
     Broadcast { text: String },
+    /// A line in the live chat room (#67), fanned out to everyone currently in
+    /// the room. A blank `from` marks a system notice (a join/leave), which the
+    /// chat pane renders differently from a user's line.
+    Chat { from: String, text: String },
 }

@@ -547,6 +547,7 @@ pub struct Features {
     pub who_online: bool,
     pub oneliners: bool,
     pub polls: bool,
+    pub chat: bool,
     pub pubkey_auth: bool,
     pub file_areas: bool,
     /// Tell users about the other way in — show browser users the SSH address
@@ -746,6 +747,7 @@ impl Default for Features {
             who_online: true,
             oneliners: true,
             polls: true,
+            chat: true,
             pubkey_auth: true,
             file_areas: true,
             advertise_transports: true,
@@ -883,6 +885,8 @@ who_online = true
 oneliners = true
 # Enable polls / the voting booth.
 polls = true
+# Enable the live multi-user chat room / teleconference.
+chat = true
 # Allow SSH public-key authentication (users register keys in the BBS).
 pubkey_auth = true
 # Enable file areas (browse downloadable files).
@@ -1081,7 +1085,7 @@ max_length = 500       # max characters per oneliner (0 = no cap; 500 = Mastodon
 
 # Main menu: design your own instead of the built-in list. Leave this out for
 # the default menu. Each entry names a built-in `action` (boards, mail, who,
-# files, profile, stats, search, oneliners, polls, bulletins, timeline,
+# files, profile, stats, search, oneliners, polls, chat, bulletins, timeline,
 # remote_boards, keys, register, admin, doors, help, quit); array order is menu
 # order. `label`
 # and `key` (a one-letter hotkey) are optional and default per action. Entries

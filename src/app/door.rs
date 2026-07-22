@@ -163,10 +163,10 @@ pub async fn run(
                 Some(Event::Resize(w, h)) => {
                     let _ = master.resize(PtySize { rows: h, cols: w, pixel_width: 0, pixel_height: 0 });
                 }
-                // A page or broadcast can't be shown over a fullscreen door
-                // program; drop it rather than corrupt the door's display
-                // (#68, #69).
-                Some(Event::Paged { .. } | Event::Broadcast { .. }) => {}
+                // A page, broadcast, or chat line can't be shown over a
+                // fullscreen door program; drop it rather than corrupt the
+                // door's display (#67, #68, #69).
+                Some(Event::Paged { .. } | Event::Broadcast { .. } | Event::Chat { .. }) => {}
                 Some(Event::Quit) | None => {
                     quit = true;
                     break;

@@ -40,6 +40,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Who's online** — a live view of currently-connected users; open a user's profile from here, or
   **page ("yell at")** a user with `p` — a one-line notice that pops up on their screen wherever they
   are, with a bell. Transient (not stored): if they've since disconnected, you're told so.
+- **Live chat / teleconference** — a real-time multi-user chat room: type a line and it appears instantly
+  for everyone in the room (SSH *and* browser, same room), with join/leave notices. Ephemeral — nothing is
+  stored server-side. Gated by `[features] chat`.
 - **Stats** — board totals, a top-posters leaderboard, and a recent-callers list.
 - **finger service** (RFC 1288, opt-in) — a read-only TCP daemon: `finger @host` lists who's online,
   `finger user@host` shows a user's public profile. No auth, no writes; a user can hide themselves with
@@ -134,6 +137,7 @@ private_mail = true
 who_online = true
 oneliners = true       # the graffiti wall
 polls = true           # the voting booth
+chat = true            # the live multi-user chat room
 pubkey_auth = true     # allow SSH public-key login (users register keys in the BBS)
 file_areas = true      # browse downloadable file areas
 advertise_transports = true  # tell users the other way in (SSH ↔ browser)
