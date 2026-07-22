@@ -87,6 +87,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ReadMail => render_read_mail(f, body, app),
         Screen::ConfirmDeleteMail => render_confirm_delete_mail(f, body, app),
         Screen::ComposeMail => render_compose(f, body, " Compose Mail ", app),
+        Screen::MailSysop => render_compose(f, body, " Mail the Sysop ", app),
         Screen::WhoOnline => render_who(f, body, app),
         Screen::Chat => render_chat(f, body, app),
         Screen::ComposePage => {
@@ -1582,6 +1583,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Private Mail   : send and receive messages with other registered users
   • Who's Online   : see who is currently connected
   • Chat           : a live multi-user chat room (type to talk, Esc to leave)
+  • Mail Sysop      : send feedback/support mail straight to the sysop
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
   • SSH Keys       : register public keys to log in over SSH without a password
 ",
@@ -1650,6 +1652,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::ReadMail => "Reading Mail",
         Screen::ConfirmDeleteMail => "Delete Mail",
         Screen::ComposeMail => "Compose Mail",
+        Screen::MailSysop => "Mail the Sysop",
         Screen::WhoOnline => "Who's Online",
         Screen::Chat => "Chat",
         Screen::ComposePage => "Page User",
@@ -1728,7 +1731,7 @@ fn hints(
         }
         Screen::ReadMail => " r reply · f forward · d delete · Esc back ",
         Screen::ReadBulletin | Screen::Help => " Esc back ",
-        Screen::ComposePost | Screen::ComposeMail => {
+        Screen::ComposePost | Screen::ComposeMail | Screen::MailSysop => {
             " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel "
         }
         Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",

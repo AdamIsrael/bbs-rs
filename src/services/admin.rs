@@ -30,6 +30,19 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>> {
     Ok(users)
 }
 
+/// The primary sysop account — the lowest-id `admin` (the operator who set the
+/// board up). Used as the recipient for "mail the sysop" (#71). `None` if no
+/// admin exists yet.
+pub async fn primary_admin(pool: &SqlitePool) -> Result<Option<User>> {
+    let admin = sqlx::query_as::<_, User>(
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
+         FROM users WHERE role = 'admin' AND is_remote = 0 ORDER BY id LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(admin)
+}
+
 /// Mark a user banned (idempotent; ignores the guest account gracefully).
 pub async fn ban_user(pool: &SqlitePool, username: &str) -> Result<()> {
     sqlx::query("UPDATE users SET banned_at = ? WHERE username = ?")

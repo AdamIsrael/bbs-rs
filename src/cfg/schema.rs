@@ -279,6 +279,12 @@ pub static SECTIONS: &[Section] = &[
                 help: "The live multi-user chat room / teleconference.",
             },
             Field {
+                key: "mail_to_sysop",
+                label: "Mail the sysop",
+                kind: FieldKind::Bool,
+                help: "A feedback-to-sysop menu entry, available even when private mail is off.",
+            },
+            Field {
                 key: "pubkey_auth",
                 label: "SSH public-key auth",
                 kind: FieldKind::Bool,

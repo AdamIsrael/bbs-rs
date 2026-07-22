@@ -88,12 +88,12 @@ async fn door_launches_on_a_pty_over_websocket() {
     .await
     .unwrap();
 
-    // Drive the menu: 9× Down reaches "Door Games" (Bulletins, Boards,
-    // Oneliners, Polls, Mail, Who, Chat, Stats, Search, → Doors), Enter opens the
-    // door list, Enter launches the first door. Keys are sent as raw terminal
-    // bytes (the transport decodes them exactly like a real client).
+    // Drive the menu: 10× Down reaches "Door Games" (Bulletins, Boards,
+    // Oneliners, Polls, Mail, Mail Sysop, Who, Chat, Stats, Search, → Doors),
+    // Enter opens the door list, Enter launches the first door. Keys are sent as
+    // raw terminal bytes (the transport decodes them exactly like a real client).
     tokio::time::sleep(Duration::from_millis(200)).await;
-    for _ in 0..9 {
+    for _ in 0..10 {
         ws.send(Message::Binary(b"\x1b[B".to_vec().into()))
             .await
             .unwrap();

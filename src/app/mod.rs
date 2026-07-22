@@ -191,6 +191,9 @@ pub struct App {
     pub mail_search: Vec<Mail>,
     pub mail_search_sel: usize,
     pub mail_search_query: String,
+    /// The sysop account the "Mail Sysop" composer (#71) is addressed to, while
+    /// that screen is open.
+    mail_sysop_to: String,
 
     // Who's online
     pub online: Vec<OnlineUser>,
@@ -273,6 +276,9 @@ fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
         MenuItem::Polls => f.polls,
         MenuItem::Timeline | MenuItem::RemoteBoards => config.federation.enabled,
         MenuItem::Mail => f.private_mail,
+        // Deliberately not gated by private_mail — the point is a feedback path
+        // that survives normal mail being off (#71).
+        MenuItem::MailSysop => f.mail_to_sysop,
         MenuItem::Who => f.who_online,
         MenuItem::Chat => f.chat,
         MenuItem::Profile => !user.is_guest(),
@@ -286,7 +292,7 @@ fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
 
 /// The built-in menu order, used when no `[[menu]]` is configured. Matches the
 /// classic layout before the menu became config-driven.
-fn default_menu_order() -> [MenuItem; 19] {
+fn default_menu_order() -> [MenuItem; 20] {
     use MenuItem::*;
     [
         Bulletins,
@@ -296,6 +302,7 @@ fn default_menu_order() -> [MenuItem; 19] {
         Timeline,
         RemoteBoards,
         Mail,
+        MailSysop,
         Who,
         Chat,
         Profile,
@@ -464,6 +471,7 @@ impl App {
             mail_search: Vec::new(),
             mail_search_sel: 0,
             mail_search_query: String::new(),
+            mail_sysop_to: String::new(),
             online: Vec::new(),
             who_sel: 0,
             online_count: 0,
@@ -536,6 +544,7 @@ impl App {
             Screen::ReadMail => self.on_read_mail(key).await,
             Screen::ConfirmDeleteMail => self.on_confirm_delete_mail(key).await,
             Screen::ComposeMail => self.on_compose_mail(key).await,
+            Screen::MailSysop => self.on_mail_sysop(key).await,
             Screen::WhoOnline => self.on_who(key).await,
             Screen::ComposePage => self.on_compose_page(key).await,
             Screen::Profile => self.on_profile(key).await,
@@ -623,6 +632,7 @@ impl App {
                     self.open_mailbox().await;
                 }
             }
+            MenuItem::MailSysop => self.open_mail_sysop().await,
             MenuItem::Who => self.open_who().await,
             MenuItem::Chat => self.open_chat().await,
             MenuItem::Profile => self.open_profile(self.user.id, Screen::MainMenu).await,
@@ -2655,6 +2665,73 @@ impl App {
             }
             Err(AppError::RateLimited) => {
                 self.status = "You're sending mail too quickly — please slow down.".into()
+            }
+            Err(e) => self.status = format!("Could not send: {e}"),
+        }
+    }
+
+    // ---- Mail the sysop (#71) --------------------------------------------
+
+    /// Open the feedback-to-sysop composer, addressed to the primary admin
+    /// (#71). Works even when private mail is off, so a user can always reach
+    /// the operator; guests are asked to register, and if the board has no admin
+    /// yet there's nobody to write to.
+    async fn open_mail_sysop(&mut self) {
+        if self.user.is_guest() {
+            self.status = "Register an account first to leave feedback for the sysop.".into();
+            return;
+        }
+        match admin::primary_admin(&self.pool).await {
+            Ok(Some(sysop)) => {
+                self.mail_sysop_to = sysop.username.clone();
+                self.form = Form::new(vec![Field::new("Subject", false)]);
+                self.body = crate::app::textarea::TextArea::new();
+                self.body_focused = false;
+                self.screen = Screen::MailSysop;
+            }
+            Ok(None) => self.status = "There's no sysop to write to yet.".into(),
+            Err(e) => self.status = format!("Could not open sysop mail: {e}"),
+        }
+    }
+
+    async fn on_mail_sysop(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.screen = Screen::MainMenu;
+            return;
+        }
+        if self.edit_compose(key) {
+            self.submit_sysop_mail().await;
+        }
+    }
+
+    async fn submit_sysop_mail(&mut self) {
+        let subject = self.form.value(0).to_string();
+        let body = self.body.text().trim().to_string();
+        if subject.is_empty() || body.is_empty() {
+            self.status = "A subject and a message are required.".into();
+            return;
+        }
+        let to = self.mail_sysop_to.clone();
+        match mail::send_mail(
+            &self.pool,
+            &self.user,
+            &to,
+            &subject,
+            &body,
+            &self.config.limits,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.screen = Screen::MainMenu;
+                self.status = "Feedback sent to the sysop.".into();
+            }
+            Err(AppError::RateLimited) => {
+                self.status = "You're sending mail too quickly — please slow down.".into()
+            }
+            // The recipient vanished (demoted/removed) between open and send.
+            Err(AppError::RecipientNotFound) => {
+                self.status = "The sysop account is no longer available.".into()
             }
             Err(e) => self.status = format!("Could not send: {e}"),
         }
