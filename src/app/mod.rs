@@ -1400,6 +1400,9 @@ impl App {
             }
             KeyCode::Char('b') => self.admin_ban_selected().await,
             KeyCode::Char('u') => self.admin_unban_selected().await,
+            // Approve / reject a pending registration (#73).
+            KeyCode::Char('v') => self.admin_approve_selected().await,
+            KeyCode::Char('x') => self.admin_reject_selected().await,
             KeyCode::Char('l') => self.open_admin_logins().await,
             KeyCode::Char('a') => self.open_admin_audit().await,
             KeyCode::Char('f') => self.open_admin_federation().await,
@@ -1479,6 +1482,63 @@ impl App {
                 self.reload_admin_users().await;
             }
             Err(e) => self.status = format!("Could not ban: {e}"),
+        }
+    }
+
+    /// Approve the selected pending registration (#73), letting it log in.
+    async fn admin_approve_selected(&mut self) {
+        let Some(target) = self.admin_users.get(self.admin_user_sel).cloned() else {
+            return;
+        };
+        if target.is_validated() {
+            self.status = format!("{} is already active.", target.username);
+            return;
+        }
+        match admin::validate_user(&self.pool, &target.username).await {
+            Ok(true) => {
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    "approve_user",
+                    &target.username,
+                    None,
+                )
+                .await;
+                self.status = format!("Approved {}.", target.username);
+                self.reload_admin_users().await;
+            }
+            Ok(false) => self.status = format!("{} is not pending.", target.username),
+            Err(e) => self.status = format!("Could not approve: {e}"),
+        }
+    }
+
+    /// Reject (delete) the selected pending registration (#73).
+    async fn admin_reject_selected(&mut self) {
+        let Some(target) = self.admin_users.get(self.admin_user_sel).cloned() else {
+            return;
+        };
+        if target.is_validated() {
+            self.status = format!(
+                "{} is already active — ban instead of rejecting.",
+                target.username
+            );
+            return;
+        }
+        match admin::reject_user(&self.pool, &target.username).await {
+            Ok(true) => {
+                audit::log(
+                    &self.pool,
+                    &self.user.username,
+                    "reject_user",
+                    &target.username,
+                    None,
+                )
+                .await;
+                self.status = format!("Rejected and removed {}.", target.username);
+                self.reload_admin_users().await;
+            }
+            Ok(false) => self.status = format!("{} is not pending.", target.username),
+            Err(e) => self.status = format!("Could not reject: {e}"),
         }
     }
 
@@ -3428,8 +3488,14 @@ impl App {
         match auth::register_user(&self.pool, &username, &password, &self.config.accounts).await {
             Ok(_) => {
                 self.screen = Screen::MainMenu;
-                self.status =
-                    format!("Account '{username}' created — reconnect over SSH as that user.");
+                self.status = if self.config.accounts.require_validation {
+                    // Pending sysop approval (#73): they can't log in yet.
+                    format!(
+                        "Account '{username}' created — a sysop must approve it before you can log in."
+                    )
+                } else {
+                    format!("Account '{username}' created — reconnect over SSH as that user.")
+                };
             }
             Err(AppError::UsernameTaken) => self.status = "That username is taken.".into(),
             Err(AppError::UsernameReserved) => {

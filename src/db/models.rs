@@ -15,6 +15,9 @@ pub struct User {
     pub created_at: i64,
     /// Unix timestamp of the ban, or `None` if the account is not banned.
     pub banned_at: Option<i64>,
+    /// Unix timestamp the account was activated (#73), or `None` while it is
+    /// pending sysop approval. A pending account can't log in.
+    pub validated_at: Option<i64>,
     /// A discovered ActivityPub actor from another server, stored here so
     /// `messages.author_id` can point at it (see docs/FEDERATION.md). Remote
     /// rows are keyed by a fully-qualified `alice@remote.social` username, have
@@ -37,6 +40,13 @@ impl User {
     /// A banned account is refused at login.
     pub fn is_banned(&self) -> bool {
         self.banned_at.is_some()
+    }
+
+    /// Whether the account has been activated (#73). A pending account (never
+    /// validated) is refused at login until a sysop approves it; admins and the
+    /// shared guest are always treated as active.
+    pub fn is_validated(&self) -> bool {
+        self.validated_at.is_some() || self.is_admin() || self.is_guest()
     }
 
     /// Whether this account may hold a session: local, and not banned. Remote

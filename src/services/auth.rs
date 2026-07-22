@@ -36,7 +36,7 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 /// Look up a user by name.
 pub async fn find_user(pool: &SqlitePool, username: &str) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at, is_remote \
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
          FROM users WHERE username = ?",
     )
     .bind(username)
@@ -83,7 +83,8 @@ pub async fn attempt_login(
     }
 
     let outcome = match verify_login(pool, username, password).await? {
-        Some(user) if !user.is_banned() => Some(user),
+        // A pending account (#73) is refused until a sysop approves it.
+        Some(user) if !user.is_banned() && user.is_validated() => Some(user),
         _ => None,
     };
 
@@ -109,7 +110,7 @@ pub async fn attempt_pubkey_login(
     }
 
     let outcome = match crate::services::keys::find_authorized(pool, username, fingerprint).await? {
-        Some(user) if !user.is_banned() => Some(user),
+        Some(user) if !user.is_banned() && user.is_validated() => Some(user),
         _ => None,
     };
 
@@ -176,12 +177,18 @@ pub async fn register_user(
         return Err(AppError::UsernameTaken);
     }
     let hash = hash_password(password)?;
+    let now = now_unix();
+    // With sysop approval on (#73), the account starts pending (validated_at
+    // NULL) and can't log in until approved; otherwise it's active immediately.
+    let validated_at = (!accounts.require_validation).then_some(now);
     sqlx::query(
-        "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, 'user', ?)",
+        "INSERT INTO users (username, password_hash, role, created_at, validated_at) \
+         VALUES (?, ?, 'user', ?, ?)",
     )
     .bind(username)
     .bind(&hash)
-    .bind(now_unix())
+    .bind(now)
+    .bind(validated_at)
     .execute(pool)
     .await?;
     find_user(pool, username).await?.ok_or(AppError::NotFound)
@@ -192,9 +199,11 @@ pub async fn register_user(
 pub async fn ensure_guest(pool: &SqlitePool, password: &str) -> Result<()> {
     if find_user(pool, "guest").await?.is_none() {
         let hash = hash_password(password)?;
-        sqlx::query("INSERT INTO users (username, password_hash, role, created_at) VALUES ('guest', ?, 'guest', ?)")
+        let now = now_unix();
+        sqlx::query("INSERT INTO users (username, password_hash, role, created_at, validated_at) VALUES ('guest', ?, 'guest', ?, ?)")
             .bind(hash)
-            .bind(now_unix())
+            .bind(now)
+            .bind(now)
             .execute(pool)
             .await?;
     }

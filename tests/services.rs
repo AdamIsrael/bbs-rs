@@ -83,6 +83,7 @@ async fn reserved_usernames_are_rejected() {
     // guest is always reserved, even with an empty configured list.
     let empty = bbs_rs::config::Accounts {
         reserved_usernames: vec![],
+        ..Default::default()
     };
     assert!(matches!(
         bbs_rs::services::auth::register_user(&pool, "guest", "pw", &empty).await,
@@ -2711,5 +2712,115 @@ mod polls {
         assert_eq!(list[0].question, "Second", "newest first");
         assert_eq!(list[1].question, "First");
         assert_eq!(list[1].total_votes, 1);
+    }
+}
+
+// ---- New-user validation queue (#73) ------------------------------------
+
+#[cfg(test)]
+mod validation {
+    use super::setup;
+    use bbs_rs::config::Accounts;
+    use bbs_rs::services::{admin, auth};
+
+    fn require() -> Accounts {
+        Accounts {
+            require_validation: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn off_by_default_registers_active_users() {
+        let pool = setup().await;
+        let u = auth::register_user(&pool, "alice", "pw", &Default::default())
+            .await
+            .unwrap();
+        assert!(u.validated_at.is_some(), "auto-validated when off");
+        // And they can log in immediately.
+        assert!(
+            auth::attempt_login(&pool, "alice", "pw", None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn require_validation_gates_login_until_approved() {
+        let pool = setup().await;
+        let u = auth::register_user(&pool, "alice", "pw", &require())
+            .await
+            .unwrap();
+        assert!(u.validated_at.is_none(), "starts pending");
+
+        // Correct password, but the account is pending → rejected.
+        assert!(
+            auth::attempt_login(&pool, "alice", "pw", None)
+                .await
+                .unwrap()
+                .is_none(),
+            "pending account can't log in"
+        );
+        // It shows up in the queue.
+        let pending = admin::pending_users(&pool).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].username, "alice");
+
+        // Approve → now it can log in, and the queue is empty.
+        assert!(admin::validate_user(&pool, "alice").await.unwrap());
+        assert!(
+            auth::attempt_login(&pool, "alice", "pw", None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(admin::pending_users(&pool).await.unwrap().is_empty());
+        // Approving again is a no-op.
+        assert!(!admin::validate_user(&pool, "alice").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reject_only_removes_pending_accounts() {
+        let pool = setup().await;
+        auth::register_user(&pool, "spammer", "pw", &require())
+            .await
+            .unwrap();
+        auth::register_user(&pool, "member", "pw", &Default::default())
+            .await
+            .unwrap();
+
+        // A pending account is removed.
+        assert!(admin::reject_user(&pool, "spammer").await.unwrap());
+        assert!(auth::find_user(&pool, "spammer").await.unwrap().is_none());
+
+        // An already-active account is NOT deletable through reject.
+        assert!(!admin::reject_user(&pool, "member").await.unwrap());
+        assert!(auth::find_user(&pool, "member").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn guest_and_admin_are_exempt_from_the_gate() {
+        let pool = setup().await;
+        // Guest is seeded active and logs in even though it never "registered".
+        assert!(
+            auth::attempt_login(&pool, "guest", "guest", None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // A user promoted to admin can log in even if somehow still pending.
+        auth::register_user(&pool, "boss", "pw", &require())
+            .await
+            .unwrap();
+        admin::set_role(&pool, "boss", "admin").await.unwrap();
+        assert!(
+            auth::attempt_login(&pool, "boss", "pw", None)
+                .await
+                .unwrap()
+                .is_some(),
+            "an admin is never gated by validation"
+        );
     }
 }

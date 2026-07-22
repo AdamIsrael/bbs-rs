@@ -71,6 +71,12 @@ enum Cmd {
     },
     /// List all registered users.
     Users,
+    /// List accounts pending sysop approval (new-user validation queue).
+    Pending,
+    /// Approve a pending account, letting it log in.
+    Approve { username: String },
+    /// Reject (delete) a pending registration.
+    Reject { username: String },
     /// Ban a user by username.
     Ban { username: String },
     /// Lift a user's ban.
@@ -504,7 +510,13 @@ async fn main() -> anyhow::Result<()> {
             let users = admin::list_users(&pool).await?;
             println!("{:<20} {:<8} {:<8} CREATED", "USERNAME", "ROLE", "STATUS");
             for u in users {
-                let status = if u.is_banned() { "banned" } else { "ok" };
+                let status = if u.is_banned() {
+                    "banned"
+                } else if !u.is_validated() {
+                    "pending"
+                } else {
+                    "ok"
+                };
                 println!(
                     "{:<20} {:<8} {:<8} {}",
                     u.username,
@@ -512,6 +524,33 @@ async fn main() -> anyhow::Result<()> {
                     status,
                     fmt_time(u.created_at)
                 );
+            }
+        }
+        Cmd::Pending => {
+            let users = admin::pending_users(&pool).await?;
+            if users.is_empty() {
+                println!("no accounts pending approval");
+            } else {
+                println!("{:<20} REGISTERED", "USERNAME");
+                for u in users {
+                    println!("{:<20} {}", u.username, fmt_time(u.created_at));
+                }
+            }
+        }
+        Cmd::Approve { username } => {
+            if admin::validate_user(&pool, &username).await? {
+                audit::log(&pool, audit::BBSCTL, "approve_user", &username, None).await;
+                println!("approved '{username}'");
+            } else {
+                println!("'{username}' is not pending (already active or missing)");
+            }
+        }
+        Cmd::Reject { username } => {
+            if admin::reject_user(&pool, &username).await? {
+                audit::log(&pool, audit::BBSCTL, "reject_user", &username, None).await;
+                println!("rejected and removed '{username}'");
+            } else {
+                println!("'{username}' is not pending (already active or missing)");
             }
         }
         Cmd::Ban { username } => {
