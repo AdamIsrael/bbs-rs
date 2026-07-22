@@ -273,6 +273,12 @@ pub static SECTIONS: &[Section] = &[
                 help: "The voting booth — users create and vote on polls.",
             },
             Field {
+                key: "chat",
+                label: "Chat",
+                kind: FieldKind::Bool,
+                help: "The live multi-user chat room / teleconference.",
+            },
+            Field {
                 key: "pubkey_auth",
                 label: "SSH public-key auth",
                 kind: FieldKind::Bool,

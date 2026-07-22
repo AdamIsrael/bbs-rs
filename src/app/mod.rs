@@ -54,6 +54,13 @@ pub struct MenuFrame {
 /// (`a → b → a`) or nests absurdly; descending past it is simply ignored.
 const MAX_MENU_DEPTH: usize = 16;
 
+/// How many chat lines a session keeps in its scrollback (#67). Chat is
+/// ephemeral — nothing is stored server-side — so this only bounds memory.
+const CHAT_SCROLLBACK: usize = 200;
+
+/// Longest chat message accepted, to keep a single line renderable.
+const MAX_CHAT_LEN: usize = 400;
+
 /// All per-session state.
 pub struct App {
     pool: SqlitePool,
@@ -195,6 +202,16 @@ pub struct App {
     /// The user being paged, while the page-compose screen is open (#68).
     page_target: Option<String>,
 
+    // Live chat room (#67)
+    /// Scrollback of chat lines received while the session is running; a blank
+    /// `from` is a system notice (join/leave). Capped at [`CHAT_SCROLLBACK`].
+    pub chat_log: Vec<(String, String)>,
+    /// The line the user is currently composing in the chat room.
+    pub chat_input: String,
+    /// Whether this session is currently in the chat room (drives menu-badge
+    /// and leave-on-quit bookkeeping).
+    pub in_chat: bool,
+
     // SSH keys (the current user's own)
     pub user_keys: Vec<UserKey>,
     pub key_sel: usize,
@@ -257,6 +274,7 @@ fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
         MenuItem::Timeline | MenuItem::RemoteBoards => config.federation.enabled,
         MenuItem::Mail => f.private_mail,
         MenuItem::Who => f.who_online,
+        MenuItem::Chat => f.chat,
         MenuItem::Profile => !user.is_guest(),
         MenuItem::Doors => !config.doors.is_empty(),
         MenuItem::Files => f.file_areas,
@@ -268,7 +286,7 @@ fn menu_item_available(item: MenuItem, config: &Settings, user: &User) -> bool {
 
 /// The built-in menu order, used when no `[[menu]]` is configured. Matches the
 /// classic layout before the menu became config-driven.
-fn default_menu_order() -> [MenuItem; 18] {
+fn default_menu_order() -> [MenuItem; 19] {
     use MenuItem::*;
     [
         Bulletins,
@@ -279,6 +297,7 @@ fn default_menu_order() -> [MenuItem; 18] {
         RemoteBoards,
         Mail,
         Who,
+        Chat,
         Profile,
         Stats,
         Search,
@@ -449,6 +468,9 @@ impl App {
             who_sel: 0,
             online_count: 0,
             page_target: None,
+            chat_log: Vec::new(),
+            chat_input: String::new(),
+            in_chat: false,
             user_keys: Vec::new(),
             key_sel: 0,
             file_areas: Vec::new(),
@@ -498,6 +520,7 @@ impl App {
             Screen::Polls => self.on_polls(key).await,
             Screen::ViewPoll => self.on_view_poll(key).await,
             Screen::ComposePoll => self.on_compose_poll(key).await,
+            Screen::Chat => self.on_chat(key).await,
             Screen::Timeline => self.on_timeline(key).await,
             Screen::RemoteBoards => self.on_remote_boards(key).await,
             Screen::RemoteBoardPosts => self.on_remote_board_posts(key).await,
@@ -601,6 +624,7 @@ impl App {
                 }
             }
             MenuItem::Who => self.open_who().await,
+            MenuItem::Chat => self.open_chat().await,
             MenuItem::Profile => self.open_profile(self.user.id, Screen::MainMenu).await,
             MenuItem::Stats => self.open_stats().await,
             MenuItem::Search => self.begin_search(),
@@ -2692,6 +2716,78 @@ impl App {
         }
     }
 
+    // ---- Live chat room (#67) --------------------------------------------
+
+    /// Enter the chat room: join the presence room, announce the arrival to the
+    /// others, and show the chat screen. The join notice echoes back so this
+    /// session sees it too.
+    async fn open_chat(&mut self) {
+        self.presence.chat_join(self.session_id).await;
+        self.in_chat = true;
+        self.chat_input.clear();
+        self.presence
+            .chat_send(Event::Chat {
+                from: String::new(),
+                text: format!("{} joined the chat", self.user.username),
+            })
+            .await;
+        self.screen = Screen::Chat;
+    }
+
+    /// Leave the chat room, announcing the departure, and return to the menu.
+    async fn leave_chat(&mut self) {
+        self.presence.chat_leave(self.session_id).await;
+        self.in_chat = false;
+        self.presence
+            .chat_send(Event::Chat {
+                from: String::new(),
+                text: format!("{} left the chat", self.user.username),
+            })
+            .await;
+        self.screen = Screen::MainMenu;
+    }
+
+    async fn on_chat(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.send_chat().await,
+            KeyCode::Backspace => {
+                self.chat_input.pop();
+            }
+            KeyCode::Esc => self.leave_chat().await,
+            // Ignore further input past the length cap (the message stops growing).
+            KeyCode::Char(c) if self.chat_input.chars().count() < MAX_CHAT_LEN => {
+                self.chat_input.push(c)
+            }
+            _ => {}
+        }
+    }
+
+    /// Send the composed line to everyone in the room (it echoes back so this
+    /// session sees its own message). Blank lines are ignored.
+    async fn send_chat(&mut self) {
+        let text = self.chat_input.trim().to_string();
+        self.chat_input.clear();
+        if text.is_empty() {
+            return;
+        }
+        self.presence
+            .chat_send(Event::Chat {
+                from: self.user.username.clone(),
+                text,
+            })
+            .await;
+    }
+
+    /// Append a received chat line to the scrollback, trimming the oldest when
+    /// it grows past the cap. Called from the run loop for every `Event::Chat`.
+    pub fn push_chat_line(&mut self, from: String, text: String) {
+        self.chat_log.push((from, text));
+        if self.chat_log.len() > CHAT_SCROLLBACK {
+            let overflow = self.chat_log.len() - CHAT_SCROLLBACK;
+            self.chat_log.drain(0..overflow);
+        }
+    }
+
     // ---- Paging ("yell") -------------------------------------------------
 
     /// Open the page composer for the selected online user (#68), explaining up
@@ -3807,6 +3903,11 @@ pub async fn run<W: std::io::Write>(
                 let _ = raw_out.send(b"\x07".to_vec());
                 app.status = format!("\u{1F4E2} Broadcast: {text}");
             }
+            // A live chat line (#67). It lands in the scrollback regardless of
+            // the focused screen, so a user reading elsewhere still accumulates
+            // room history; the redraw below shows it immediately if they're in
+            // the chat room.
+            Event::Chat { from, text } => app.push_chat_line(from, text),
         }
 
         // A door launch was requested: suspend the TUI, bridge the program's

@@ -35,6 +35,8 @@ pub struct OnlineUser {
 #[derive(Clone, Default)]
 pub struct Presence {
     inner: Arc<RwLock<HashMap<usize, Session>>>,
+    /// Session ids currently in the live chat room (#67). A subset of `inner`.
+    chat: Arc<RwLock<HashSet<usize>>>,
 }
 
 impl Presence {
@@ -61,9 +63,51 @@ impl Presence {
         );
     }
 
-    /// Remove a session (idempotent).
+    /// Remove a session (idempotent). Also drops it from the chat room, so a
+    /// disconnect can't leave a ghost member behind.
     pub async fn leave(&self, session_id: usize) {
         self.inner.write().await.remove(&session_id);
+        self.chat.write().await.remove(&session_id);
+    }
+
+    /// Add a session to the live chat room (#67).
+    pub async fn chat_join(&self, session_id: usize) {
+        self.chat.write().await.insert(session_id);
+    }
+
+    /// Remove a session from the chat room (idempotent).
+    pub async fn chat_leave(&self, session_id: usize) {
+        self.chat.write().await.remove(&session_id);
+    }
+
+    /// Deliver an event to every session currently in the chat room, returning
+    /// how many received it.
+    pub async fn chat_send(&self, event: Event) -> usize {
+        let members = self.chat.read().await;
+        let sessions = self.inner.read().await;
+        let mut delivered = 0;
+        for id in members.iter() {
+            if let Some(s) = sessions.get(id)
+                && s.tx.send(event.clone()).await.is_ok()
+            {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
+    /// Usernames of the sessions currently in the chat room, sorted and
+    /// de-duplicated (a user may have more than one session in the room).
+    pub async fn chat_roster(&self) -> Vec<String> {
+        let members = self.chat.read().await;
+        let sessions = self.inner.read().await;
+        let mut names: Vec<String> = members
+            .iter()
+            .filter_map(|id| sessions.get(id).map(|s| s.username.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Snapshot of currently-connected users, sorted by name.
