@@ -378,6 +378,13 @@ recent rows — no extra table). Over the cap, the action is refused with a "slo
 window clears. Admins are never throttled, and any cap set to `0` disables that limit. This pairs with
 the auto-ban guard below to blunt scripted spam.
 
+**Daily time limits.** Set `[limits].daily_minutes` to give each user a connected-time budget per day
+(`0` = unlimited, the default). A session's time is banked when it ends, and the sweeper adds the *live*
+elapsed time of connected sessions on top — so staying online doesn't dodge the cap. Five minutes from the
+cap the user gets a one-shot warning; at it the session is ended the same way a ban kicks one. Admins are
+exempt, and the budget rolls over at 00:00 UTC. Note the shared `guest` account shares a single budget
+across all guests.
+
 **Auto-ban.** The ban sweeper also watches the login audit trail and temporarily bans any IP that
 exceeds `[abuse].max_failures` failed logins within `window_secs` (a fail2ban-style guard against
 brute-force / bot traffic). Auto-bans expire after `ban_secs` and are purged automatically; manual

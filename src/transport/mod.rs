@@ -50,4 +50,7 @@ pub enum Event {
     /// the room. A blank `from` marks a system notice (a join/leave), which the
     /// chat pane renders differently from a user's line.
     Chat { from: String, text: String },
+    /// A system notice aimed at one session — e.g. the daily time-limit warning
+    /// (#75). Surfaced as a toast wherever the user currently is.
+    Notice { text: String },
 }

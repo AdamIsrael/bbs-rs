@@ -23,7 +23,7 @@ use crate::config::Settings;
 use crate::db::models::User;
 use crate::input;
 use crate::services::presence::Presence;
-use crate::services::{admin, audit, auth, keys};
+use crate::services::{admin, audit, auth, keys, timelimit};
 use crate::ssh::pubkey;
 use crate::ssh::sftp::SftpSession;
 use crate::ssh::terminal::{SshTerminal, TerminalHandle};
@@ -372,8 +372,13 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<ArcSwap<S
     // High-water mark for sysop broadcasts (#69): seed with the current max so
     // messages queued before this process started aren't replayed.
     let mut last_broadcast = admin::latest_broadcast_id(&pool).await.unwrap_or(0);
+    // Sessions already warned they're near the daily cap (#75), so the notice
+    // fires once rather than every tick.
+    let mut warned: std::collections::HashSet<usize> = std::collections::HashSet::new();
     loop {
         ticker.tick().await;
+
+        enforce_time_limits(&pool, &presence, &config.load().limits, &mut warned).await;
 
         // Deliver any broadcasts queued out-of-process (by `bbsctl`) since the
         // last tick. Done before the ban logic's early-continue so a broadcast
@@ -406,6 +411,63 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<ArcSwap<S
         let kicked = presence.kick(&users, &ips).await;
         if kicked > 0 {
             tracing::info!("ban sweeper kicked {kicked} session(s)");
+        }
+    }
+}
+
+/// Enforce the daily connected-time budget (#75) across live sessions.
+///
+/// A user's spend is what finished sessions banked today plus however long
+/// their current session has been up, so staying connected can't dodge the cap.
+/// Near the cap the session gets a one-shot notice; at it, the same
+/// [`Event::Quit`] the ban fan-out uses ends the session. Admins are exempt.
+pub async fn enforce_time_limits(
+    pool: &SqlitePool,
+    presence: &Presence,
+    limits: &crate::config::Limits,
+    warned: &mut std::collections::HashSet<usize>,
+) {
+    let limit_secs = i64::from(limits.daily_minutes) * 60;
+    if limit_secs <= 0 {
+        warned.clear();
+        return;
+    }
+    let now = crate::util::now_unix();
+    let today = timelimit::day_key(now);
+    // Housekeeping: a month of history is plenty to reason about.
+    let _ = timelimit::purge_before(pool, today - 30).await;
+
+    let sessions = presence.sessions_snapshot().await;
+    // Drop bookkeeping for sessions that have since gone away.
+    let live: std::collections::HashSet<usize> = sessions.iter().map(|(id, _, _)| *id).collect();
+    warned.retain(|id| live.contains(id));
+
+    for (id, username, since) in sessions {
+        let user = match auth::find_user(pool, &username).await {
+            Ok(Some(u)) => u,
+            _ => continue,
+        };
+        if user.is_admin() {
+            continue;
+        }
+        let banked = timelimit::seconds_used(pool, user.id, today)
+            .await
+            .unwrap_or(0);
+        let spent = banked + (now - since).max(0);
+        if spent >= limit_secs {
+            if presence.send_to(id, Event::Quit).await {
+                tracing::info!("time limit reached for {username}; ending session {id}");
+            }
+        } else if spent >= limit_secs - timelimit::WARN_SECS && warned.insert(id) {
+            let mins = ((limit_secs - spent) / 60).max(1);
+            presence
+                .send_to(
+                    id,
+                    Event::Notice {
+                        text: format!("⏳ {mins} minute(s) of your daily time left."),
+                    },
+                )
+                .await;
         }
     }
 }

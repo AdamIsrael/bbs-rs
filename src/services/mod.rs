@@ -20,6 +20,7 @@ pub mod profiles;
 pub mod reactions;
 pub mod search;
 pub mod stats;
+pub mod timelimit;
 
 use sqlx::sqlite::SqlitePool;
 

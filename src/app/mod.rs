@@ -202,6 +202,8 @@ pub struct App {
     /// available synchronously to the template context (#89) without an async
     /// call on the render path.
     pub online_count: usize,
+    /// When this session connected, for the daily time budget (#75).
+    pub started_at: i64,
     /// The user being paged, while the page-compose screen is open (#68).
     page_target: Option<String>,
 
@@ -475,6 +477,7 @@ impl App {
             online: Vec::new(),
             who_sel: 0,
             online_count: 0,
+            started_at: now_unix(),
             page_target: None,
             chat_log: Vec::new(),
             chat_input: String::new(),
@@ -3985,6 +3988,12 @@ pub async fn run<W: std::io::Write>(
             // room history; the redraw below shows it immediately if they're in
             // the chat room.
             Event::Chat { from, text } => app.push_chat_line(from, text),
+            // A system notice aimed at this session (#75 time warning): same
+            // toast treatment as a page, with a bell.
+            Event::Notice { text } => {
+                let _ = raw_out.send(b"\x07".to_vec());
+                app.status = text;
+            }
         }
 
         // A door launch was requested: suspend the TUI, bridge the program's
@@ -4026,6 +4035,16 @@ pub async fn run<W: std::io::Write>(
         terminal.draw(|f| ui::draw(f, &app))?;
     }
 
+    // Bank this session's connected time against the user's daily budget (#75)
+    // before dropping out of the presence registry. Best-effort: failing to
+    // record must never stop the session from closing cleanly.
+    let elapsed = now_unix() - app.started_at;
+    let day = crate::services::timelimit::day_key(app.started_at);
+    if let Err(e) =
+        crate::services::timelimit::add_seconds(&app.pool, app.user.id, day, elapsed).await
+    {
+        tracing::warn!("could not record session time: {e}");
+    }
     app.presence.leave(app.session_id).await;
     Ok(())
 }

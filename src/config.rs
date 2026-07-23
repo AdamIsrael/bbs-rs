@@ -631,6 +631,9 @@ pub struct Limits {
     pub max_oneliners: u32,
     /// Max post reactions added per user per window (#94; 0 disables).
     pub max_reactions: u32,
+    /// Daily connected-time budget per user, in minutes (#75; 0 disables).
+    /// Admins are exempt. Note the shared `guest` account shares one budget.
+    pub daily_minutes: u32,
     /// Max characters in a post/mail subject (0 disables).
     pub max_subject_chars: usize,
     /// Max characters in a post/mail body (0 disables).
@@ -647,6 +650,7 @@ impl Default for Limits {
             max_mail: 10,
             max_oneliners: 8,
             max_reactions: 30,
+            daily_minutes: 0,
             max_subject_chars: 120,
             max_body_chars: 8000,
         }
@@ -931,6 +935,9 @@ max_mail = 10
 max_oneliners = 8
 # Max post reactions added per user per window.
 max_reactions = 30
+# Daily connected-time budget per user, in minutes (0 = unlimited). Admins are
+# exempt; the shared guest account shares a single budget between all guests.
+daily_minutes = 0
 # Max characters in a post/mail subject (0 disables).
 max_subject_chars = 120
 # Max characters in a post/mail body (0 disables).

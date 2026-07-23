@@ -669,6 +669,7 @@ async fn subject_and_body_length_limits() {
         max_mail: 0,
         max_oneliners: 0,
         max_reactions: 0,
+        daily_minutes: 0,
         max_subject_chars: 5,
         max_body_chars: 10,
     };

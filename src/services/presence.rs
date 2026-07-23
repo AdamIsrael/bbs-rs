@@ -140,6 +140,26 @@ impl Presence {
         delivered
     }
 
+    /// A snapshot of `(session_id, username, connected_since)` for every live
+    /// session — what the time-limit sweeper (#75) needs to compute how long
+    /// each session has been on.
+    pub async fn sessions_snapshot(&self) -> Vec<(usize, String, i64)> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .map(|(id, s)| (*id, s.username.clone(), s.since))
+            .collect()
+    }
+
+    /// Deliver an event to one session. Returns whether it was still connected.
+    pub async fn send_to(&self, session_id: usize, event: Event) -> bool {
+        match self.inner.read().await.get(&session_id) {
+            Some(s) => s.tx.send(event).await.is_ok(),
+            None => false,
+        }
+    }
+
     /// Deliver an event to *every* live session, returning how many received
     /// it. Used by sysop broadcast (#69) to push a notice to the whole board.
     pub async fn broadcast(&self, event: Event) -> usize {

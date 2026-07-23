@@ -166,7 +166,12 @@ pub async fn run(
                 // A page, broadcast, or chat line can't be shown over a
                 // fullscreen door program; drop it rather than corrupt the
                 // door's display (#67, #68, #69).
-                Some(Event::Paged { .. } | Event::Broadcast { .. } | Event::Chat { .. }) => {}
+                Some(
+                    Event::Paged { .. }
+                    | Event::Broadcast { .. }
+                    | Event::Chat { .. }
+                    | Event::Notice { .. },
+                ) => {}
                 Some(Event::Quit) | None => {
                     quit = true;
                     break;
