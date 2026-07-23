@@ -25,6 +25,7 @@ pub enum Screen {
     Mailbox,
     ReadMail,
     ComposeMail,
+    MailSysop,
     ConfirmDeleteMail,
     MailSearchInput,
     MailSearchResults,
@@ -65,6 +66,7 @@ pub enum MenuItem {
     Timeline,
     RemoteBoards,
     Mail,
+    MailSysop,
     Who,
     Chat,
     Profile,
@@ -90,6 +92,7 @@ impl MenuItem {
             MenuItem::Timeline => "Timeline",
             MenuItem::RemoteBoards => "Remote Boards",
             MenuItem::Mail => "Private Mail",
+            MenuItem::MailSysop => "Mail Sysop",
             MenuItem::Who => "Who's Online",
             MenuItem::Chat => "Chat",
             MenuItem::Profile => "My Profile",
@@ -117,6 +120,7 @@ impl MenuItem {
             MenuItem::Timeline => "timeline",
             MenuItem::RemoteBoards => "remote_boards",
             MenuItem::Mail => "mail",
+            MenuItem::MailSysop => "mail_sysop",
             MenuItem::Who => "who",
             MenuItem::Chat => "chat",
             MenuItem::Profile => "profile",
@@ -136,7 +140,7 @@ impl MenuItem {
     /// `None`, so a typo in `[[menu]]` drops that entry rather than crashing.
     pub fn from_action(action: &str) -> Option<Self> {
         // Every variant's `action()` is checked, so this can't drift out of sync.
-        const ALL: [MenuItem; 19] = [
+        const ALL: [MenuItem; 20] = [
             MenuItem::Bulletins,
             MenuItem::Boards,
             MenuItem::Oneliners,
@@ -144,6 +148,7 @@ impl MenuItem {
             MenuItem::Timeline,
             MenuItem::RemoteBoards,
             MenuItem::Mail,
+            MenuItem::MailSysop,
             MenuItem::Who,
             MenuItem::Chat,
             MenuItem::Profile,
@@ -173,6 +178,7 @@ impl MenuItem {
             MenuItem::Timeline => 't',
             MenuItem::RemoteBoards => 'r',
             MenuItem::Mail => 'm',
+            MenuItem::MailSysop => 'e', // "feedback"
             MenuItem::Who => 'w',
             MenuItem::Chat => 'c',
             MenuItem::Profile => 'p',

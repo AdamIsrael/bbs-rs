@@ -34,6 +34,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   a profile screen also shows member-since, last-on, and post count. View others' profiles from Who's Online.
 - **Private mail** — send and read user-to-user messages; **full-text search** your own mailbox with `/`
   (SQLite FTS5, scoped to mail addressed to you).
+- **Mail the sysop** — a one-key "Mail Sysop" menu entry for feedback/support, addressed to the primary
+  admin automatically. Works even when private mail is off, so users can always reach the operator. Gated
+  by `[features] mail_to_sysop`.
 - **Ignore / block list** — block another user (`b` on their profile) to hide their board posts and
   refuse their mail and pages. Review and unblock from your own profile (`i` → Ignored Users). Admins
   can't be blocked, so a sysop is always reachable.
@@ -138,6 +141,7 @@ who_online = true
 oneliners = true       # the graffiti wall
 polls = true           # the voting booth
 chat = true            # the live multi-user chat room
+mail_to_sysop = true   # a "mail the sysop" feedback entry (works even if mail is off)
 pubkey_auth = true     # allow SSH public-key login (users register keys in the BBS)
 file_areas = true      # browse downloadable file areas
 advertise_transports = true  # tell users the other way in (SSH ↔ browser)
