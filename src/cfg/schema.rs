@@ -411,6 +411,15 @@ pub static SECTIONS: &[Section] = &[
                 help: "Post reactions added. 0 disables.",
             },
             Field {
+                key: "daily_minutes",
+                label: "Daily time budget (min)",
+                kind: FieldKind::Int {
+                    min: 0,
+                    max: 10_000,
+                },
+                help: "Connected minutes per user per day. 0 = unlimited; admins are exempt.",
+            },
+            Field {
                 key: "max_subject_chars",
                 label: "Max subject length",
                 kind: FieldKind::Int {
