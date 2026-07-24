@@ -29,6 +29,32 @@ pub fn fmt_rfc3339(ts: i64) -> String {
     }
 }
 
+/// Format a Unix timestamp as an RFC 822 date, e.g.
+/// `Tue, 08 Jul 2026 14:03:22 GMT` — what RSS 2.0 `pubDate` expects.
+///
+/// Hand-built for the same reason as [`fmt_rfc3339`]: it avoids the `time`
+/// crate's `formatting` feature for one string. `from_unix_timestamp` is UTC,
+/// so `GMT` is honest.
+pub fn fmt_rfc822(ts: i64) -> String {
+    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    match OffsetDateTime::from_unix_timestamp(ts) {
+        Ok(dt) => format!(
+            "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+            DAYS[dt.weekday().number_days_from_monday() as usize],
+            dt.day(),
+            MONTHS[u8::from(dt.month()) as usize - 1],
+            dt.year(),
+            dt.hour(),
+            dt.minute(),
+            dt.second()
+        ),
+        Err(_) => "Thu, 01 Jan 1970 00:00:00 GMT".to_string(),
+    }
+}
+
 /// Format a Unix timestamp for display, e.g. `2026-07-08 14:03`.
 pub fn fmt_time(ts: i64) -> String {
     match OffsetDateTime::from_unix_timestamp(ts) {

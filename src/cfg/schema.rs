@@ -657,6 +657,12 @@ pub static SECTIONS: &[Section] = &[
                 kind: FieldKind::Bool,
                 help: "Issue untrusted test certificates. Use this first — staging has far higher rate limits.",
             },
+            Field {
+                key: "feeds",
+                label: "RSS/Atom feeds",
+                kind: FieldKind::Bool,
+                help: "Serve /feed/<board> feeds for guest-readable boards. On by default; restricted boards are never exposed.",
+            },
         ],
     },
     Section {
