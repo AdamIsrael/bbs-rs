@@ -31,6 +31,22 @@ pub async fn list_readable_boards(pool: &SqlitePool, role: &str) -> Result<Vec<B
         .collect())
 }
 
+/// Find a board by name, case-insensitively — the lookup behind the public
+/// RSS/Atom feeds (#100), where the board is named in the URL path.
+///
+/// Case-insensitive so `/feed/general` and `/feed/General` both resolve; board
+/// names are unique so at most one matches. The caller still checks the ACL —
+/// this returns the row, not permission to see it.
+pub async fn find_board_by_name(pool: &SqlitePool, name: &str) -> Result<Option<Board>> {
+    Ok(sqlx::query_as::<_, Board>(
+        "SELECT id, name, description, min_read_role, min_write_role, locked \
+         FROM boards WHERE name = ? COLLATE NOCASE",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// Fetch a single board by id.
 pub async fn get_board(pool: &SqlitePool, id: i64) -> Result<Board> {
     sqlx::query_as::<_, Board>(

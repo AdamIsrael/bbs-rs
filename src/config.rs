@@ -244,6 +244,10 @@ pub struct Web {
     /// Use the Let's Encrypt staging environment (untrusted certs, higher rate
     /// limits) for testing the ACME flow.
     pub acme_staging: bool,
+    /// Serve RSS/Atom feeds of guest-readable boards at `/feed/<board>` (#100).
+    /// On by default. Only boards whose `min_read_role` is `guest` are exposed —
+    /// a restricted board never appears in a feed, however this is set.
+    pub feeds: bool,
 }
 
 impl Default for Web {
@@ -260,6 +264,7 @@ impl Default for Web {
             acme_email: String::new(),
             acme_cache: "acme-cache".into(),
             acme_staging: false,
+            feeds: true,
         }
     }
 }
@@ -1025,6 +1030,10 @@ tls = true
 # acme_email   = \"sysop@example.com\"
 # acme_cache   = \"acme-cache\"
 # acme_staging = false   # true = Let's Encrypt staging (untrusted, for testing)
+# Serve RSS/Atom feeds of guest-readable boards at /feed/<board> (and a /feed
+# index). On by default. Only boards readable by guests are ever exposed — a
+# restricted board never appears in a feed. Set false to turn feeds off entirely.
+feeds = true
 
 [finger]
 # A read-only finger service (RFC 1288). Off by default. `finger @host` lists

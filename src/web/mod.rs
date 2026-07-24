@@ -40,6 +40,7 @@ use crate::transport::{Event, Transport};
 
 pub mod activitypub;
 pub mod ap_object;
+pub mod feeds;
 mod terminal;
 pub mod tls;
 use terminal::WebTerminalHandle;
@@ -140,6 +141,11 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
+        // Public RSS/Atom feeds for guest-readable boards (#100). Always routed;
+        // each handler checks the `[web] feeds` toggle and the board ACL, and
+        // 404s when either says no.
+        .route("/feed", get(feeds::index))
+        .route("/feed/{board}", get(feeds::board))
         // ActivityPub read surface (#107, #108). All 404 unless [federation] is
         // enabled with a validated origin, so a non-federating board looks like
         // one.

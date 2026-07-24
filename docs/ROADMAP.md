@@ -123,7 +123,7 @@ variants.
 | Feature | Size | Issue |
 |---|---|---|
 | **`finger` service (RFC 1288)** — user discovery over TCP/79, reusing profiles + last-on + who's-online | S | [#77](https://github.com/AdamIsrael/bbs-rs/issues/77) |
-| **Public-board RSS/Atom feeds** — viable now that the web server is an HTTP surface; guest-readable boards only | M | [#100](https://github.com/AdamIsrael/bbs-rs/issues/100) |
+| ~~**Public-board RSS/Atom feeds**~~ | M | **Shipped** ([#100](https://github.com/AdamIsrael/bbs-rs/issues/100)): the web frontend serves `/feed/<board>` (Atom, or RSS 2.0 with `?format=rss`) and a `/feed` index for **guest-readable boards only** — a restricted board 404s like a missing one. Read-only, no auth, `[web] feeds` toggle (on by default). |
 | **QWK offline-mail packets** — classic offline-reader support; orthogonal to federation (offline sneakernet, not server-to-server) | L | [#101](https://github.com/AdamIsrael/bbs-rs/issues/101) |
 | **Email gateway (SMTP in/out)** — rescoped: ActivityPub covers notifications and cross-instance messaging, so only real-email bridging survives | L | [#103](https://github.com/AdamIsrael/bbs-rs/issues/103) |
 | ~~**NNTP gateway**~~ | L | **Closed** ([#102](https://github.com/AdamIsrael/bbs-rs/issues/102)): superseded by Theme E — the same message-portability work a third time, through a new listener, for a vanishing audience. |

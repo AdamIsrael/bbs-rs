@@ -267,6 +267,13 @@ resolved in this order:
 Set `tls = false` for plain HTTP (e.g. when a **reverse proxy** such as Caddy or nginx+certbot already
 terminates TLS in front of bbs-rs and forwards to the plain-HTTP port).
 
+**RSS / Atom feeds**: the web frontend serves feeds of **guest-readable boards** so anyone can follow a
+board from an ordinary feed reader — no account, no terminal. `GET /feed/<board>` returns Atom (the
+default) or RSS 2.0 with `?format=rss`; `GET /feed` is a small HTML index of the available feeds. Only
+boards whose `min_read_role` is `guest` are ever exposed — a restricted board 404s exactly like one that
+doesn't exist, so a feed URL can't be used to probe for private boards. Read-only and unauthenticated.
+On by default when the web frontend is up; set `[web] feeds = false` to turn it off.
+
 Note: disabling `guest` while keeping `registration` on leaves no way for a newcomer to get in
 (registration is reached from the guest session). `bbsctl` reads the same `bbs.toml` for its database
 URL (`bbsctl --config bbs.toml …`), or takes `--database-url` directly.
