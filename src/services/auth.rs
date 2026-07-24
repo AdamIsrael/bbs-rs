@@ -36,7 +36,8 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 /// Look up a user by name.
 pub async fn find_user(pool: &SqlitePool, username: &str) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, \
+         is_remote, password_reset_at \
          FROM users WHERE username = ?",
     )
     .bind(username)
@@ -192,6 +193,117 @@ pub async fn register_user(
     .execute(pool)
     .await?;
     find_user(pool, username).await?.ok_or(AppError::NotFound)
+}
+
+/// The shortest password we'll accept when one is *changed* (#76).
+///
+/// Deliberately not applied to [`register_user`]: tightening the rule on the
+/// existing signup path would be a separate policy decision, and an account
+/// that can already log in shouldn't suddenly be unable to.
+pub const MIN_PASSWORD_CHARS: usize = 6;
+
+/// Alphabet for generated temporary passwords: unambiguous in a terminal
+/// (no `0`/`O`, `1`/`l`/`I`) because a sysop typically reads these out loud or
+/// pastes them into a mail message.
+const TEMP_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzACDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/// Number of characters in a generated temporary password. 16 characters from a
+/// 53-symbol alphabet is ~91 bits — far beyond guessing, and it is short-lived
+/// anyway since the account must change it on first use.
+const TEMP_PASSWORD_CHARS: usize = 16;
+
+/// Generate a random temporary password for an operator-driven reset (#76).
+pub fn generate_temp_password() -> Result<String> {
+    let mut raw = [0u8; TEMP_PASSWORD_CHARS];
+    getrandom::fill(&mut raw).map_err(|e| AppError::Hash(e.to_string()))?;
+    // Modulo bias over a 53-symbol alphabet is negligible at this length, and
+    // the password is single-use — rejection sampling would buy nothing.
+    Ok(raw
+        .iter()
+        .map(|b| TEMP_ALPHABET[*b as usize % TEMP_ALPHABET.len()] as char)
+        .collect())
+}
+
+/// Overwrite a user's password, optionally flagging the account so the next
+/// session is forced through the change-password screen (#76).
+///
+/// This is the operator path (`bbsctl passwd`) and takes no current password —
+/// it is deliberately unauthenticated at this layer, exactly like the rest of
+/// [`crate::services::admin`], because the only caller is a tool that already
+/// has direct database access. Remote ActivityPub actors are excluded in the
+/// `WHERE` clause: their hash is an unusable sentinel and must stay that way.
+///
+/// Returns whether a local user was actually updated.
+pub async fn set_password(
+    pool: &SqlitePool,
+    username: &str,
+    new_password: &str,
+    force_change: bool,
+) -> Result<bool> {
+    if new_password.chars().count() < MIN_PASSWORD_CHARS {
+        return Err(AppError::PasswordTooShort(MIN_PASSWORD_CHARS));
+    }
+    let hash = hash_password(new_password)?;
+    let affected = sqlx::query(
+        "UPDATE users SET password_hash = ?, password_reset_at = ? \
+         WHERE username = ? AND is_remote = 0",
+    )
+    .bind(&hash)
+    .bind(force_change.then(now_unix))
+    .bind(username)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// Self-service password rotation (#76): verify `current` before replacing it,
+/// and clear any forced-change flag.
+///
+/// The current-password check guards an unattended terminal — someone who walks
+/// up to a live session shouldn't be able to lock the owner out. The forced
+/// path after a sysop reset uses [`set_own_password`] instead, since the user
+/// has already proven this session's identity at login and may have arrived by
+/// public key without ever knowing the temporary password.
+pub async fn change_password(
+    pool: &SqlitePool,
+    user_id: i64,
+    current: &str,
+    new_password: &str,
+) -> Result<()> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, \
+         is_remote, password_reset_at \
+         FROM users WHERE id = ? AND is_remote = 0",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    if !verify_password(current, &user.password_hash) {
+        return Err(AppError::PasswordIncorrect);
+    }
+    set_own_password(pool, user_id, new_password).await
+}
+
+/// Replace the password of an already-authenticated session's own account and
+/// clear the forced-change flag (#76). Callers must have established identity —
+/// in practice this is only reached from the logged-in TUI.
+pub async fn set_own_password(pool: &SqlitePool, user_id: i64, new_password: &str) -> Result<()> {
+    if new_password.chars().count() < MIN_PASSWORD_CHARS {
+        return Err(AppError::PasswordTooShort(MIN_PASSWORD_CHARS));
+    }
+    let hash = hash_password(new_password)?;
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, password_reset_at = NULL \
+         WHERE id = ? AND is_remote = 0",
+    )
+    .bind(&hash)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Ensure the shared `guest` limited account exists, with the given password

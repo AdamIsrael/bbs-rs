@@ -296,6 +296,7 @@ bbsctl pending                   # list accounts awaiting sysop approval
 bbsctl approve <user>            # approve a pending account
 bbsctl reject <user>             # reject (delete) a pending registration
 bbsctl role <user> admin         # promote/demote (guest|user|admin)
+bbsctl passwd <user>             # reset a password (prints a one-time temp one)
 bbsctl ban <user>                # ban / unban a user
 bbsctl unban <user>
 bbsctl ban-ip <ip> [--reason R]  # ban / unban an IP
@@ -344,6 +345,16 @@ normal account, then run `bbsctl role <that-user> admin`. Registration refuses r
 review: a new account lands in a pending queue and can't log in until approved. Approve or reject from the
 **Admin · Users** screen (`v` approve, `x` reject) or with `bbsctl pending` / `bbsctl approve <user>` /
 `bbsctl reject <user>`. Admins and the shared guest are never gated.
+
+**Account recovery.** A forgotten password is fixed with `bbsctl passwd <user>`: it prints a strong
+one-time temporary password to hand over out of band, and flags the account so the user's next session
+is held on a **change-password screen** until they choose a new one — nothing else in the BBS is
+reachable until they do (`Ctrl-C` still disconnects). Pass `--password <pw>` to set an exact one, or
+`--no-force` to skip the forced change. Because a reset is usually a response to a compromise, the
+sweeper also **ends any session that was already running when the reset happened**, within ~10s; the
+session sitting on the change-password screen is deliberately left alone, since kicking it would make
+the account unrecoverable. Users can rotate their own password any time with `p` on their profile,
+which asks for the current one first. New passwords must be at least 6 characters.
 
 A ban rejects future logins *and* drops any live session for that user/IP (immediately for in-BBS
 admin bans; within ~10s for `bbsctl` bans, via the server's ban sweeper). `admin`-role users also get

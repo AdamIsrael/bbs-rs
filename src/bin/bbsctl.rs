@@ -95,6 +95,19 @@ enum Cmd {
     Broadcast { message: String },
     /// Set a user's role (guest | user | admin).
     Role { username: String, role: String },
+    /// Reset a user's password (#76). With no --password, a strong temporary
+    /// one is generated and printed — hand it to the user out of band. Unless
+    /// --no-force is given, their next login must set a new password before
+    /// anything else is reachable.
+    Passwd {
+        username: String,
+        /// Set this exact password instead of generating one.
+        #[arg(long)]
+        password: Option<String>,
+        /// Leave the password as-is on next login (no forced change).
+        #[arg(long)]
+        no_force: bool,
+    },
     /// List a user's registered SSH public keys.
     Keys { username: String },
     /// Register an SSH public key for a user (pass the key line, or --file).
@@ -605,6 +618,35 @@ async fn main() -> anyhow::Result<()> {
             admin::set_role(&pool, &username, &role).await?;
             audit::log(&pool, audit::BBSCTL, "set_role", &username, Some(&role)).await;
             println!("set role of '{username}' to '{role}'");
+        }
+        Cmd::Passwd {
+            username,
+            password,
+            no_force,
+        } => {
+            // A generated password is printed; a supplied one is not echoed
+            // back, since it's already in the operator's shell history and
+            // repeating it only widens the exposure.
+            let generated = password.is_none();
+            let new = match password {
+                Some(p) => p,
+                None => auth::generate_temp_password()?,
+            };
+            if auth::set_password(&pool, &username, &new, !no_force).await? {
+                audit::log(&pool, audit::BBSCTL, "reset_password", &username, None).await;
+                if generated {
+                    println!("temporary password for '{username}': {new}");
+                } else {
+                    println!("password set for '{username}'");
+                }
+                if no_force {
+                    println!("(no forced change on next login)");
+                } else {
+                    println!("they must choose a new password at next login");
+                }
+            } else {
+                println!("no such local user: '{username}'");
+            }
         }
         Cmd::Keys { username } => {
             let user = auth::find_user(&pool, &username)

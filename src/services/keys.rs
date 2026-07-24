@@ -109,7 +109,7 @@ pub async fn find_authorized(
 ) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         "SELECT u.id, u.username, u.password_hash, u.role, u.created_at, u.banned_at, \
-         u.validated_at, u.is_remote \
+         u.validated_at, u.is_remote, u.password_reset_at \
          FROM users u JOIN user_keys k ON k.user_id = u.id \
          WHERE u.username = ? AND k.fingerprint = ? AND u.is_remote = 0",
     )

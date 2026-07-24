@@ -409,6 +409,7 @@ mod tests {
             created_at: 0,
             banned_at: None,
             validated_at: Some(0),
+            password_reset_at: None,
             is_remote: false,
         };
         let body = dorinfo1(&user, "My BBS", "Jane Sysop", 30, 30);

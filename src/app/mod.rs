@@ -253,12 +253,30 @@ pub struct App {
     /// typed domain will be set to.
     fed_pending: Option<(&'static str, &'static str)>,
 
+    /// True while the session is held on the change-password screen after a
+    /// sysop reset (#76). The screen is a gate, not a stop on the way somewhere:
+    /// nothing else is reachable until a new password is set.
+    pub force_password_change: bool,
+
     // Shared form for compose/register screens
     pub form: Form,
     /// The multi-line body buffer for post/mail compose (#96). The header
     /// fields stay in `form`; focus moves between the two.
     pub body: crate::app::textarea::TextArea,
     pub body_focused: bool,
+}
+
+/// The change-password form (#76). The forced post-reset variant drops the
+/// "current password" field — the session has already authenticated, and a
+/// public-key login never saw the temporary password to begin with.
+fn password_form(forced: bool) -> Form {
+    let mut fields = Vec::with_capacity(3);
+    if !forced {
+        fields.push(Field::new("Current password", true));
+    }
+    fields.push(Field::new("New password", true));
+    fields.push(Field::new("Confirm new password", true));
+    Form::new(fields)
 }
 
 /// Whether a menu target is available to `user` under the current config (#84).
@@ -408,6 +426,9 @@ impl App {
         let theme = Theme::resolve(&config.theme);
         // Resolve context-conditional art (#90) against the login-time context.
         let art = load_art(&config.art, &base_context(&config, &user, transport));
+        // A sysop reset (#76) lands the session on the change-password gate
+        // rather than the menu, whichever way they authenticated.
+        let force_password_change = user.must_change_password();
         Self {
             pool,
             presence,
@@ -417,9 +438,17 @@ impl App {
             user,
             session_id,
             transport,
-            screen: Screen::MainMenu,
+            screen: if force_password_change {
+                Screen::ChangePassword
+            } else {
+                Screen::MainMenu
+            },
             should_quit: false,
-            status: String::new(),
+            status: if force_password_change {
+                "Your password was reset — choose a new one to continue.".into()
+            } else {
+                String::new()
+            },
             menu,
             menu_sel: 0,
             menu_stack: Vec::new(),
@@ -507,7 +536,12 @@ impl App {
             fed_policy: Vec::new(),
             fed_sel: 0,
             fed_pending: None,
-            form: Form::new(Vec::new()),
+            force_password_change,
+            form: if force_password_change {
+                password_form(true)
+            } else {
+                Form::new(Vec::new())
+            },
             body: crate::app::textarea::TextArea::new(),
             body_focused: false,
         }
@@ -566,6 +600,7 @@ impl App {
             Screen::Keys => self.on_keys(key).await,
             Screen::AddKey => self.on_add_key(key).await,
             Screen::Register => self.on_register(key).await,
+            Screen::ChangePassword => self.on_change_password(key).await,
             Screen::Help => self.on_reader(key, Screen::MainMenu),
             Screen::AdminUsers => self.on_admin_users(key).await,
             Screen::AdminLogins => self.on_admin_logins(key).await,
@@ -2997,6 +3032,13 @@ impl App {
         self.viewing_own_profile() && !self.user.is_guest()
     }
 
+    /// Whether the profile screen offers "change password" (#76). Excluded for
+    /// the shared `guest` account, whose password belongs to the operator and
+    /// is set from `[seed] guest_password`.
+    pub fn can_change_password(&self) -> bool {
+        self.viewing_own_profile() && !self.user.is_guest()
+    }
+
     /// Whether the shown profile can be blocked/unblocked by the viewer (#97):
     /// someone else's, a real (non-guest) viewer, and not an admin's.
     pub fn can_block_current_profile(&self) -> bool {
@@ -3021,6 +3063,7 @@ impl App {
             KeyCode::Char('f') if self.viewing_own_profile() && !self.user.is_guest() => {
                 self.toggle_finger_optout().await
             }
+            KeyCode::Char('p') if self.can_change_password() => self.begin_change_password(),
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.profile_back,
             _ => {}
         }
@@ -3678,6 +3721,82 @@ impl App {
                 self.status = "That username is reserved — please choose another.".into()
             }
             Err(e) => self.status = format!("Could not register: {e}"),
+        }
+    }
+
+    // ---- Change password (#76) -------------------------------------------
+
+    /// Open the change-password screen voluntarily, from the user's own
+    /// profile. Unlike the post-reset gate this asks for the current password
+    /// (see [`auth::change_password`]) and Esc backs out.
+    fn begin_change_password(&mut self) {
+        self.force_password_change = false;
+        self.form = password_form(false);
+        self.screen = Screen::ChangePassword;
+    }
+
+    async fn on_change_password(&mut self, key: KeyEvent) {
+        match key.code {
+            // The post-reset gate has no way out but through — Ctrl-C still
+            // ends the session, which is handled ahead of this dispatch.
+            KeyCode::Esc if self.force_password_change => {
+                self.status = "Set a new password to continue (Ctrl-C disconnects).".into()
+            }
+            KeyCode::Esc => self.screen = Screen::Profile,
+            KeyCode::Enter if self.form.on_last() => self.submit_change_password().await,
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.form.next_field(),
+            KeyCode::BackTab | KeyCode::Up => self.form.prev_field(),
+            KeyCode::Backspace => self.form.backspace(),
+            KeyCode::Char(c) => self.form.insert(c),
+            _ => {}
+        }
+    }
+
+    async fn submit_change_password(&mut self) {
+        // The gate form has no "current password" field: the session already
+        // proved this identity at login, and a public-key login never saw the
+        // temporary password at all.
+        let forced = self.force_password_change;
+        let (current, new, confirm) = if forced {
+            (
+                String::new(),
+                self.form.value(0).to_string(),
+                self.form.value(1).to_string(),
+            )
+        } else {
+            (
+                self.form.value(0).to_string(),
+                self.form.value(1).to_string(),
+                self.form.value(2).to_string(),
+            )
+        };
+        if new != confirm {
+            self.status = "Passwords do not match.".into();
+            return;
+        }
+        let outcome = if forced {
+            auth::set_own_password(&self.pool, self.user.id, &new).await
+        } else {
+            auth::change_password(&self.pool, self.user.id, &current, &new).await
+        };
+        match outcome {
+            Ok(()) => {
+                self.user.password_reset_at = None;
+                self.force_password_change = false;
+                self.form = Form::new(Vec::new());
+                self.screen = if forced {
+                    Screen::MainMenu
+                } else {
+                    Screen::Profile
+                };
+                self.status = "Password changed.".into();
+            }
+            Err(e) => {
+                // Re-arm the secret fields so a typo doesn't mean retyping the
+                // one field that was right.
+                self.form = password_form(forced);
+                self.status = format!("Could not change password: {e}");
+            }
         }
     }
 

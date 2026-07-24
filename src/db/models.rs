@@ -24,6 +24,12 @@ pub struct User {
     /// no usable password, and must never be logged into or listed as local
     /// members.
     pub is_remote: bool,
+    /// When a sysop last reset this password (#76), or `None` if there's no
+    /// pending reset. While it is set, a session is forced through the
+    /// change-password screen before anything else is reachable; the timestamp
+    /// also lets the sweeper tell a session that predates the reset (the one
+    /// you're locking out) from the one now sitting on that screen.
+    pub password_reset_at: Option<i64>,
 }
 
 impl User {
@@ -47,6 +53,12 @@ impl User {
     /// shared guest are always treated as active.
     pub fn is_validated(&self) -> bool {
         self.validated_at.is_some() || self.is_admin() || self.is_guest()
+    }
+
+    /// Whether a sysop reset this password and the user still owes us a new one
+    /// (#76).
+    pub fn must_change_password(&self) -> bool {
+        self.password_reset_at.is_some()
     }
 
     /// Whether this account may hold a session: local, and not banned. Remote
