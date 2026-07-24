@@ -110,6 +110,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Keys => render_keys(f, body, app),
         Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
         Screen::Register => render_form(f, body, " Register ", app),
+        Screen::ChangePassword => render_form(
+            f,
+            body,
+            if app.force_password_change {
+                " Set a New Password "
+            } else {
+                " Change Password "
+            },
+            app,
+        ),
         Screen::Help => render_help(f, body, app),
         Screen::AdminUsers => render_admin_users(f, body, app),
         Screen::ComposeBroadcast => render_form(f, body, " Broadcast to all sessions ", app),
@@ -1586,6 +1596,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Mail Sysop      : send feedback/support mail straight to the sysop
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
   • SSH Keys       : register public keys to log in over SSH without a password
+  • Your Profile   : press p to change your password (e edit, i ignored, f finger)
 ",
     );
     // How you get back in after registering depends on how you got here.
@@ -1672,6 +1683,7 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::Keys => "SSH Keys",
         Screen::AddKey => "Add SSH Key",
         Screen::Register => "Register",
+        Screen::ChangePassword => "Change Password",
         Screen::Help => "Help",
         Screen::AdminUsers => "Admin · Users",
         Screen::AdminAudit => "Admin · Audit",
@@ -1735,6 +1747,9 @@ fn hints(
             " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel "
         }
         Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",
+        Screen::ChangePassword => {
+            " Tab/↑/↓ fields · Enter next/submit · Esc cancel (^C disconnects) "
+        }
         Screen::Mailbox => " ↑/↓ move · Enter read · n compose · / search · d delete · Esc back ",
         Screen::MailSearchInput => " type a query · Enter search · Esc cancel ",
         Screen::MailSearchResults => " ↑/↓ move · Enter read · / refine · Esc back ",
@@ -1744,7 +1759,7 @@ fn hints(
         Screen::ComposePage => " type your message · Enter send · Esc cancel ",
         Screen::Profile => {
             if can_edit_profile {
-                " e edit · i ignored · f finger · Esc back "
+                " e edit · i ignored · f finger · p password · Esc back "
             } else if can_block {
                 " b block/unblock · Esc back "
             } else {

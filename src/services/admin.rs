@@ -5,7 +5,7 @@
 //! callers — the TUI only exposes the admin menu to `admin`-role users, and
 //! `bbsctl` is an operator tool with direct database access.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::sqlite::SqlitePool;
 
@@ -22,7 +22,8 @@ pub const ROLES: [&str; 3] = ["guest", "user", "admin"];
 /// meaningfully.
 pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>> {
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, \
+         is_remote, password_reset_at \
          FROM users WHERE is_remote = 0 ORDER BY id",
     )
     .fetch_all(pool)
@@ -35,7 +36,8 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>> {
 /// admin exists yet.
 pub async fn primary_admin(pool: &SqlitePool) -> Result<Option<User>> {
     let admin = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, \
+         is_remote, password_reset_at \
          FROM users WHERE role = 'admin' AND is_remote = 0 ORDER BY id LIMIT 1",
     )
     .fetch_optional(pool)
@@ -66,7 +68,8 @@ pub async fn unban_user(pool: &SqlitePool, username: &str) -> Result<()> {
 /// the queue is worked front-to-back.
 pub async fn pending_users(pool: &SqlitePool) -> Result<Vec<User>> {
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, is_remote \
+        "SELECT id, username, password_hash, role, created_at, banned_at, validated_at, \
+         is_remote, password_reset_at \
          FROM users WHERE is_remote = 0 AND validated_at IS NULL ORDER BY created_at",
     )
     .fetch_all(pool)
@@ -259,6 +262,17 @@ pub async fn banned_usernames(pool: &SqlitePool) -> Result<HashSet<String>> {
         sqlx::query_scalar("SELECT username FROM users WHERE banned_at IS NOT NULL")
             .fetch_all(pool)
             .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Accounts with an unfinished sysop password reset (#76), mapped to when the
+/// reset happened — used by the sweeper to end sessions that predate it.
+pub async fn pending_password_resets(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT username, password_reset_at FROM users WHERE password_reset_at IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().collect())
 }
 

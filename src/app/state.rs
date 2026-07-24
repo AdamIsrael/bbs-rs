@@ -47,6 +47,7 @@ pub enum Screen {
     Keys,
     AddKey,
     Register,
+    ChangePassword,
     Help,
     AdminUsers,
     AdminLogins,

@@ -28,6 +28,12 @@ pub enum AppError {
     #[error("usernames may only contain letters, numbers, and _ - . (1–{0} characters)")]
     UsernameInvalid(usize),
 
+    #[error("password must be at least {0} characters")]
+    PasswordTooShort(usize),
+
+    #[error("current password is incorrect")]
+    PasswordIncorrect,
+
     #[error("that action is not available to the guest account")]
     GuestNotAllowed,
 

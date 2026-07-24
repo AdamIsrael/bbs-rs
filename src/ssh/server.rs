@@ -379,6 +379,7 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<ArcSwap<S
         ticker.tick().await;
 
         enforce_time_limits(&pool, &presence, &config.load().limits, &mut warned).await;
+        enforce_password_resets(&pool, &presence).await;
 
         // Deliver any broadcasts queued out-of-process (by `bbsctl`) since the
         // last tick. Done before the ban logic's early-continue so a broadcast
@@ -411,6 +412,36 @@ async fn ban_sweeper(pool: SqlitePool, presence: Presence, config: Arc<ArcSwap<S
         let kicked = presence.kick(&users, &ips).await;
         if kicked > 0 {
             tracing::info!("ban sweeper kicked {kicked} session(s)");
+        }
+    }
+}
+
+/// Drop sessions that were already running when a sysop reset their password
+/// (#76).
+///
+/// A password reset is usually a response to a compromise, so leaving the
+/// intruder's session up would defeat the point — and this is also how a reset
+/// applied out-of-process by `bbsctl` reaches a live session. Only sessions
+/// that started *before* the reset are ended: the one that just logged in with
+/// the temporary password is sitting on the change-password screen, and kicking
+/// it would make the account impossible to recover.
+pub async fn enforce_password_resets(pool: &SqlitePool, presence: &Presence) {
+    let reset_at = match admin::pending_password_resets(pool).await {
+        Ok(map) if !map.is_empty() => map,
+        Ok(_) => return,
+        Err(e) => {
+            tracing::warn!("password-reset sweep query failed: {e}");
+            return;
+        }
+    };
+    for (id, username, since) in presence.sessions_snapshot().await {
+        // `<=` breaks the same-second tie toward ending the session: the caller
+        // that just logged in reconnects and lands back on the gate, whereas a
+        // missed intruder stays.
+        if reset_at.get(&username).is_some_and(|at| since <= *at)
+            && presence.send_to(id, Event::Quit).await
+        {
+            tracing::info!("ended session {id} ({username}): password was reset");
         }
     }
 }
