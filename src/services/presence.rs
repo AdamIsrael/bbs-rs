@@ -52,12 +52,25 @@ impl Presence {
         ip: Option<String>,
         tx: Sender<Event>,
     ) {
+        self.join_at(session_id, username, ip, tx, now_unix()).await;
+    }
+
+    /// [`join`](Self::join) with an explicit start time, for callers that know
+    /// when the session really began rather than when it reached this registry.
+    pub async fn join_at(
+        &self,
+        session_id: usize,
+        username: String,
+        ip: Option<String>,
+        tx: Sender<Event>,
+        since: i64,
+    ) {
         self.inner.write().await.insert(
             session_id,
             Session {
                 username,
                 ip,
-                since: now_unix(),
+                since,
                 tx,
             },
         );
