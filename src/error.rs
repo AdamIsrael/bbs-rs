@@ -34,6 +34,9 @@ pub enum AppError {
     #[error("current password is incorrect")]
     PasswordIncorrect,
 
+    #[error("at most {0} attachment(s) per post or message")]
+    TooManyAttachments(u32),
+
     #[error("that action is not available to the guest account")]
     GuestNotAllowed,
 

@@ -128,6 +128,13 @@ pub fn drain(buf: &mut Vec<u8>) -> Vec<Event> {
                 out.push(key(KeyCode::Tab));
                 i += 1;
             }
+            // ^A attaches a file while composing (#95). Composers feed bare
+            // letters to the body, so the binding has to be a control byte —
+            // which means it has to be decoded here to exist at all.
+            0x01 => {
+                out.push(ctrl('a'));
+                i += 1;
+            }
             0x03 => {
                 out.push(ctrl('c'));
                 i += 1;
@@ -197,6 +204,19 @@ mod tests {
     #[test]
     fn backspace_and_tab() {
         assert_eq!(codes(b"\x7f\t"), vec![KeyCode::Backspace, KeyCode::Tab]);
+    }
+
+    #[test]
+    fn ctrl_a_is_decoded() {
+        // Regression guard (#95): only ^C and ^D used to survive the parser, so
+        // a ^A binding in the composer never fired over SSH even though the
+        // headless tests — which synthesize KeyEvents — passed.
+        let out = super::parse(&[0x01]);
+        assert!(matches!(
+            out.as_slice(),
+            [Event::Key(k)] if k.code == KeyCode::Char('a')
+                && k.modifiers.contains(KeyModifiers::CONTROL)
+        ));
     }
 
     #[test]

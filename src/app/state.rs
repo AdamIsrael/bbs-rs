@@ -48,6 +48,8 @@ pub enum Screen {
     AddKey,
     Register,
     ChangePassword,
+    AttachPicker,
+    Attachments,
     Help,
     AdminUsers,
     AdminLogins,

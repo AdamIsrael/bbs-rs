@@ -103,7 +103,7 @@ variants.
 | **Author edit/delete own posts** — today only admins can delete | M | [#92](https://github.com/AdamIsrael/bbs-rs/issues/92) |
 | **Mail full-text search** — parity with board search (#10) | S | [#93](https://github.com/AdamIsrael/bbs-rs/issues/93) |
 | **Post reactions / upvotes** | S | [#94](https://github.com/AdamIsrael/bbs-rs/issues/94) |
-| **Attachments** — link file-area files to posts/mail | M | [#95](https://github.com/AdamIsrael/bbs-rs/issues/95) |
+| ~~**Attachments** — link file-area files to posts/mail~~ | M | **Shipped** ([#95](https://github.com/AdamIsrael/bbs-rs/issues/95)): `^A` in the composer picks a readable file-area file; attachments are listed under the post/mail and open with `a` in the existing text/archive viewer. A join, not a copy — the area's read ACL is re-checked on every display, so attaching never widens access. |
 | **Full-screen multi-line compose editor** | M | [#96](https://github.com/AdamIsrael/bbs-rs/issues/96) |
 
 ## Theme C — Accounts, ops & security *(ops/security)*

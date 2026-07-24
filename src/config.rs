@@ -639,6 +639,8 @@ pub struct Limits {
     /// Daily connected-time budget per user, in minutes (#75; 0 disables).
     /// Admins are exempt. Note the shared `guest` account shares one budget.
     pub daily_minutes: u32,
+    /// Max file-area attachments per post or mail (#95; 0 disables the cap).
+    pub max_attachments: u32,
     /// Max characters in a post/mail subject (0 disables).
     pub max_subject_chars: usize,
     /// Max characters in a post/mail body (0 disables).
@@ -655,6 +657,7 @@ impl Default for Limits {
             max_mail: 10,
             max_oneliners: 8,
             max_reactions: 30,
+            max_attachments: 4,
             daily_minutes: 0,
             max_subject_chars: 120,
             max_body_chars: 8000,
@@ -940,6 +943,9 @@ max_mail = 10
 max_oneliners = 8
 # Max post reactions added per user per window.
 max_reactions = 30
+# Max file-area attachments per post or mail (0 = no cap). Attachments point at
+# an existing file, so the area's read ACL still decides who can see them.
+max_attachments = 4
 # Daily connected-time budget per user, in minutes (0 = unlimited). Admins are
 # exempt; the shared guest account shares a single budget between all guests.
 daily_minutes = 0

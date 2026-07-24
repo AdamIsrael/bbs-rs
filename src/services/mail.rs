@@ -186,7 +186,7 @@ pub async fn send_mail(
     subject: &str,
     body: &str,
     limits: &Limits,
-) -> Result<()> {
+) -> Result<i64> {
     check_sender(pool, from, subject, body, limits).await?;
     let to = auth::find_user(pool, to_username)
         .await?
@@ -196,8 +196,8 @@ pub async fn send_mail(
     if !from.is_admin() && crate::services::blocks::is_blocked(pool, to.id, from.id).await? {
         return Err(AppError::Blocked);
     }
-    insert(pool, from.id, to.id, subject, body).await?;
-    Ok(())
+    // Returns the new row's id so the caller can link attachments (#95).
+    insert(pool, from.id, to.id, subject, body).await
 }
 
 /// Record an outbound **remote** DM to an already-resolved remote actor, and

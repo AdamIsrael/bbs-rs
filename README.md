@@ -493,6 +493,20 @@ sftp> get somefile.zip         # download (honors the area's read role)
 sftp> put local.txt            # upload (honors write role + extension/size/quota)
 ```
 
+**Attachments.** A file area file can be attached to a board post or a private mail: press `^A` while
+composing to pick from the files you can read (shown as `area/filename`), Enter to attach or detach, Esc
+back to your draft — the message is untouched while the picker is up. Attached files are listed under the
+post/mail when reading it, and `a` opens one in the same text/archive viewer the file browser uses, or
+names the SFTP path for a binary.
+
+Nothing is copied: an attachment points at the file where it already lives, so **attaching never widens
+access**. The area's `min_read_role` is re-checked every time the list is displayed — a file from a
+restricted area simply isn't listed for someone who couldn't already read it, and you can't attach a file
+you can't see yourself. Deleting the post, the mail, or the underlying file drops the link. Cap the count
+per message with `[limits].max_attachments` (default 4, `0` = no cap). Attachments can't ride along on a
+**remote fediverse DM** — those files have no public URL to hand a remote server, so the send is refused
+rather than silently dropping them.
+
 Reads honor each area's `min_read_role`; uploads honor `min_write_role` plus the `[files]` limits and
 count against your quota. SFTP `put` can't carry a **description**, so uploads start with none — the
 uploader (or an admin) adds one from the file's detail screen in the BBS (press `e`), or an operator

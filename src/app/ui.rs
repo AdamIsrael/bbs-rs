@@ -109,6 +109,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::FileView => render_file_view(f, body, app),
         Screen::Keys => render_keys(f, body, app),
         Screen::AddKey => render_form(f, body, " Add SSH Key ", app),
+        Screen::AttachPicker => render_attach_picker(f, body, app),
+        Screen::Attachments => render_attachments(f, body, app),
         Screen::Register => render_form(f, body, " Register ", app),
         Screen::ChangePassword => render_form(
             f,
@@ -804,6 +806,11 @@ fn render_read_message(f: &mut Frame, area: Rect, app: &App) {
     // Reaction palette (#94): `n) glyph ×count`, the viewer's own picks in
     // [brackets]. Counts always show; the digit-key hint too (guests get a
     // "register first" nudge when they press one).
+    // Attachments (#95) — named, so "see attached" is checkable without
+    // pressing anything, with `a` to open them.
+    if !app.current_attachments.is_empty() {
+        body.push_str(&format!("\n\n{}", attachment_summary(app)));
+    }
     let palette = reactions_footer(app);
     body.push_str(&format!("\n\n{palette}"));
     let p = Paragraph::new(body)
@@ -915,10 +922,26 @@ fn render_read_mail(f: &mut Frame, area: Rect, app: &App) {
     for line in m.body.lines() {
         lines.push(Line::from(line.to_string()));
     }
+    if !app.current_attachments.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(attachment_summary(app)));
+    }
     let p = Paragraph::new(Text::from(lines))
         .block(Block::bordered().title(format!(" {} ", truncate(&m.subject, 60))))
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
+}
+
+/// One line naming what's attached, shared by both readers (#95). Only ever
+/// built from `current_attachments`, which the service already filtered to what
+/// this viewer may read.
+fn attachment_summary(app: &App) -> String {
+    let names: Vec<String> = app.current_attachments.iter().map(|a| a.path()).collect();
+    format!(
+        "\u{1f4ce} {} attachment(s): {}  —  press 'a' to open",
+        names.len(),
+        names.join(", ")
+    )
 }
 
 fn render_confirm_delete_mail(f: &mut Frame, area: Rect, app: &App) {
@@ -1285,6 +1308,63 @@ fn render_file_detail(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(p, area);
 }
 
+/// The compose-time attach picker (#95): every file the user may read, with a
+/// marker on the ones already staged for this draft.
+fn render_attach_picker(f: &mut Frame, area: Rect, app: &App) {
+    if app.attach_pick.is_empty() {
+        return placeholder(f, area, " Attach a File ", "No files you can attach.");
+    }
+    let lines: Vec<Line> = app
+        .attach_pick
+        .iter()
+        .map(|a| {
+            let staged = app
+                .pending_attachments
+                .iter()
+                .any(|p| p.file_id == a.file_id);
+            let mark = if staged { "[*] " } else { "[ ] " };
+            let row = format!(
+                "{mark}{:<40} {:>9}",
+                truncate(&a.path(), 40),
+                human_size(a.size)
+            );
+            if staged {
+                Line::from(row).style(Style::default().fg(app.theme.title_fg))
+            } else {
+                Line::from(row)
+            }
+        })
+        .collect();
+    let title = format!(" Attach a File ({} staged) ", app.pending_attachments.len());
+    render_selectable(f, area, &title, lines, app.attach_sel);
+}
+
+/// The attachments on the post/mail being read. Already ACL-filtered, so every
+/// row here is one the viewer may open.
+fn render_attachments(f: &mut Frame, area: Rect, app: &App) {
+    if app.current_attachments.is_empty() {
+        return placeholder(f, area, " Attachments ", "No attachments.");
+    }
+    let lines: Vec<Line> = app
+        .current_attachments
+        .iter()
+        .map(|a| {
+            let desc = if a.description.trim().is_empty() {
+                String::new()
+            } else {
+                format!("  — {}", a.description)
+            };
+            Line::from(format!(
+                "{:<40} {:>9}{}",
+                truncate(&a.path(), 40),
+                human_size(a.size),
+                desc
+            ))
+        })
+        .collect();
+    render_selectable(f, area, " Attachments ", lines, app.attach_view_sel);
+}
+
 fn render_archive_list(f: &mut Frame, area: Rect, app: &App) {
     let title = app
         .current_file
@@ -1377,6 +1457,16 @@ fn render_form(f: &mut Frame, area: Rect, title: &str, app: &App) {
             Style::default()
                 .fg(app.theme.warning_fg)
                 .add_modifier(Modifier::BOLD),
+        )));
+    }
+    // Staged attachments (#95), so the author can see what will go with the
+    // message before sending.
+    if !app.pending_attachments.is_empty() {
+        let names: Vec<String> = app.pending_attachments.iter().map(|a| a.path()).collect();
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "\u{1f4ce} {}  (^A to change)",
+            names.join(", ")
         )));
     }
     // Wrap so long field input (subject/body/username) stays visible instead of
@@ -1595,6 +1685,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • Chat           : a live multi-user chat room (type to talk, Esc to leave)
   • Mail Sysop      : send feedback/support mail straight to the sysop
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
+                     (attach one to a post or mail with ^A while composing)
   • SSH Keys       : register public keys to log in over SSH without a password
   • Your Profile   : press p to change your password (e edit, i ignored, f finger)
 ",
@@ -1682,6 +1773,8 @@ fn screen_name(screen: Screen) -> &'static str {
         Screen::FileView => "Viewing",
         Screen::Keys => "SSH Keys",
         Screen::AddKey => "Add SSH Key",
+        Screen::AttachPicker => "Attach a File",
+        Screen::Attachments => "Attachments",
         Screen::Register => "Register",
         Screen::ChangePassword => "Change Password",
         Screen::Help => "Help",
@@ -1736,17 +1829,20 @@ fn hints(
         }
         Screen::ReadMessage => {
             if is_admin {
-                " r reply · e edit · d delete · 1-3 react · Esc back "
+                " r reply · a attach · e edit · d delete · 1-3 react · Esc back "
             } else {
-                " r reply · e edit own · d delete own · 1-3 react · Esc back "
+                " r reply · a attach · e edit own · d delete own · 1-3 react · Esc back "
             }
         }
-        Screen::ReadMail => " r reply · f forward · d delete · Esc back ",
+        Screen::ReadMail => " r reply · f forward · a attachments · d delete · Esc back ",
         Screen::ReadBulletin | Screen::Help => " Esc back ",
-        Screen::ComposePost | Screen::ComposeMail | Screen::MailSysop => {
-            " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel "
+        Screen::MailSysop => " Tab/↑/↓ move · type body · Enter newline · ^D send · Esc cancel ",
+        Screen::ComposePost | Screen::ComposeMail => {
+            " Tab/↑/↓ move · Enter newline · ^A attach · ^D send · Esc cancel "
         }
         Screen::Register => " type to edit · Tab/↑/↓ fields · Enter next/submit · Esc cancel ",
+        Screen::AttachPicker => " ↑/↓ move · Enter attach/remove · Esc back to your message ",
+        Screen::Attachments => " ↑/↓ move · Enter open · Esc back ",
         Screen::ChangePassword => {
             " Tab/↑/↓ fields · Enter next/submit · Esc cancel (^C disconnects) "
         }
