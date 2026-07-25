@@ -672,6 +672,33 @@ pub static SECTIONS: &[Section] = &[
         ],
     },
     Section {
+        name: "finger",
+        title: "Finger service",
+        help: "A read-only finger service (RFC 1288). `finger @host` lists who's online; `finger user@host` shows a public profile. No auth and no writes, but it is a network listener — worth being deliberate about.",
+        restart_only: true,
+        kind: SectionKind::Fields,
+        fields: &[
+            Field {
+                key: "enabled",
+                label: "Enable finger",
+                kind: FieldKind::Bool,
+                help: "Answer finger queries. Off by default. Users can hide themselves from the Profile screen (press f).",
+            },
+            Field {
+                key: "host",
+                label: "Bind address",
+                kind: FieldKind::Str,
+                help: "0.0.0.0 answers on every interface; use 127.0.0.1 to keep it local.",
+            },
+            Field {
+                key: "port",
+                label: "Port",
+                kind: FieldKind::Int { min: 1, max: 65535 },
+                help: "79 is the finger convention, but binding it needs privilege — run behind a redirect, grant the capability, or pick a high port.",
+            },
+        ],
+    },
+    Section {
         name: "metrics",
         title: "Metrics endpoint",
         help: "A Prometheus-style /metrics endpoint on its own port, for operational visibility. Its own listener rather than a route on the web frontend, so a reverse proxy in front of the BBS can't reach it.",

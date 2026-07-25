@@ -375,6 +375,31 @@ fn the_schema_covers_the_shipped_config() {
     }
 }
 
+/// The other direction: every section in the shipped config is *described* by
+/// the schema at all.
+///
+/// The check above walks the schema and looks up shipped keys, so it silently
+/// skips a section the schema never mentions — which is exactly how `[finger]`
+/// stayed invisible to the editor from the day it was added until #184. A
+/// missing key and a missing section are the same failure to an operator; only
+/// this direction catches the second.
+#[test]
+fn every_shipped_section_is_in_the_schema() {
+    let doc: toml_edit::DocumentMut = DEFAULT_CONFIG_TOML.parse().unwrap();
+
+    for (name, item) in doc.iter() {
+        // Only tables are sections; bare top-level keys aren't.
+        if !(item.is_table() || item.is_array_of_tables()) {
+            continue;
+        }
+        assert!(
+            SECTIONS.iter().any(|s| s.name == name),
+            "[{name}] ships in bbs.toml but has no Section in the schema — bbscfg can't show it, \
+             so an operator can only configure it by hand-editing the file"
+        );
+    }
+}
+
 // ---- #141 Slice B: the editor state machine ---------------------------------
 
 mod editor {
@@ -432,6 +457,49 @@ mod editor {
         assert_eq!(
             e.doc.get("bbs", "name"),
             Some(FieldValue::Str("Adam's Board".into()))
+        );
+    }
+
+    /// The finger service is reachable and settable from the editor (#184) —
+    /// the point of the fix, not just that a Section literal exists.
+    #[test]
+    fn finger_can_be_configured_from_the_editor() {
+        let scratch = Scratch::new("ed-finger");
+        let mut e = ed(&scratch);
+        goto_field(&mut e, "finger", "port");
+
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.screen, Screen::Edit);
+        for _ in 0..8 {
+            press(&mut e, KeyCode::Backspace);
+        }
+        typed(&mut e, "7979");
+        press(&mut e, KeyCode::Enter);
+
+        assert_eq!(e.screen, Screen::Fields);
+        assert_eq!(e.doc.get("finger", "port"), Some(FieldValue::Int(7979)));
+
+        // And the toggle, since moving finger off port 79 usually goes with
+        // turning it on.
+        goto_field(&mut e, "finger", "enabled");
+        press(&mut e, KeyCode::Enter);
+        assert_eq!(e.doc.get("finger", "enabled"), Some(FieldValue::Bool(true)));
+
+        // All the way to disk — an edit the editor accepts but never writes
+        // would be the same problem in a different place.
+        press(&mut e, KeyCode::Char('s'));
+        assert_eq!(e.screen, Screen::Save);
+        let (changed, restart) = e.pending();
+        assert_eq!(changed, vec!["finger"]);
+        assert_eq!(restart, vec!["finger"], "the listener is bound at startup");
+
+        press(&mut e, KeyCode::Char('y'));
+        let text = scratch.text();
+        assert!(text.contains("port = 7979"), "{text}");
+        assert!(text.contains("enabled = true"));
+        assert!(
+            text.contains("# Port 79 is the finger convention"),
+            "and the explanatory comments survive the edit"
         );
     }
 
