@@ -55,6 +55,7 @@ pub struct Settings {
     pub art: Art,
     pub web: Web,
     pub finger: Finger,
+    pub metrics: Metrics,
     pub federation: Federation,
     pub oneliners: Oneliners,
     pub seed: Seed,
@@ -288,6 +289,36 @@ impl Default for Finger {
             enabled: false,
             host: "0.0.0.0".into(),
             port: 79,
+        }
+    }
+}
+
+/// A Prometheus-style `/metrics` endpoint (#98). Off by default.
+///
+/// Deliberately its **own listener**, not a route on `[web]`. Metrics are
+/// operational data, and gating them by peer address on the shared web port
+/// would be a trap: behind a same-host reverse proxy every request arrives from
+/// 127.0.0.1, so a loopback check silently stops checking anything. A separate
+/// port simply isn't proxied — and it also means metrics work with the browser
+/// frontend switched off entirely.
+///
+/// `host` defaults to loopback for the same reason: scraping is a local or
+/// private-network concern, and nothing here should face the internet without
+/// the operator deciding so.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Metrics {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "127.0.0.1".into(),
+            port: 9090,
         }
     }
 }
@@ -1050,6 +1081,19 @@ host = \"0.0.0.0\"
 # Port 79 is the finger convention but needs privilege to bind — run behind a
 # redirect, grant the capability, or pick a high port.
 port = 79
+
+[metrics]
+# A Prometheus-style /metrics endpoint for operational visibility (live
+# sessions, users, posts, mail, bans). Off by default.
+#
+# This is its own listener, not a route on the web frontend, and it binds
+# loopback by default. That is deliberate: gating metrics by peer address on the
+# shared web port would break silently behind a same-host reverse proxy, where
+# every request looks like it came from 127.0.0.1. A separate port isn't
+# proxied. Point Prometheus at it, or expose it yourself if you mean to.
+enabled = false
+host = \"127.0.0.1\"
+port = 9090
 
 [federation]
 # ActivityPub federation: syndicate boards across bbs-rs instances, and make

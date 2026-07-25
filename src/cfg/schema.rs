@@ -672,6 +672,33 @@ pub static SECTIONS: &[Section] = &[
         ],
     },
     Section {
+        name: "metrics",
+        title: "Metrics endpoint",
+        help: "A Prometheus-style /metrics endpoint on its own port, for operational visibility. Its own listener rather than a route on the web frontend, so a reverse proxy in front of the BBS can't reach it.",
+        restart_only: true,
+        kind: SectionKind::Fields,
+        fields: &[
+            Field {
+                key: "enabled",
+                label: "Enable metrics",
+                kind: FieldKind::Bool,
+                help: "Serve /metrics for Prometheus to scrape.",
+            },
+            Field {
+                key: "host",
+                label: "Bind address",
+                kind: FieldKind::Str,
+                help: "Loopback by default. Widen it only if your scraper runs on another host, and firewall it.",
+            },
+            Field {
+                key: "port",
+                label: "Port",
+                kind: FieldKind::Int { min: 1, max: 65535 },
+                help: "Where the metrics endpoint listens. 9090 by convention.",
+            },
+        ],
+    },
+    Section {
         name: "federation",
         title: "Federation (ActivityPub)",
         help: "Syndicate boards to other bbs-rs instances and make users user@host, followable from Mastodon. Requires the web frontend.",
