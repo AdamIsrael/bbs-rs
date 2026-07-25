@@ -411,6 +411,12 @@ pub static SECTIONS: &[Section] = &[
                 help: "Post reactions added. 0 disables.",
             },
             Field {
+                key: "max_attachments",
+                label: "Max attachments",
+                kind: FieldKind::Int { min: 0, max: 100 },
+                help: "File-area files that may be attached to one post or mail. 0 removes the cap.",
+            },
+            Field {
                 key: "daily_minutes",
                 label: "Daily time budget (min)",
                 kind: FieldKind::Int {

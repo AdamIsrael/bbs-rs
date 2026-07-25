@@ -27,13 +27,15 @@ use crate::db::models::{
 };
 use crate::error::AppError;
 use crate::services::archive::{self, ArchiveEntry, Preview};
+use crate::services::attachments::Attachment;
 use crate::services::boards::ThreadItem;
 use crate::services::presence::{OnlineUser, Presence};
 use crate::services::profiles::{self, Profile};
 use crate::services::search::{self, SearchHit};
 use crate::services::stats::{self, Stats};
 use crate::services::{
-    admin, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners, polls, reactions,
+    admin, attachments, audit, auth, blocks, boards, bulletins, files, keys, mail, oneliners,
+    polls, reactions,
 };
 use crate::ssh::pubkey;
 use crate::transport::{Event, Transport};
@@ -253,6 +255,20 @@ pub struct App {
     /// typed domain will be set to.
     fed_pending: Option<(&'static str, &'static str)>,
 
+    /// Files staged for the post/mail currently being composed (#95). Linked
+    /// after the row is inserted, since a join needs an id to point at.
+    pub pending_attachments: Vec<Attachment>,
+    /// The attach picker's candidate list (every file the user may read).
+    pub attach_pick: Vec<Attachment>,
+    pub attach_sel: usize,
+    /// Composer to return to from the picker — the draft is untouched while
+    /// the picker is up, so Esc lands back on it intact.
+    attach_back: Screen,
+    /// Attachments on the post/mail being read, already ACL-filtered.
+    pub current_attachments: Vec<Attachment>,
+    pub attach_view_sel: usize,
+    attach_view_back: Screen,
+
     /// True while the session is held on the change-password screen after a
     /// sysop reset (#76). The screen is a gate, not a stop on the way somewhere:
     /// nothing else is reachable until a new password is set.
@@ -277,6 +293,13 @@ fn password_form(forced: bool) -> Form {
     fields.push(Field::new("New password", true));
     fields.push(Field::new("Confirm new password", true));
     Form::new(fields)
+}
+
+/// What a batch of staged attachments is being linked to (#95).
+#[derive(Debug, Clone, Copy)]
+enum AttachTarget {
+    Message(i64),
+    Mail(i64),
 }
 
 /// Whether a menu target is available to `user` under the current config (#84).
@@ -536,6 +559,13 @@ impl App {
             fed_policy: Vec::new(),
             fed_sel: 0,
             fed_pending: None,
+            pending_attachments: Vec::new(),
+            attach_pick: Vec::new(),
+            attach_sel: 0,
+            attach_back: Screen::ComposePost,
+            current_attachments: Vec::new(),
+            attach_view_sel: 0,
+            attach_view_back: Screen::ReadMessage,
             force_password_change,
             form: if force_password_change {
                 password_form(true)
@@ -601,6 +631,8 @@ impl App {
             Screen::AddKey => self.on_add_key(key).await,
             Screen::Register => self.on_register(key).await,
             Screen::ChangePassword => self.on_change_password(key).await,
+            Screen::AttachPicker => self.on_attach_picker(key),
+            Screen::Attachments => self.on_attachments(key).await,
             Screen::Help => self.on_reader(key, Screen::MainMenu),
             Screen::AdminUsers => self.on_admin_users(key).await,
             Screen::AdminLogins => self.on_admin_logins(key).await,
@@ -2033,6 +2065,8 @@ impl App {
                             let mid = full.id;
                             self.current_message = Some(full);
                             self.load_current_reactions(mid).await;
+                            self.refresh_attachments().await;
+                            self.refresh_attachments().await;
                             self.screen = Screen::ReadMessage;
                         }
                         Err(e) => self.status = format!("Error: {e}"),
@@ -2083,6 +2117,7 @@ impl App {
             KeyCode::Char('r') => {
                 self.begin_compose_post(Some((m.id, reply_subject(&m.subject))));
             }
+            KeyCode::Char('a') => self.open_attachments(Screen::ReadMessage).await,
             KeyCode::Char('e') if self.can_edit(&m) => self.begin_edit_post(&m),
             KeyCode::Char('d') if self.can_delete(&m) => {
                 self.delete_post(m.id, &m.subject, true).await;
@@ -2265,6 +2300,7 @@ impl App {
             None => None,
         };
         self.form = Form::new(vec![subject]);
+        self.pending_attachments.clear();
         self.body = crate::app::textarea::TextArea::new();
         self.body_focused = false;
         self.screen = Screen::ComposePost;
@@ -2357,7 +2393,14 @@ impl App {
     async fn on_compose_post(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.edit_target = None; // cancel an in-progress edit too
+            self.pending_attachments.clear();
             self.screen = Screen::MessageList;
+            return;
+        }
+        // Checked before `edit_compose`, which would otherwise take the key as
+        // body text. A Ctrl chord for the same reason (#95).
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
+            self.begin_attach_picker().await;
             return;
         }
         if self.edit_compose(key) {
@@ -2396,14 +2439,19 @@ impl App {
         {
             Ok(id) => {
                 self.reply_parent = None;
+                let attached = self.link_pending(AttachTarget::Message(id)).await;
                 self.fanout_board_post(id).await;
                 self.reload_messages().await;
                 self.msg_sel = 0;
                 self.screen = Screen::MessageList;
-                self.status = if parent_id.is_some() {
-                    "Reply posted.".into()
+                let what = if parent_id.is_some() {
+                    "Reply"
                 } else {
-                    "Message posted.".into()
+                    "Message"
+                };
+                self.status = match attached {
+                    0 => format!("{what} posted."),
+                    n => format!("{what} posted with {n} attachment(s)."),
                 };
             }
             Err(AppError::BoardLocked) => self.status = "This board is locked.".into(),
@@ -2484,6 +2532,7 @@ impl App {
                     match mail::read_mail(&self.pool, m.id, self.user.id).await {
                         Ok(full) => {
                             self.current_mail = Some(full);
+                            self.refresh_mail_attachments().await;
                             self.screen = Screen::ReadMail;
                         }
                         Err(e) => self.status = format!("Error: {e}"),
@@ -2561,6 +2610,7 @@ impl App {
                             self.current_mail = Some(full);
                             // Returning from the reader goes to the mailbox; land
                             // there rather than back in a now-stale result list.
+                            self.refresh_mail_attachments().await;
                             self.screen = Screen::ReadMail;
                         }
                         Err(e) => self.status = format!("Error: {e}"),
@@ -2582,6 +2632,7 @@ impl App {
     async fn on_read_mail(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('r') => self.begin_reply_mail(),
+            KeyCode::Char('a') => self.open_attachments(Screen::ReadMail).await,
             KeyCode::Char('f') => self.begin_forward_mail(),
             KeyCode::Char('d') => {
                 if self.current_mail.is_some() {
@@ -2661,7 +2712,12 @@ impl App {
 
     async fn on_compose_mail(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
+            self.pending_attachments.clear();
             self.screen = Screen::Mailbox;
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
+            self.begin_attach_picker().await;
             return;
         }
         if self.edit_compose(key) {
@@ -2681,6 +2737,14 @@ impl App {
         // usernames can't contain one. Route it to the (opt-in, non-private)
         // remote-DM path instead of the local mailbox.
         if to.contains('@') {
+            // A remote DM leaves the BBS as an ActivityPub Note. Attachments
+            // live in ACL'd file areas with no public URL to hand a remote
+            // server, so refuse rather than silently drop them (#95).
+            if !self.pending_attachments.is_empty() {
+                self.status =
+                    "Attachments can't be sent to a remote address — remove them first.".into();
+                return;
+            }
             self.submit_remote_mail(&to, &subject, &body).await;
             return;
         }
@@ -2694,9 +2758,13 @@ impl App {
         )
         .await
         {
-            Ok(()) => {
+            Ok(id) => {
+                let attached = self.link_pending(AttachTarget::Mail(id)).await;
                 self.open_mailbox().await;
-                self.status = format!("Mail sent to {to}.");
+                self.status = match attached {
+                    0 => format!("Mail sent to {to}."),
+                    n => format!("Mail sent to {to} with {n} attachment(s)."),
+                };
             }
             Err(AppError::RecipientNotFound) => {
                 self.status = format!("No such user: {to}");
@@ -2760,7 +2828,7 @@ impl App {
         )
         .await
         {
-            Ok(()) => {
+            Ok(_) => {
                 self.screen = Screen::MainMenu;
                 self.status = "Feedback sent to the sysop.".into();
             }
@@ -3339,6 +3407,7 @@ impl App {
                 let mid = full.id;
                 self.current_message = Some(full);
                 self.load_current_reactions(mid).await;
+                self.refresh_attachments().await;
                 self.screen = Screen::ReadMessage;
             }
             Err(e) => {
@@ -3721,6 +3790,191 @@ impl App {
                 self.status = "That username is reserved — please choose another.".into()
             }
             Err(e) => self.status = format!("Could not register: {e}"),
+        }
+    }
+
+    // ---- Attachments (#95) -----------------------------------------------
+
+    /// Open the attach picker from a composer. The draft isn't touched — the
+    /// picker uses its own state — so Esc returns to it intact.
+    async fn begin_attach_picker(&mut self) {
+        if self.user.is_guest() {
+            self.status = "Guests cannot attach files.".into();
+            return;
+        }
+        match attachments::pickable(&self.pool, &self.user.role).await {
+            Ok(list) if list.is_empty() => {
+                self.status = "No files you can attach — upload one to a file area first.".into()
+            }
+            Ok(list) => {
+                self.attach_pick = list;
+                self.attach_sel = 0;
+                self.attach_back = self.screen;
+                self.screen = Screen::AttachPicker;
+            }
+            Err(e) => self.status = format!("Could not list files: {e}"),
+        }
+    }
+
+    fn on_attach_picker(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.attach_sel = self.attach_sel.saturating_sub(1),
+            KeyCode::Down => {
+                if self.attach_sel + 1 < self.attach_pick.len() {
+                    self.attach_sel += 1;
+                }
+            }
+            KeyCode::Enter => self.stage_selected_attachment(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.attach_back,
+            _ => {}
+        }
+    }
+
+    /// Stage the highlighted file for the draft. Toggles, so pressing Enter on
+    /// an already-staged file removes it — no separate unstage key to learn.
+    fn stage_selected_attachment(&mut self) {
+        let Some(pick) = self.attach_pick.get(self.attach_sel) else {
+            return;
+        };
+        if let Some(pos) = self
+            .pending_attachments
+            .iter()
+            .position(|a| a.file_id == pick.file_id)
+        {
+            self.pending_attachments.remove(pos);
+            self.status = format!("Removed {}.", pick.path());
+            return;
+        }
+        let max = self.config.limits.max_attachments as usize;
+        if max > 0 && self.pending_attachments.len() >= max {
+            self.status = format!("At most {max} attachment(s) per message.");
+            return;
+        }
+        self.pending_attachments.push(pick.clone());
+        self.status = format!("Attached {}.", pick.path());
+    }
+
+    /// Link everything staged to the row that was just inserted, and report
+    /// how many landed. Failures are surfaced but don't undo the post itself —
+    /// losing an attachment is better than losing the message.
+    async fn link_pending(&mut self, target: AttachTarget) -> usize {
+        let staged = std::mem::take(&mut self.pending_attachments);
+        let mut linked = 0;
+        for a in staged {
+            let result = match target {
+                AttachTarget::Message(id) => {
+                    attachments::attach_to_message(
+                        &self.pool,
+                        id,
+                        a.file_id,
+                        &self.user,
+                        &self.config.limits,
+                    )
+                    .await
+                }
+                AttachTarget::Mail(id) => {
+                    attachments::attach_to_mail(
+                        &self.pool,
+                        id,
+                        a.file_id,
+                        &self.user,
+                        &self.config.limits,
+                    )
+                    .await
+                }
+            };
+            match result {
+                Ok(()) => linked += 1,
+                Err(e) => tracing::warn!("attaching {}: {e}", a.path()),
+            }
+        }
+        linked
+    }
+
+    /// Load the open post's attachments so the reader can show a count and `a`
+    /// opens instantly. A failure just leaves the list empty — an attachment
+    /// hiccup shouldn't stop someone reading the post.
+    async fn refresh_attachments(&mut self) {
+        self.current_attachments = match self.current_message.as_ref() {
+            Some(m) => attachments::for_message(&self.pool, m.id, &self.user.role)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        self.attach_view_sel = 0;
+    }
+
+    /// The mail counterpart to [`refresh_attachments`].
+    async fn refresh_mail_attachments(&mut self) {
+        self.current_attachments = match self.current_mail.as_ref() {
+            Some(m) => attachments::for_mail(&self.pool, m.id, &self.user.role)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        self.attach_view_sel = 0;
+    }
+
+    /// Load and show the attachments of the post/mail being read. Already
+    /// ACL-filtered by the service, so anything listed here is openable.
+    async fn open_attachments(&mut self, back: Screen) {
+        // Loaded when the reader opened; re-read so a file deleted meanwhile
+        // drops out rather than 404ing on Enter.
+        match back {
+            Screen::ReadMail => self.refresh_mail_attachments().await,
+            _ => self.refresh_attachments().await,
+        }
+        if self.current_attachments.is_empty() {
+            self.status = "No attachments.".into();
+            return;
+        }
+        self.attach_view_back = back;
+        self.screen = Screen::Attachments;
+    }
+
+    async fn on_attachments(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.attach_view_sel = self.attach_view_sel.saturating_sub(1),
+            KeyCode::Down => {
+                if self.attach_view_sel + 1 < self.current_attachments.len() {
+                    self.attach_view_sel += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('v') => self.open_selected_attachment().await,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
+                self.screen = self.attach_view_back
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the highlighted attachment in the existing file viewer — the same
+    /// bounded decode the file browser uses, returning here rather than to the
+    /// file browser.
+    async fn open_selected_attachment(&mut self) {
+        let Some(a) = self.current_attachments.get(self.attach_view_sel).cloned() else {
+            return;
+        };
+        let path = self.config.files.storage_dir.join(&a.storage_path);
+        let filename = a.filename.clone();
+        let cfg = self.config.files.clone();
+        let result =
+            tokio::task::spawn_blocking(move || archive::inspect(&path, &filename, &cfg)).await;
+        match result {
+            Ok(Ok(Preview::Archive { entries, truncated })) => {
+                self.archive_entries = entries;
+                self.archive_sel = 0;
+                self.archive_truncated = truncated;
+                self.screen = Screen::ArchiveList;
+            }
+            Ok(Ok(Preview::Text { content, truncated })) => {
+                self.show_text(a.path(), content, truncated, Screen::Attachments);
+            }
+            Ok(Ok(Preview::Binary)) => {
+                self.status = format!("Binary file — fetch {} over SFTP to download it.", a.path());
+            }
+            Ok(Err(e)) => self.status = format!("Cannot open attachment: {e}"),
+            Err(_) => self.status = "Cannot open attachment.".into(),
         }
     }
 
