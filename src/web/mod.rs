@@ -41,6 +41,7 @@ use crate::transport::{Event, Transport};
 pub mod activitypub;
 pub mod ap_object;
 pub mod feeds;
+pub mod metrics;
 mod terminal;
 pub mod tls;
 use terminal::WebTerminalHandle;

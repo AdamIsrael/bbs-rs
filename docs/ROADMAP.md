@@ -114,7 +114,7 @@ variants.
 | **Moderation / audit log** | M | [#74](https://github.com/AdamIsrael/bbs-rs/issues/74) |
 | **Per-user daily time limits** | S | [#75](https://github.com/AdamIsrael/bbs-rs/issues/75) |
 | ~~**Password reset / account recovery**~~ | M | **Shipped** ([#76](https://github.com/AdamIsrael/bbs-rs/issues/76)): `bbsctl passwd <user>` resets a password and hands out a one-time temporary one; the next session is held on a change-password gate until a new password is chosen, and any session that predates the reset is ended. Users rotate their own password with `p` on their profile. **TOTP 2FA** was split out as its own follow-on. |
-| **Prometheus / metrics endpoint** | S | [#98](https://github.com/AdamIsrael/bbs-rs/issues/98) |
+| ~~**Prometheus / metrics endpoint**~~ | S | **Shipped** ([#98](https://github.com/AdamIsrael/bbs-rs/issues/98)): `[metrics]` serves a hand-rolled Prometheus exposition on its **own** loopback listener (default `127.0.0.1:9090`), not a route on `[web]` — a shared-port peer check would silently stop checking behind a same-host reverse proxy. |
 | **Sysop session monitor (spy)** — privacy-sensitive; needs a consent policy | M | [#99](https://github.com/AdamIsrael/bbs-rs/issues/99) |
 | ~~**HTTPS/WSS for the web frontend**~~ | S | **Shipped** ([#54](https://github.com/AdamIsrael/bbs-rs/issues/54)): native TLS on by default when `[web]` is enabled — auto self-signed cert out of the box, operator-provided `tls_cert`/`tls_key`, or automatic Let's Encrypt via ACME (TLS-ALPN-01). The page already selects `wss://` from its origin. |
 

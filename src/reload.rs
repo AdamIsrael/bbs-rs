@@ -123,6 +123,12 @@ fn warn_restart_only(old: &Settings, new: &Settings) {
     if old.finger != new.finger {
         changed.push("[finger]");
     }
+    // Only the bind address is startup-bound: the metrics handler re-reads
+    // `enabled` per request, so toggling it off really does take effect on
+    // reload and shouldn't produce a "restart required" warning.
+    if old.metrics.host != new.metrics.host || old.metrics.port != new.metrics.port {
+        changed.push("[metrics]");
+    }
     if old.federation != new.federation {
         changed.push("[federation]");
     }

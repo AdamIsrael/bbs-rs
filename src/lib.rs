@@ -147,6 +147,23 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
         });
     }
 
+    // The metrics endpoint (#98) — its own listener, loopback by default, so it
+    // can't be reached through a reverse proxy fronting the web port. Bound
+    // eagerly like the others so a port conflict fails startup loudly.
+    if boot.metrics.enabled {
+        let addr = format!("{}:{}", boot.metrics.host, boot.metrics.port);
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .with_context(|| format!("binding metrics endpoint to {addr} — is the port in use?"))?;
+        tracing::info!("metrics endpoint listening on http://{addr}/metrics");
+        let state = web::metrics::MetricsState::new(pool.clone(), presence.clone(), config.clone());
+        tokio::spawn(async move {
+            if let Err(e) = web::metrics::serve(listener, state).await {
+                tracing::error!("metrics endpoint stopped: {e}");
+            }
+        });
+    }
+
     tracing::info!(
         "{} listening on {}:{}",
         boot.bbs.name,

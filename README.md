@@ -267,6 +267,18 @@ resolved in this order:
 Set `tls = false` for plain HTTP (e.g. when a **reverse proxy** such as Caddy or nginx+certbot already
 terminates TLS in front of bbs-rs and forwards to the plain-HTTP port).
 
+**Metrics.** Set `[metrics] enabled = true` for a Prometheus-style `/metrics` endpoint exposing live
+sessions, chat participants, user/post/mail/file counts, login successes and failures (all-time and over
+24h), and active bans. Scrape `http://127.0.0.1:9090/metrics`; `/healthz` on the same port answers even
+while metrics are disabled, so "process up, metrics off" is distinguishable from "process down".
+
+It runs on its **own listener**, bound to loopback by default — deliberately *not* a route on the web
+frontend. Gating metrics by peer address on the shared web port would break silently behind a same-host
+reverse proxy, where every request arrives from `127.0.0.1` and the check stops checking anything; a
+separate port simply isn't proxied. It also means metrics work with the browser frontend switched off.
+Widen `host` only if your scraper lives on another machine, and firewall it. `enabled` takes effect on
+config reload; `host`/`port` are bound at startup and need a restart.
+
 **RSS / Atom feeds**: the web frontend serves feeds of **guest-readable boards** so anyone can follow a
 board from an ordinary feed reader — no account, no terminal. `GET /feed/<board>` returns Atom (the
 default) or RSS 2.0 with `?format=rss`; `GET /feed` is a small HTML index of the available feeds. Only
