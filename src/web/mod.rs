@@ -26,7 +26,6 @@ use futures_util::{SinkExt, StreamExt};
 use ratatui::Terminal;
 use ratatui::TerminalOptions;
 use ratatui::Viewport;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc;
@@ -358,7 +357,8 @@ async fn handle_socket(socket: WebSocket, state: WebState, peer: SocketAddr) {
     let (cols, rows) = (config.network.default_cols, config.network.default_rows);
     // A clone of the output channel bridges door output straight to the client.
     let raw_out = out_tx.clone();
-    let backend = CrosstermBackend::new(WebTerminalHandle::new(out_tx));
+    let backend =
+        crate::transport::backend::RemoteBackend::new(WebTerminalHandle::new(out_tx), cols, rows);
     let terminal = match Terminal::with_options(
         backend,
         TerminalOptions {

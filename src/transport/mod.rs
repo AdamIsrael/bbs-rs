@@ -11,6 +11,8 @@
 //! `app` is shared between them. [`Transport`] is the one thing the app knows
 //! about *how* a session arrived — enough to tell a user the other way in.
 
+pub mod backend;
+
 use crossterm::event::KeyEvent;
 
 /// How a session reached the BBS.
