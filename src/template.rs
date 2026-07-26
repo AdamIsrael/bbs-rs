@@ -131,6 +131,43 @@ enum Stop {
 /// Render `template` against `ctx`. Never panics or errors; malformed input is
 /// preserved verbatim. Fast-pathed to a borrow-free copy when there's no tag.
 pub fn render(template: &str, ctx: &Context) -> String {
+    render_with(template, ctx, None)
+}
+
+/// Render for insertion into an HTML page (#201).
+///
+/// The template's own text passes through **untouched** — the operator wrote
+/// that markup deliberately and gets to mean it. Every `{{variable}}`
+/// expansion, however, is HTML-escaped.
+///
+/// That asymmetry is the whole point, and it's a safety property rather than a
+/// nicety. The engine was built for terminal output, where nothing is escaped;
+/// dropping its output into HTML unescaped would make any variable carrying
+/// non-operator data an injection vector. Escaping at substitution time means
+/// that stays true no matter which variables the context gains later — nobody
+/// has to remember the invariant.
+pub fn render_html(template: &str, ctx: &Context) -> String {
+    render_with(template, ctx, Some(html_escape))
+}
+
+/// Escape the five characters that change meaning in HTML text or a quoted
+/// attribute value, so a substitution can't open a tag or close an attribute.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn render_with(template: &str, ctx: &Context, escape: Option<fn(&str) -> String>) -> String {
     if !template.contains("{{") {
         return template.to_string();
     }
@@ -139,7 +176,7 @@ pub fn render(template: &str, ctx: &Context) -> String {
     let mut pos = 0;
     // Loop so a stray terminator/else at the top level is skipped, not fatal.
     while pos < tokens.len() {
-        if exec(&tokens, &mut pos, ctx, &mut out, true) == Stop::Eof {
+        if exec(&tokens, &mut pos, ctx, &mut out, true, escape) == Stop::Eof {
             break;
         }
     }
@@ -199,7 +236,14 @@ fn parse_tag(inner: &str) -> Token<'_> {
 /// until a terminator (`else`/`/if`/`/unless`) or end of input. Returns what
 /// stopped it. Runs even when `emit` is false so a skipped branch still
 /// consumes its matching terminators (keeping nesting balanced).
-fn exec(tokens: &[Token], pos: &mut usize, ctx: &Context, out: &mut String, emit: bool) -> Stop {
+fn exec(
+    tokens: &[Token],
+    pos: &mut usize,
+    ctx: &Context,
+    out: &mut String,
+    emit: bool,
+    escape: Option<fn(&str) -> String>,
+) -> Stop {
     while *pos < tokens.len() {
         let token = &tokens[*pos];
         *pos += 1;
@@ -211,7 +255,11 @@ fn exec(tokens: &[Token], pos: &mut usize, ctx: &Context, out: &mut String, emit
             }
             Token::Var(name) => {
                 if emit && let Some(v) = ctx.get(name) {
-                    out.push_str(&v.display());
+                    let text = v.display();
+                    match escape {
+                        Some(esc) => out.push_str(&esc(&text)),
+                        None => out.push_str(&text),
+                    }
                 }
             }
             Token::If(name) | Token::Unless(name) => {
@@ -220,9 +268,9 @@ fn exec(tokens: &[Token], pos: &mut usize, ctx: &Context, out: &mut String, emit
                     cond = !cond;
                 }
                 // First (taken-if-true) branch, then an optional else branch.
-                let stop = exec(tokens, pos, ctx, out, emit && cond);
+                let stop = exec(tokens, pos, ctx, out, emit && cond, escape);
                 if stop == Stop::Else {
-                    exec(tokens, pos, ctx, out, emit && !cond);
+                    exec(tokens, pos, ctx, out, emit && !cond, escape);
                 }
             }
             Token::Else => return Stop::Else,

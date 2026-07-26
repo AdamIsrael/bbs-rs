@@ -245,6 +245,14 @@ pub struct Web {
     /// Use the Let's Encrypt staging environment (untrusted certs, higher rate
     /// limits) for testing the ACME flow.
     pub acme_staging: bool,
+    /// HTML fragment rendered above the browser terminal (#201). A path to a
+    /// file, re-read per request so edits apply without a restart. Blank = no
+    /// header. The file's own markup is emitted verbatim — you wrote it — but
+    /// `{{variable}}` substitutions are HTML-escaped.
+    pub header_file: String,
+    /// HTML fragment rendered below the browser terminal (#201). See
+    /// `header_file`.
+    pub footer_file: String,
     /// Serve RSS/Atom feeds of guest-readable boards at `/feed/<board>` (#100).
     /// On by default. Only boards whose `min_read_role` is `guest` are exposed —
     /// a restricted board never appears in a feed, however this is set.
@@ -265,6 +273,8 @@ impl Default for Web {
             acme_email: String::new(),
             acme_cache: "acme-cache".into(),
             acme_staging: false,
+            header_file: String::new(),
+            footer_file: String::new(),
             feeds: true,
         }
     }
@@ -1067,6 +1077,19 @@ tls = true
 # acme_email   = \"sysop@example.com\"
 # acme_cache   = \"acme-cache\"
 # acme_staging = false   # true = Let's Encrypt staging (untrusted, for testing)
+# Custom chrome for the browser frontend: paths to HTML fragments rendered
+# above and below the terminal — a link to your source, house rules, contact.
+# Blank (the default) means no header/footer and a page identical to before.
+#
+# Each file is re-read per request, so an edit shows up on the next page load;
+# no restart, no config reload. The markup is emitted verbatim — it is yours —
+# but {{bbs_name}}-style substitutions are HTML-escaped, so a value can never
+# inject tags. The browser tab title comes from [bbs] name.
+#
+# NOTE: this is the page where users type their password. Anything you put here
+# — including a third-party script or font — runs with access to that form.
+# header_file = \"web/header.html\"
+# footer_file = \"web/footer.html\"
 # Serve RSS/Atom feeds of guest-readable boards at /feed/<board> (and a /feed
 # index). On by default. Only boards readable by guests are ever exposed — a
 # restricted board never appears in a feed. Set false to turn feeds off entirely.

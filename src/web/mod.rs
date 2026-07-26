@@ -271,8 +271,58 @@ const ASSET_XTERM_JS: &str = include_str!("static/xterm.js");
 const ASSET_XTERM_CSS: &str = include_str!("static/xterm.css");
 const ASSET_ADDON_FIT: &str = include_str!("static/addon-fit.js");
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+/// The browser terminal page, with the operator's chrome substituted in (#201).
+///
+/// Reads the live config (and the header/footer files) per request, so an edit
+/// shows up on the next page load without a restart. With nothing configured
+/// the placeholders collapse to empty and the page is byte-identical to the
+/// static asset apart from the title.
+async fn index(State(state): State<WebState>) -> Html<String> {
+    let config = state.config.load();
+    let ctx = crate::template::Context::new()
+        .set("bbs_name", config.bbs.name.clone())
+        .set("tagline", config.bbs.tagline.clone())
+        .set("sysop", config.bbs.sysop.clone());
+
+    // The tab title is the board's name — every board shared "bbs-rs" before.
+    // Escaped like any other substitution.
+    let title = crate::template::render_html("{{bbs_name}}", &ctx);
+    let header = chrome(&config.web.header_file, &ctx, "header");
+    let footer = chrome(&config.web.footer_file, &ctx, "footer");
+
+    Html(
+        INDEX_HTML
+            .replace("__BBS_TITLE__", &title)
+            .replace("<!--__BBS_HEADER__-->", &header)
+            .replace("<!--__BBS_FOOTER__-->", &footer),
+    )
+}
+
+/// Read and render one chrome fragment. A blank path means "none"; an
+/// unreadable one logs and renders nothing, because a missing decoration must
+/// never take the login page down with it.
+fn chrome(path: &str, ctx: &crate::template::Context, which: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return String::new();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(body) => {
+            let id = if which == "header" {
+                "site-header"
+            } else {
+                "site-footer"
+            };
+            format!(
+                "<{which} id=\"{id}\">{}</{which}>",
+                crate::template::render_html(&body, ctx)
+            )
+        }
+        Err(e) => {
+            tracing::warn!("web {which}: cannot read {path} ({e}); rendering without it");
+            String::new()
+        }
+    }
 }
 
 async fn asset(body: &'static str, content_type: &'static str) -> impl IntoResponse {

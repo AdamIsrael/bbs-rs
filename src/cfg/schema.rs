@@ -664,6 +664,18 @@ pub static SECTIONS: &[Section] = &[
                 help: "Issue untrusted test certificates. Use this first — staging has far higher rate limits.",
             },
             Field {
+                key: "header_file",
+                label: "Header HTML file",
+                kind: FieldKind::Path,
+                help: "HTML fragment shown above the browser terminal — a repo link, house rules. Blank for none. Re-read per request.",
+            },
+            Field {
+                key: "footer_file",
+                label: "Footer HTML file",
+                kind: FieldKind::Path,
+                help: "HTML fragment shown below the browser terminal. Remember this is the page where users type their password.",
+            },
+            Field {
                 key: "feeds",
                 label: "RSS/Atom feeds",
                 kind: FieldKind::Bool,
