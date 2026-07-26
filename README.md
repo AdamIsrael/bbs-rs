@@ -558,6 +558,12 @@ even the author's own posts — moderation is an admin's job once a board is clo
 full-text search in step automatically. (Admins delete via the moderation path above and don't edit
 others' text.)
 
+## Running it as a service
+
+To keep a board up across reboots, see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — a complete systemd
+unit file, sandboxing that doesn't break federation or doors, `SIGHUP` reload, a backup timer, and the
+working-directory trap that silently gives you a second database and a *different SSH host key*.
+
 ## Upgrading & migrations
 
 Migrations are compiled into the binary and run automatically when the server starts. To apply them
