@@ -72,7 +72,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
   reuses the whole TUI: same screens, same auth, same who's-online. xterm.js is vendored (self-contained).
 - **Configurable** — a `bbs.toml` file customizes branding, network/SSH tuning, and feature toggles,
   with **hot reload**: edit the file (or send `SIGHUP`) and new sessions pick it up without a restart.
-- **Themes & ANSI art** — pick a built-in color preset (or override individual colors), and drop in a
+- **Themes & ANSI art** — pick a built-in color preset (or override individual colors) — the **browser
+  frontend follows it too**, so the login form, links and custom header/footer match the board rather
+  than shipping fixed colors. Drop in a
   custom ANSI/text welcome screen and per-screen art (CP437 `.ans` or UTF-8 both work). Art can be
   **context-conditional** (`[[art.variants]]`): swap a screen's file per session by a `when` flag —
   `web`/`ssh`, `guest`/`admin`, or time of day — with graceful fallback to the default.
@@ -280,6 +282,10 @@ reverse proxy, where every request arrives from `127.0.0.1` and the check stops 
 separate port simply isn't proxied. It also means metrics work with the browser frontend switched off.
 Widen `host` only if your scraper lives on another machine, and firewall it. `enabled` takes effect on
 config reload; `host`/`port` are bound at startup and need a restart.
+
+The chrome also **follows `[theme]`** — the login button, links, error text and the header/footer bars
+are derived from your theme's colors, mapped through the same palette xterm.js uses so the page and the
+terminal agree on what "cyan" means. The terminal itself stays black, which is what the TUI assumes.
 
 **Custom chrome.** Point `[web] header_file` / `footer_file` at HTML fragments to put your own header and
 footer around the terminal — a link to your source, house rules, contact details. Each file is re-read

@@ -159,9 +159,119 @@ pub fn parse_color(s: &str) -> Option<Color> {
     Some(c)
 }
 
+/// Render a [`Color`] as a CSS hex string, for the browser frontend (#203).
+///
+/// Named and 256-indexed colours are mapped through **xterm.js's default
+/// palette**, deliberately: the same theme drives the TUI inside that terminal,
+/// so if we invented our own hexes the page chrome and the terminal content
+/// would disagree about what "cyan" is on the very same screen.
+///
+/// [`Color::Reset`] has no hex — it means "whatever the terminal's default is"
+/// — so it yields `None` and the caller keeps its built-in value.
+pub fn css_color(c: Color) -> Option<String> {
+    /// xterm.js's default 16 ANSI colours, in palette order.
+    const ANSI: [&str; 16] = [
+        "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+        "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+    ];
+    let idx = match c {
+        Color::Rgb(r, g, b) => return Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        Color::Reset => return None,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(i) => return Some(indexed_hex(i)),
+    };
+    Some(ANSI[idx].to_string())
+}
+
+/// The xterm 256-colour cube: 0–15 are the ANSI set, 16–231 a 6×6×6 RGB cube,
+/// 232–255 a 24-step grey ramp.
+fn indexed_hex(i: u8) -> String {
+    match i {
+        0..=15 => css_color(match i {
+            0 => Color::Black,
+            1 => Color::Red,
+            2 => Color::Green,
+            3 => Color::Yellow,
+            4 => Color::Blue,
+            5 => Color::Magenta,
+            6 => Color::Cyan,
+            7 => Color::Gray,
+            8 => Color::DarkGray,
+            9 => Color::LightRed,
+            10 => Color::LightGreen,
+            11 => Color::LightYellow,
+            12 => Color::LightBlue,
+            13 => Color::LightMagenta,
+            14 => Color::LightCyan,
+            _ => Color::White,
+        })
+        .unwrap_or_else(|| "#000000".into()),
+        16..=231 => {
+            // Each axis steps 0, 95, 135, 175, 215, 255 — not evenly spaced.
+            const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+            let n = i - 16;
+            let (r, g, b) = (n / 36, (n % 36) / 6, n % 6);
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                STEPS[r as usize], STEPS[g as usize], STEPS[b as usize]
+            )
+        }
+        232..=255 => {
+            let v = 8 + (i - 232) * 10;
+            format!("#{v:02x}{v:02x}{v:02x}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The browser chrome and the terminal content share one theme on one
+    /// screen, so a colour must mean the same thing in both (#203).
+    #[test]
+    fn colors_map_to_the_xterm_palette() {
+        assert_eq!(css_color(Color::Cyan).as_deref(), Some("#11a8cd"));
+        assert_eq!(css_color(Color::Black).as_deref(), Some("#000000"));
+        assert_eq!(css_color(Color::LightGreen).as_deref(), Some("#23d18b"));
+        // An operator's own hex passes through exactly.
+        assert_eq!(
+            css_color(Color::Rgb(255, 176, 0)).as_deref(),
+            Some("#ffb000")
+        );
+        // Reset means "the terminal's default" — there is no hex for that, so
+        // the caller keeps its built-in.
+        assert_eq!(css_color(Color::Reset), None);
+    }
+
+    #[test]
+    fn indexed_colors_follow_the_256_cube() {
+        // 0–15 alias the ANSI set.
+        assert_eq!(css_color(Color::Indexed(6)).as_deref(), Some("#11a8cd"));
+        // The cube's first entry is black, its last white.
+        assert_eq!(css_color(Color::Indexed(16)).as_deref(), Some("#000000"));
+        assert_eq!(css_color(Color::Indexed(231)).as_deref(), Some("#ffffff"));
+        // A mid-cube value uses the uneven step table, not a linear ramp.
+        assert_eq!(css_color(Color::Indexed(46)).as_deref(), Some("#00ff00"));
+        // The grey ramp.
+        assert_eq!(css_color(Color::Indexed(232)).as_deref(), Some("#080808"));
+        assert_eq!(css_color(Color::Indexed(255)).as_deref(), Some("#eeeeee"));
+    }
 
     #[test]
     fn default_is_classic() {
