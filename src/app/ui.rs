@@ -180,6 +180,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 app.can_edit_current_file(),
                 app.can_edit_current_profile(),
                 app.can_block_current_profile(),
+                app.can_toggle_finger(),
             ),
             Style::default().fg(app.theme.dim),
         )
@@ -1068,8 +1069,9 @@ fn render_profile(f: &mut Frame, area: Rect, app: &App) {
         )));
         lines.push(Line::from(format!("-- {}", p.signature)));
     }
-    // On your own profile, show (and let you toggle) finger visibility (#77).
-    if p.user_id == app.user.id {
+    // On your own profile, show (and let you toggle) finger visibility (#77) —
+    // but only when the finger service is actually running (#186).
+    if app.can_toggle_finger() {
         lines.push(Line::from(""));
         lines.push(field_line(
             "Finger",
@@ -1687,9 +1689,15 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
   • File Areas     : browse files, read text + peek inside archives; transfer over SFTP
                      (attach one to a post or mail with ^A while composing)
   • SSH Keys       : register public keys to log in over SSH without a password
-  • Your Profile   : press p to change your password (e edit, i ignored, f finger)
 ",
     );
+    // The profile line names `f` only when the finger service is running, so
+    // help never advertises a key that does nothing (#186).
+    text.push_str(if app.config.finger.enabled {
+        "  • Your Profile   : press p to change your password (e edit, i ignored, f finger)\n"
+    } else {
+        "  • Your Profile   : press p to change your password (e edit, i ignored)\n"
+    });
     // How you get back in after registering depends on how you got here.
     text.push_str(match app.transport {
         Transport::Ssh => {
@@ -1793,6 +1801,7 @@ fn hints(
     can_edit_file: bool,
     can_edit_profile: bool,
     can_block: bool,
+    can_finger: bool,
 ) -> String {
     let base = match screen {
         Screen::MainMenu => " ↑/↓ or [hotkey] · Enter select · Esc quit ",
@@ -1854,8 +1863,10 @@ fn hints(
         Screen::Chat => " type a message · Enter send · Esc leave the room ",
         Screen::ComposePage => " type your message · Enter send · Esc cancel ",
         Screen::Profile => {
-            if can_edit_profile {
+            if can_edit_profile && can_finger {
                 " e edit · i ignored · f finger · p password · Esc back "
+            } else if can_edit_profile {
+                " e edit · i ignored · p password · Esc back "
             } else if can_block {
                 " b block/unblock · Esc back "
             } else {
