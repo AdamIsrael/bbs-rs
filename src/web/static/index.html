@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>bbs-rs</title>
+<title>__BBS_TITLE__</title>
 <link rel="stylesheet" href="/xterm.css" />
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #ccc;
@@ -20,11 +20,24 @@
   #login button { margin-top: 16px; width: 100%; padding: 8px; background: #1e5f74;
     border: 0; color: #fff; border-radius: 4px; cursor: pointer; font: inherit; }
   #login .err { color: #d66; font-size: 12px; min-height: 16px; margin-top: 10px; }
-  #wrap { position: absolute; inset: 0; padding: 6px; box-sizing: border-box; display: none; }
+  /* Operator chrome (#201). Both overlays inset by the measured bar heights,
+     which are 0 unless a header/footer is configured — so an unconfigured
+     board lays out exactly as it did before. */
+  :root { --chrome-top: 0px; --chrome-bottom: 0px; }
+  #login { inset: var(--chrome-top) 0 var(--chrome-bottom) 0; }
+  #wrap { position: absolute; inset: var(--chrome-top) 0 var(--chrome-bottom) 0;
+    padding: 6px; box-sizing: border-box; display: none; }
   #terminal { width: 100%; height: 100%; }
+  #site-header, #site-footer { position: fixed; left: 0; right: 0; z-index: 20;
+    background: #0a0a0a; color: #888; font-size: 12px; padding: 6px 10px;
+    box-sizing: border-box; }
+  #site-header { top: 0; border-bottom: 1px solid #222; }
+  #site-footer { bottom: 0; border-top: 1px solid #222; }
+  #site-header a, #site-footer a { color: #6aa9c0; }
 </style>
 </head>
 <body>
+<!--__BBS_HEADER__-->
   <div id="login">
     <form id="loginForm" autocomplete="off">
       <h1>bbs-rs</h1>
@@ -38,6 +51,7 @@
     </form>
   </div>
   <div id="wrap"><div id="terminal"></div></div>
+<!--__BBS_FOOTER__-->
 
   <script src="/xterm.js"></script>
   <script src="/addon-fit.js"></script>
@@ -48,6 +62,19 @@
 
     const enc = new TextEncoder();
     let ws = null;
+
+    // Reserve room for operator chrome (#201). The bars are fixed-position, so
+    // without this the terminal would render underneath them. Measured rather
+    // than assumed, since the header/footer are arbitrary operator HTML of
+    // unknown height — and re-measured on resize, because they reflow.
+    function measureChrome() {
+      const h = document.getElementById('site-header');
+      const f = document.getElementById('site-footer');
+      const root = document.documentElement.style;
+      root.setProperty('--chrome-top', (h ? h.offsetHeight : 0) + 'px');
+      root.setProperty('--chrome-bottom', (f ? f.offsetHeight : 0) + 'px');
+    }
+    measureChrome();
 
     function sendResize() {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -95,6 +122,7 @@
     });
 
     window.addEventListener('resize', () => {
+      measureChrome();
       if (document.getElementById('wrap').style.display === 'block') {
         fit.fit();
         sendResize();

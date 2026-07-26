@@ -281,6 +281,19 @@ separate port simply isn't proxied. It also means metrics work with the browser 
 Widen `host` only if your scraper lives on another machine, and firewall it. `enabled` takes effect on
 config reload; `host`/`port` are bound at startup and need a restart.
 
+**Custom chrome.** Point `[web] header_file` / `footer_file` at HTML fragments to put your own header and
+footer around the terminal — a link to your source, house rules, contact details. Each file is re-read
+per request, so an edit appears on the next page load without a restart. Blank (the default) renders the
+page exactly as before. The browser tab title comes from `[bbs] name`.
+
+Your markup is emitted **verbatim** — you wrote it deliberately. But `{{bbs_name}}`-style substitutions
+(the same [template syntax](#configuration) the tagline and MOTD use) are **HTML-escaped**, so a
+configured value can never inject tags.
+
+> **This is the page where users type their password.** Anything you put in the chrome — including a
+> third-party analytics snippet or a CDN font — loads with access to that form. Prefer self-hosted,
+> self-contained markup.
+
 **RSS / Atom feeds**: the web frontend serves feeds of **guest-readable boards** so anyone can follow a
 board from an ordinary feed reader — no account, no terminal. `GET /feed/<board>` returns Atom (the
 default) or RSS 2.0 with `?format=rss`; `GET /feed` is a small HTML index of the available feeds. Only
