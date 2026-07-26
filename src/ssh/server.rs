@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use anyhow::Context;
 use arc_swap::ArcSwap;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -350,13 +351,31 @@ fn load_or_generate_host_key(path: &Path) -> anyhow::Result<russh::keys::Private
     use russh::keys::ssh_key::private::Ed25519Keypair;
 
     if path.exists() {
-        Ok(russh::keys::load_secret_key(path, None)?)
+        russh::keys::load_secret_key(path, None).with_context(|| {
+            format!(
+                "reading {} — is it readable by the user the server runs as?",
+                path.display()
+            )
+        })
     } else {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).map_err(|e| anyhow::anyhow!("getrandom failed: {e}"))?;
         let key = russh::keys::PrivateKey::from(Ed25519Keypair::from_seed(&seed));
-        key.write_openssh_file(path, LineEnding::LF)?;
-        tracing::info!("generated new SSH host key at {}", path.display());
+        key.write_openssh_file(path, LineEnding::LF)
+            .with_context(|| {
+                format!(
+                    "writing a new host key to {} — is the directory writable?",
+                    path.display()
+                )
+            })?;
+        // WARN, not INFO: on a board that already has users this is a *new*
+        // SSH identity, and every returning client will refuse to connect
+        // until its known_hosts entry is cleared. Only routine on first run.
+        tracing::warn!(
+            "generated a new SSH host key at {} — if this board had users before, \
+             their clients will report the host key as changed",
+            path.display()
+        );
         Ok(key)
     }
 }
@@ -556,9 +575,13 @@ fn advertised_methods(config: &Settings) -> russh::MethodSet {
     methods
 }
 
-/// Bind and serve the SSH BBS until the process is stopped. `presence` and
-/// `next_id` are shared with the (optional) web frontend.
+/// Serve the SSH BBS on an already-bound listener until the process is stopped.
+/// `presence` and `next_id` are shared with the (optional) web frontend.
+///
+/// The caller binds, so a port conflict fails startup before anything else runs
+/// and the "listening" log can only be printed once it's true (#196).
 pub async fn run(
+    listener: tokio::net::TcpListener,
     config: Arc<ArcSwap<Settings>>,
     pool: SqlitePool,
     presence: Presence,
@@ -570,7 +593,8 @@ pub async fn run(
     // in `new_client`, so they hot-reload.
     let boot = config.load_full();
     let net = &boot.network;
-    let key = load_or_generate_host_key(&net.host_key)?;
+    let key = load_or_generate_host_key(&net.host_key)
+        .with_context(|| format!("SSH host key {}", net.host_key.display()))?;
 
     tokio::spawn(ban_sweeper(pool.clone(), presence.clone(), config.clone()));
 
@@ -584,20 +608,90 @@ pub async fn run(
         ..Default::default()
     };
 
-    let addr = (net.host.clone(), net.port);
     let mut server = BbsServer {
         pool,
         presence,
         config,
         next_id,
     };
-    server.run_on_address(Arc::new(ssh_config), addr).await?;
+
+    // Announce only now: the port is bound, the host key loaded, the server
+    // config built. Everything that could fail has. `local_addr` is ground
+    // truth rather than the configured value, so a wildcard bind or an
+    // ephemeral port reports what a client would actually reach (#196).
+    match listener.local_addr() {
+        Ok(bound) => tracing::info!("{} listening on {bound}", boot.bbs.name),
+        Err(e) => tracing::info!(
+            "{} listening on {}:{} (could not read the bound address: {e})",
+            boot.bbs.name,
+            net.host,
+            net.port
+        ),
+    }
+
+    // `run_on_socket` rather than `run_on_address`: the listener is already
+    // bound by the caller (#196).
+    server
+        .run_on_socket(Arc::new(ssh_config), &listener)
+        .await
+        .context("the SSH server stopped")?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Regression guard for #195.** A host-key failure used to surface as a
+    /// bare `Permission denied (os error 13)` naming nothing, right after three
+    /// "listening" lines — so it read like a port-privilege problem when it was
+    /// a file-permission one.
+    ///
+    /// Uses an unparseable key rather than an unreadable one: `chmod 000` is a
+    /// no-op for root, and CI shouldn't depend on which user it runs as.
+    #[test]
+    fn host_key_read_error_names_the_file() {
+        let dir = std::env::temp_dir().join(format!("bbs_hostkey_read_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host_key");
+        std::fs::write(&path, "this is not an openssh private key").unwrap();
+
+        let err = load_or_generate_host_key(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("host_key"),
+            "the error must name the file it couldn't use: {msg}"
+        );
+        assert!(
+            msg.contains("readable"),
+            "and hint at the usual cause: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The write half of #195: generating a key into a directory that isn't
+    /// writable must say *which* path and why.
+    #[test]
+    fn host_key_write_error_names_the_path() {
+        // A path under a directory that doesn't exist — deterministic, and
+        // independent of the test user's privileges.
+        let path = std::env::temp_dir()
+            .join(format!("bbs_hostkey_missing_{}", std::process::id()))
+            .join("nested")
+            .join("host_key");
+        assert!(!path.exists());
+
+        let err = load_or_generate_host_key(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("host_key"),
+            "the error must name the path: {msg}"
+        );
+        assert!(
+            msg.contains("writable"),
+            "and hint at the usual cause: {msg}"
+        );
+    }
 
     #[test]
     fn never_advertises_methods_we_dont_implement() {

@@ -164,14 +164,23 @@ pub async fn serve(cli: Cli, settings: Settings) -> anyhow::Result<()> {
         });
     }
 
-    tracing::info!(
-        "{} listening on {}:{}",
-        boot.bbs.name,
-        boot.network.host,
-        boot.network.port
-    );
-
-    ssh::run(config, pool, presence, next_id).await
+    // Bind SSH before announcing it. The log used to be printed here and the
+    // bind happened later inside `ssh::run`, so a failure between the two —
+    // an unreadable host key, a port already held — left the journal claiming
+    // the board was listening while clients got connection refused (#196).
+    let addr = format!("{}:{}", boot.network.host, boot.network.port);
+    let ssh_listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| {
+            format!(
+                "binding the SSH server to {addr} — is the port already in use, \
+                 or below 1024 without CAP_NET_BIND_SERVICE?"
+            )
+        })?;
+    // The "listening" log lives in `ssh::run`, after the host key and server
+    // config are in hand — so it is printed only once nothing else can fail
+    // before we start accepting.
+    ssh::run(ssh_listener, config, pool, presence, next_id).await
 }
 
 /// Apply pending migrations and report, without starting the server. Backs
