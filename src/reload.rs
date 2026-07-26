@@ -45,12 +45,14 @@ fn spawn_file_watcher(cli: Cli, config: Arc<ArcSwap<Settings>>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
-            // Only react to events that mention our config file name.
+            // The event must name our config file *and* be a kind that means
+            // the contents changed — see `changes_contents` for why the second
+            // half matters (#193).
             let hit = want
                 .as_ref()
                 .map(|w| ev.paths.iter().any(|p| p.file_name() == Some(w)))
                 .unwrap_or(false);
-            if hit {
+            if hit && changes_contents(&ev.kind) {
                 let _ = tx.send(());
             }
         }
@@ -76,6 +78,37 @@ fn spawn_file_watcher(cli: Cli, config: Arc<ArcSwap<Settings>>) {
             reload(&cli, &config);
         }
     });
+}
+
+/// Whether a watcher event means the config file's *contents* changed.
+///
+/// This is load-bearing, not tidiness. `notify`'s inotify backend subscribes to
+/// `IN_OPEN`, so **merely reading the file produces an event** — and reloading
+/// reads the file. Reacting to opens made the reload re-arm the watcher that
+/// triggered it, looping at roughly three reloads a second until the process
+/// was restarted (#193).
+///
+/// So: accept the kinds a writer produces, and ignore `Access(Open)`. A read
+/// emits only `Open` under notify's mask (`ATTRIB | CREATE | OPEN | DELETE |
+/// CLOSE_WRITE | MODIFY | MOVED_FROM | MOVED_TO`), so this breaks the cycle
+/// while still catching every real save — including editors that write a temp
+/// file and rename over the original, which show up as `Create`/`Modify(Name)`.
+///
+/// `Access(Close(Write))` is kept deliberately: only something that opened the
+/// file *for writing* can emit it, so it signals a finished save, not a read.
+/// `Any`/`Other` are kept because a backend that can't classify an event
+/// shouldn't silently disable hot reload.
+pub(crate) fn changes_contents(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode};
+    match kind {
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        // macOS's FSEvents reports coarse events that often land here; treating
+        // them as interesting keeps hot reload working there.
+        EventKind::Any | EventKind::Other => true,
+    }
 }
 
 #[cfg(unix)]
@@ -146,6 +179,8 @@ fn warn_restart_only(old: &Settings, new: &Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
 
     fn write(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
@@ -193,5 +228,54 @@ mod tests {
         a.network.port = 2222;
         b.network.port = 2323;
         assert_ne!(a.network, b.network);
+    }
+
+    /// **The regression guard for #193.** Reloading reads the config file, and
+    /// notify's inotify backend reports opens — so treating an open as a change
+    /// made the reload re-trigger itself, looping ~3×/second until restart.
+    ///
+    /// Asserted on the constructed event rather than end-to-end because the
+    /// loop only reproduces on Linux: macOS uses FSEvents, which never reports
+    /// opens, so a behavioural test would pass vacuously on developer machines
+    /// and in CI on macOS runners.
+    #[test]
+    fn reading_the_file_is_not_a_change() {
+        assert!(
+            !changes_contents(&EventKind::Access(AccessKind::Open(AccessMode::Any))),
+            "an open must not trigger a reload — the reload's own read emits one"
+        );
+        assert!(!changes_contents(&EventKind::Access(AccessKind::Read)));
+        assert!(!changes_contents(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!changes_contents(&EventKind::Access(AccessKind::Any)));
+    }
+
+    /// Every way an editor actually saves must still reload, or the fix trades
+    /// one bug for a worse one.
+    #[test]
+    fn real_saves_still_reload() {
+        assert!(changes_contents(&EventKind::Modify(ModifyKind::Any)));
+        assert!(changes_contents(&EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Content
+        ))));
+        // write-temp-then-rename, as vim and sed -i do
+        assert!(changes_contents(&EventKind::Create(CreateKind::File)));
+        assert!(changes_contents(&EventKind::Modify(ModifyKind::Name(
+            RenameMode::To
+        ))));
+        // a finished write — only a writer can emit this, never a read
+        assert!(changes_contents(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(changes_contents(&EventKind::Remove(RemoveKind::File)));
+    }
+
+    /// A backend that can't classify an event shouldn't silently disable hot
+    /// reload — FSEvents in particular reports coarse events.
+    #[test]
+    fn unclassified_events_still_reload() {
+        assert!(changes_contents(&EventKind::Any));
+        assert!(changes_contents(&EventKind::Other));
     }
 }
