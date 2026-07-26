@@ -6,13 +6,17 @@
 //! from russh's async send. Pattern follows russh's `ratatui_app` example.
 
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+
+use crate::transport::backend::RemoteBackend;
 use russh::ChannelId;
 use russh::server::Handle;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 /// A ratatui terminal whose backend writes to an SSH channel.
-pub type SshTerminal = Terminal<CrosstermBackend<TerminalHandle>>;
+///
+/// [`RemoteBackend`] rather than a bare `CrosstermBackend` so `size()` reports
+/// the *client's* terminal — see its docs and #198.
+pub type SshTerminal = Terminal<RemoteBackend<TerminalHandle>>;
 
 pub struct TerminalHandle {
     sender: UnboundedSender<Vec<u8>>,

@@ -10,7 +10,6 @@ pub mod ui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::text::Text;
 use sqlx::sqlite::SqlitePool;
@@ -4314,7 +4313,7 @@ fn truncate_status(s: &str) -> String {
 /// bridge a door program's output while the TUI is suspended.
 pub async fn run<W: std::io::Write>(
     mut app: App,
-    mut terminal: Terminal<CrosstermBackend<W>>,
+    mut terminal: Terminal<crate::transport::backend::RemoteBackend<W>>,
     mut events: Receiver<Event>,
     raw_out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) -> anyhow::Result<()> {
@@ -4337,9 +4336,13 @@ pub async fn run<W: std::io::Write>(
         match event {
             Event::Key(key) => app.handle_key(key).await,
             Event::Resize(w, h) => {
-                // Best-effort: ratatui's `resize` may fail when the backend has
-                // no controlling tty to query, but it still updates the buffers
-                // and viewport, so drawing continues correctly.
+                // Tell the backend first: `resize` clears the screen before the
+                // next frame and asks the backend for its size to do it. It
+                // used to ask crossterm, which answers for the *server's*
+                // terminal — wrong remotely, and an outright error with no tty,
+                // which silently skipped the clear and left the previous frame
+                // ghosting on the client (#198).
+                terminal.backend_mut().set_size(w, h);
                 let _ = terminal.resize(Rect::new(0, 0, w, h));
             }
             Event::Quit => app.should_quit = true,

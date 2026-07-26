@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::transport::backend::RemoteBackend;
 use anyhow::Context;
 use arc_swap::ArcSwap;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use russh::keys::ssh_key::PublicKey;
@@ -168,8 +168,10 @@ impl Handler for SessionHandler {
         let id = channel.id();
         let handle = TerminalHandle::start(session.handle(), id).await;
         self.raw_out = Some(handle.raw_sender());
-        let backend = CrosstermBackend::new(handle);
-        // Correct size is applied on the pty request.
+        // Seed the backend with the configured default; the real size arrives
+        // with the pty request a moment later and calls `set_size` (#198).
+        let cfg = &self.config.network;
+        let backend = RemoteBackend::new(handle, cfg.default_cols, cfg.default_rows);
         let options = TerminalOptions {
             viewport: Viewport::Fixed(Rect::default()),
         };
@@ -309,6 +311,10 @@ impl Handler for SessionHandler {
 /// before that call, so a failure is harmless for our full-redraw Fixed
 /// viewport: we log it and carry on.
 fn resize_terminal(terminal: &mut SshTerminal, w: u16, h: u16) {
+    // Order matters: `Terminal::resize` clears the screen before the next
+    // frame, and asks the backend how big it is to do so. Tell the backend
+    // first or the clear is skipped and the old frame ghosts through (#198).
+    terminal.backend_mut().set_size(w, h);
     if let Err(e) = terminal.resize(Rect::new(0, 0, w, h)) {
         tracing::debug!("terminal resize was non-fatal: {e}");
     }
