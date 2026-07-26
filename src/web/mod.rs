@@ -287,15 +287,49 @@ async fn index(State(state): State<WebState>) -> Html<String> {
     // The tab title is the board's name — every board shared "bbs-rs" before.
     // Escaped like any other substitution.
     let title = crate::template::render_html("{{bbs_name}}", &ctx);
+    let theme = theme_css(&config.theme);
     let header = chrome(&config.web.header_file, &ctx, "header");
     let footer = chrome(&config.web.footer_file, &ctx, "footer");
 
     Html(
         INDEX_HTML
+            .replace("__BBS_THEME__", &theme)
             .replace("__BBS_TITLE__", &title)
             .replace("<!--__BBS_HEADER__-->", &header)
             .replace("<!--__BBS_FOOTER__-->", &footer),
     )
+}
+
+/// The operator's `[theme]` as CSS custom properties, so the page chrome
+/// matches the board rather than shipping fixed colours (#203).
+///
+/// Only overrides roles the theme can actually express: `Color::Reset` means
+/// "the terminal's default", which has no hex, so those roles keep the built-in
+/// values declared in the stylesheet. Scoped to the *chrome* — the login card,
+/// the header/footer bars, links. The terminal itself stays black, which is
+/// what the TUI assumes: it sets a background on only the title bar and warning
+/// line, and every preset is designed against dark.
+fn theme_css(cfg: &crate::config::ThemeConfig) -> String {
+    use crate::app::theme::{Theme, css_color};
+    let t = Theme::resolve(cfg);
+    let mut rules = String::new();
+    for (var, color) in [
+        ("--bbs-accent", t.title_bg),
+        ("--bbs-accent-text", t.accent),
+        ("--bbs-dim", t.dim),
+        ("--bbs-title-fg", t.title_fg),
+        ("--bbs-title-bg", t.title_bg),
+        ("--bbs-warn-fg", t.warning_fg),
+        ("--bbs-warn-bg", t.warning_bg),
+    ] {
+        if let Some(hex) = css_color(color) {
+            rules.push_str(&format!("    {var}: {hex};\n"));
+        }
+    }
+    if rules.is_empty() {
+        return String::new();
+    }
+    format!("  :root {{\n{rules}  }}")
 }
 
 /// Read and render one chrome fragment. A blank path means "none"; an

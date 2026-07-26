@@ -197,3 +197,74 @@ async fn editing_the_file_takes_effect_on_the_next_load() {
     assert!(body.contains("<b>after</b>"), "{body}");
     assert!(!body.contains("<b>before</b>"), "the old content is gone");
 }
+
+/// The page chrome follows `[theme]` (#203) — an operator who picked amber
+/// shouldn't get a teal login button.
+mod theming {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_classic_preset_drives_the_custom_properties() {
+        let pool = setup().await;
+        let base = serve(pool, Settings::default()).await;
+        let body = page(&base).await;
+
+        // classic: title_bg = Cyan, title_fg = Black, warning_bg = Yellow.
+        // Mapped through xterm.js's palette so the chrome and the terminal
+        // content agree about what "cyan" is on the same screen.
+        assert!(body.contains("--bbs-accent: #11a8cd;"), "{body}");
+        assert!(body.contains("--bbs-title-fg: #000000;"), "{body}");
+        assert!(body.contains("--bbs-warn-bg: #e5e510;"), "{body}");
+        // The hardcoded colours are gone from the rules that now vary.
+        assert!(!body.contains("background: #1e5f74"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_preset_changes_the_chrome() {
+        let pool = setup().await;
+        let mut cfg = Settings::default();
+        cfg.theme.preset = Some("amber".into());
+        let base = serve(pool, cfg).await;
+        let body = page(&base).await;
+
+        // amber's title_bg is Rgb(255, 176, 0) — an operator hex passes through
+        // untouched rather than being snapped to a palette entry.
+        assert!(body.contains("--bbs-accent: #ffb000;"), "{body}");
+        assert!(
+            !body.contains("--bbs-accent: #11a8cd;"),
+            "classic's cyan must not survive: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_per_color_override_wins() {
+        let pool = setup().await;
+        let mut cfg = Settings::default();
+        cfg.theme.accent = Some("#ff00ff".into());
+        let base = serve(pool, cfg).await;
+
+        assert!(
+            page(&base).await.contains("--bbs-accent-text: #ff00ff;"),
+            "an explicit override reaches the page"
+        );
+    }
+
+    /// `Color::Reset` has no hex — it means "the terminal's default" — so that
+    /// role must keep the stylesheet's built-in rather than emitting garbage.
+    #[tokio::test]
+    async fn an_unexpressible_color_leaves_the_builtin_alone() {
+        let pool = setup().await;
+        let mut cfg = Settings::default();
+        cfg.theme.dim = Some("reset".into());
+        let base = serve(pool, cfg).await;
+        let body = page(&base).await;
+
+        // Exactly one --bbs-dim declaration: the default in the base :root.
+        assert_eq!(
+            body.matches("--bbs-dim:").count(),
+            1,
+            "no override emitted for a colour with no hex: {body}"
+        );
+        assert!(body.contains("--bbs-dim: #777;"), "the built-in stands");
+    }
+}
