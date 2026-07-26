@@ -49,7 +49,9 @@ A bare-bones **bulletin board system (BBS) served over SSH**, written in Rust wi
 - **Stats** — board totals, a top-posters leaderboard, and a recent-callers list.
 - **finger service** (RFC 1288, opt-in) — a read-only TCP daemon: `finger @host` lists who's online,
   `finger user@host` shows a user's public profile. No auth, no writes; a user can hide themselves with
-  `f` on their profile. Off by default (`[finger] enabled`).
+  `f` on their profile — a control that only appears while the service is enabled, so it never offers a
+  privacy switch that isn't wired to anything. An existing opt-out is remembered either way. Off by
+  default (`[finger] enabled`).
 - **Door games** — launch operator-configured external programs on a pseudo-terminal (full-screen ANSI,
   `isatty`), with the user's info in the environment + an optional classic drop file, and a time limit.
 - **Full-text search** — keyword search across board messages (SQLite FTS5), scoped to boards you can read;

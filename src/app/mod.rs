@@ -3099,6 +3099,20 @@ impl App {
         self.viewing_own_profile() && !self.user.is_guest()
     }
 
+    /// Whether the profile screen offers the finger show/hide control (#186).
+    ///
+    /// Gated on `[finger] enabled` because it is a *privacy* control: offering
+    /// it while nothing answers finger queries implies "listed" means
+    /// discoverable when it isn't, and "hidden" implies a protection the user
+    /// already had for free. A switch wired to nothing is worse than no switch.
+    ///
+    /// This reads the session's config snapshot, like every other feature gate.
+    /// The finger listener is bound at startup anyway (#184), so following the
+    /// live config would only make the control reappear while still inert.
+    pub fn can_toggle_finger(&self) -> bool {
+        self.config.finger.enabled && self.viewing_own_profile() && !self.user.is_guest()
+    }
+
     /// Whether the profile screen offers "change password" (#76). Excluded for
     /// the shared `guest` account, whose password belongs to the operator and
     /// is set from `[seed] guest_password`.
@@ -3127,9 +3141,7 @@ impl App {
             KeyCode::Char('i') if self.viewing_own_profile() && !self.user.is_guest() => {
                 self.open_ignore_list().await
             }
-            KeyCode::Char('f') if self.viewing_own_profile() && !self.user.is_guest() => {
-                self.toggle_finger_optout().await
-            }
+            KeyCode::Char('f') if self.can_toggle_finger() => self.toggle_finger_optout().await,
             KeyCode::Char('p') if self.can_change_password() => self.begin_change_password(),
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.screen = self.profile_back,
             _ => {}
